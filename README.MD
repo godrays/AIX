@@ -1,6 +1,6 @@
 # AIX (C++)
 
-AIX is a single-header C++ machine learning framework inspired by PyTorch, designed by Arkin Terli for research and AI/ML model development.
+<a href="https://github.com/godrays/AIX">AIX</a> is a single-header C++ machine learning framework inspired by PyTorch, designed by Arkin Terli for research and AI/ML model development.
 
 ### Overview
 
