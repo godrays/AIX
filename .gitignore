@@ -14,11 +14,6 @@
 cmake-build*
 build
 build-*
-installed
-
-# External Files
-Externals/*
-!Externals/*.sh
 
 #CLion
 .idea

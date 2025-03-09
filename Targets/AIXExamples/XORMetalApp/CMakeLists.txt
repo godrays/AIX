@@ -10,7 +10,7 @@
 set(TARGET_NAME XORMetalApp)
 
 add_executable(${TARGET_NAME}
-        main.cpp
+        Main.cpp
 )
 
 target_link_libraries(${TARGET_NAME} PRIVATE

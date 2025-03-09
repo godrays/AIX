@@ -10,11 +10,13 @@
 set(TARGET_NAME AIXBenchmarks)
 
 add_executable(${TARGET_NAME}
-        main.cpp
+        Main.cpp
         Device.cpp
         Model.cpp
         Tensor.cpp
 )
+
+add_dependencies(${TARGET_NAME} docopt_cpp yaml_cpp)
 
 target_link_libraries(${TARGET_NAME} PRIVATE
         AIXLib

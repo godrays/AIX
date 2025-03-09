@@ -10,7 +10,7 @@
 set(TARGET_NAME XORApp)
 
 add_executable(${TARGET_NAME}
-        main.cpp
+        Main.cpp
 )
 
 install(TARGETS ${TARGET_NAME}

@@ -10,7 +10,7 @@
 set(TARGET_NAME AIXTests)
 
 add_executable(${TARGET_NAME}
-        main.cpp
+        Main.cpp
         ActivationTests.cpp
         AutoGradTests.cpp
         DeviceTests.cpp
@@ -21,6 +21,8 @@ add_executable(${TARGET_NAME}
         TensorTests.cpp
         TensorValueTests.cpp
 )
+
+add_dependencies(${TARGET_NAME} AIXLib doctest_cpp)
 
 target_link_libraries(${TARGET_NAME} PRIVATE
         AIXLib

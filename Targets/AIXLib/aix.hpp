@@ -13,10 +13,12 @@
 #include "aixFloat16.hpp"
 // External includes
 // System includes
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iostream>
 #include <numbers>
@@ -126,9 +128,9 @@ struct DeviceTensorParams
     DataType dtype{aix::DataType::kFloat32};
     bool     isContiguous{true};
     size_t   offset{0};         // Start offset of data on storage.
-    Shape    shape;             // The shape of the tensor.
+    Shape    shape{};           // The shape of the tensor.
     size_t   size{0};           // Number of elements in DataType.
-    Stride   strides;           // The strides for indexing the tensor.
+    Stride   strides{};         // The strides for indexing the tensor.
 };
 
 class Device
@@ -4316,7 +4318,7 @@ public:
     // Forward
     Tensor forward(Tensor x) const override
     {
-        return 0.5 * x * (1.0 + tanh(std::sqrtf(2.0 / std::numbers::pi) * (x + 0.044715 * x.pow(3))));
+        return 0.5 * x * (1.0 + tanh(std::sqrt(2.0 / std::numbers::pi) * (x + 0.044715 * x.pow(3))));
     }
 };
 

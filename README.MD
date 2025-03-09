@@ -222,30 +222,25 @@ NOTE: Run the benchmark without any parameters to display all the command-line o
 
 Follow the following steps to build the project and make it deployment ready.
 
-Currently, it has been built and tested on macOS Sonoma with no issues.
+Currently, it has been built on macOS Sonoma and Windows 10 with no issues, but tested only on macOS. Supports only clang and gcc compilers.
 
 ---
 
-### Step 1: Build Externals
-
-This step will build external libraries.
+This step will build all binaries and deploy them into a specific folder, assuming you are in the project's root folder.
 
 ```bash
-cd Externals
-./build_all.sh
-```
-
-### Step 2: Build Targets
-
-This step will build all binaries and deploy into a specific folder. Assuming you are in the root folder of the project.
-
-```bash
-./build.sh release product-rel
+$ python build.py build release build-rel product-rel
 ```
 
 After the successful build, all target binaries will be deployed into the product-rel folder.
 
-Note: Run the build.sh file without parameters to see all options.
+You may need to build the project with a specific compiler and make program options.
+
+```bash
+$ python build.py build release build-rel product-rel -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_MAKE_PROGRAM=ninja -G Ninja
+```
+
+Note: Run the build.py file without parameters to see all options.
 
 ### Build Options
 
@@ -255,7 +250,9 @@ Use the following CMake build options to turn ON or OFF in production:
 - AIX_BUILD_EXAMPLES
 - AIX_BUILD_TESTS
 
-All options are OFF by default. build.sh enables tests and examples for development purposes only.
+All options are OFF by default. 
+
+Note: If you build AIX using build.py, tests and examples are enabled for development purposes only.
 
 # Citation
 

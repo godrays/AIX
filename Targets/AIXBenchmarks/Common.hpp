@@ -53,7 +53,7 @@ std::unique_ptr<BenchmarkBase> create##className()      \
 {                                                       \
     auto benchmark = std::make_unique<className>();     \
     benchmark->name(benchName);                         \
-    return std::move(benchmark);                        \
+    return benchmark;                                   \
 }
 
 static std::vector<std::function<std::unique_ptr<BenchmarkBase>()>> registeredBenchmarksList;

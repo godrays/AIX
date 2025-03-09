@@ -7,8 +7,12 @@
 //  trade secret or copyright law. Dissemination of this information or reproduction of this
 //  material is strictly forbidden unless prior written permission is obtained from Arkin Terli.
 
+#if WIN32
+    #define YAML_CPP_STATIC_DEFINE
+#endif
+
 // Project includes
-#include "common.hpp"
+#include "Common.hpp"
 // External includes
 #include <docopt/docopt.h>
 #include <yaml-cpp/yaml.h>

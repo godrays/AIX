@@ -13,6 +13,9 @@
 // External includes
 // System includes
 #include <iostream>
+#include <cstdint>
+#include <cstring>
+#include <bit>
 
 
 // NOTE: C++23 will introduce float16_t and bfloat16_t as new types. The following classes are intended to be used
@@ -181,16 +184,16 @@ private:
         // Check for special cases, negative infinity.
         if (float16 == 0xFC00)
         {
-            uint32_t float32Bits = 0xFF800000;
-            return *reinterpret_cast<float*>(&float32Bits);
+            constexpr uint32_t float32Bits = 0xFF800000;
+            return std::bit_cast<float>(float32Bits);
         }
-        uint32_t float32Bits = m_mantissaTable[m_offsetTable[float16 >> 10] + (float16 & 0x3FF)] + m_exponentTable[float16 >> 10];
-        return *reinterpret_cast<float *>(&float32Bits);
+        const uint32_t float32Bits = m_mantissaTable[m_offsetTable[float16 >> 10] + (float16 & 0x3FF)] + m_exponentTable[float16 >> 10];
+        return std::bit_cast<float>(float32Bits);
     }
 
     static uint16_t f32Tof16(float float32)
     {
-        uint32_t float32Bits = *reinterpret_cast<uint32_t*>(&float32);
+        const auto float32Bits = std::bit_cast<uint32_t>(float32);
         // Check for special cases, negative infinity.
         if (float32Bits == 0xFF800000) return 0xFC00;
         return m_baseTable[(float32Bits >> 23) & 0x1FF] + ((float32Bits & 0x007FFFFF) >> m_shiftTable[(float32Bits >> 23) & 0x1FF]);

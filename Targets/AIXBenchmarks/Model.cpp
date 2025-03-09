@@ -8,7 +8,7 @@
 //  material is strictly forbidden unless prior written permission is obtained from Arkin Terli.
 
 // Project includes
-#include "common.hpp"
+#include "Common.hpp"
 // External includes
 // System includes
 

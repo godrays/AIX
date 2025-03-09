@@ -30,12 +30,7 @@ add_library(AIXLib ${AIX_LIB_TYPE} ${SOURCE_FILES})
 
 # Add metal device support for Apple Silicon
 if (APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
-    # External library versions
-    set(METAL_CPP_VERSION 14.2)
-
-    # Include folders
-    include_directories(${CMAKE_SOURCE_DIR}/Externals/metal-cpp/${METAL_CPP_VERSION})
-
+    add_dependencies(${TARGET_NAME} metal_cpp)
     target_link_libraries(${TARGET_NAME} PRIVATE
             "-framework Foundation"
             "-framework Metal"
