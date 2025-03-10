@@ -15,7 +15,7 @@ include(ExternalProject)
 
 # Builds and installs external git projects.
 function(add_external_git_project lib_name git_repository git_tag cmake_project_args external_bin_dir build_type)
-    message(STATUS "Building External Project: ${lib_name}")
+    message(STATUS "Configuring External Project: ${lib_name}")
     ExternalProject_Add(
             ${lib_name}
             GIT_REPOSITORY ${git_repository}
@@ -31,15 +31,15 @@ function(add_external_git_project lib_name git_repository git_tag cmake_project_
             -DCMAKE_BUILD_TYPE=${build_type}
             -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
             ${cmake_project_args}       # Project Build Options
-            BUILD_ALWAYS YES
-            LOG_CONFIGURE OFF
-            LOG_BUILD OFF
-            LOG_INSTALL OFF
-            LOG_UPDATE OFF
-            LOG_PATCH OFF
-            LOG_TEST OFF
-            LOG_MERGED_STDOUTERR OFF
+            LOG_CONFIGURE ON
+            LOG_BUILD ON
+            LOG_INSTALL ON
+            LOG_UPDATE ON
+            LOG_PATCH ON
+            LOG_TEST ON
+            LOG_MERGED_STDOUTERR ON
             LOG_OUTPUT_ON_FAILURE ON
+            BUILD_ALWAYS YES
     )
     set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${external_bin_dir}/${lib_name}")
     include_directories(${external_bin_dir}/${lib_name}/install/include)
@@ -48,7 +48,7 @@ endfunction()
 
 # Installs header/source only project.
 function(add_external_header_only_project lib_name url external_bin_dir)
-    message(STATUS "Building External Project: ${lib_name}")
+    message(STATUS "Configuring External Project: ${lib_name}")
     ExternalProject_Add(
             ${lib_name}
             URL            ${url}
@@ -58,14 +58,15 @@ function(add_external_header_only_project lib_name url external_bin_dir)
             CONFIGURE_COMMAND   ""
             BUILD_COMMAND       ""
             INSTALL_COMMAND     ""
-            LOG_CONFIGURE OFF
-            LOG_BUILD OFF
-            LOG_INSTALL OFF
-            LOG_UPDATE OFF
-            LOG_PATCH OFF
-            LOG_TEST OFF
-            LOG_MERGED_STDOUTERR OFF
+            LOG_CONFIGURE ON
+            LOG_BUILD ON
+            LOG_INSTALL ON
+            LOG_UPDATE ON
+            LOG_PATCH ON
+            LOG_TEST ON
+            LOG_MERGED_STDOUTERR ON
             LOG_OUTPUT_ON_FAILURE ON
+            DOWNLOAD_NO_PROGRESS ON
     )
     set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${external_bin_dir}/${lib_name}")
     include_directories(${external_bin_dir}/${lib_name}/src)
