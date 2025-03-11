@@ -19,7 +19,14 @@ option(AIX_BUILD_STATIC   "Build static AIX library"       OFF)
 
 set(CMAKE_CONFIGURATION_TYPES "Debug;Release;Prof;CCov;ASan;TSan" CACHE STRING "" FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(CMAKE_INSTALL_RPATH .)
+set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
+
+# Set RPATH to look in the loader directory first to load libraries.
+if(APPLE)
+    set(CMAKE_INSTALL_RPATH "@loader_path")
+elseif (UNIX)
+    set(CMAKE_INSTALL_RPATH "$ORIGIN")
+endif()
 
 # Set default build type as Release.
 if(NOT CMAKE_BUILD_TYPE)
