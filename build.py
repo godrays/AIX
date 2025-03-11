@@ -7,6 +7,7 @@
 #  trade secret or copyright law. Dissemination of this information or reproduction of this
 #  material is strictly forbidden unless prior written permission is obtained from Arkin Terli.
 
+import os
 import sys
 import subprocess
 
@@ -59,7 +60,7 @@ def build():
     ]
     cmakeCmd.extend(buildOptions)
     runShellCmd(" ".join(cmakeCmd))
-    runShellCmd(f"cmake --build {buildDir} --target install")
+    runShellCmd(f"cmake --build {buildDir} --parallel {os.cpu_count()} --target install")
 
 def clean():
     # Check if there are at least three parameters.
