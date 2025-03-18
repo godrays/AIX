@@ -14,23 +14,29 @@ include(ExternalProject)
 # ---------------------------------------------------------------------------------
 
 # Builds and installs external git projects.
-function(add_external_git_project lib_name git_repository git_tag cmake_project_args external_bin_dir build_type)
-    message(STATUS "Configuring External Project: ${lib_name}")
+function(add_external_git_project)
+    set(options)
+    set(oneValueArgs NAME GIT_REPOSITORY GIT_TAG EXTERNALS_BIN_DIR BUILD_TYPE)
+    set(multiValueArgs CMAKE_ARGS)
+    cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    message(STATUS "Configuring External Project: ${ARG_NAME}")
+    set(lib_dir "${ARG_EXTERNALS_BIN_DIR}/${ARG_NAME}")
+
     ExternalProject_Add(
-            ${lib_name}
-            GIT_REPOSITORY ${git_repository}
-            GIT_TAG        ${git_tag}
-            PREFIX        "${external_bin_dir}/${lib_name}/prefix"
-            SOURCE_DIR    "${external_bin_dir}/${lib_name}/src"
-            STAMP_DIR     "${external_bin_dir}/${lib_name}/stamp"
-            BINARY_DIR    "${external_bin_dir}/${lib_name}/build"
-            INSTALL_DIR   "${external_bin_dir}/${lib_name}/install"
-            DOWNLOAD_DIR  "${external_bin_dir}/${lib_name}/download"
-            LOG_DIR       "${external_bin_dir}/${lib_name}/log"
-            CMAKE_ARGS
-            -DCMAKE_BUILD_TYPE=${build_type}
-            -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
-            ${cmake_project_args}       # Project Build Options
+            ${ARG_NAME}
+            GIT_REPOSITORY  ${ARG_GIT_REPOSITORY}
+            GIT_TAG         ${ARG_GIT_TAG}
+            PREFIX          "${lib_dir}/prefix"
+            SOURCE_DIR      "${lib_dir}/src"
+            STAMP_DIR       "${lib_dir}/stamp"
+            BINARY_DIR      "${lib_dir}/build"
+            INSTALL_DIR     "${lib_dir}/install"
+            DOWNLOAD_DIR    "${lib_dir}/download"
+            LOG_DIR         "${lib_dir}/log"
+            CMAKE_ARGS      -DCMAKE_BUILD_TYPE=${ARG_BUILD_TYPE}
+                            -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
+                            ${ARG_CMAKE_ARGS}
             LOG_CONFIGURE ON
             LOG_BUILD ON
             LOG_INSTALL ON
@@ -44,20 +50,30 @@ function(add_external_git_project lib_name git_repository git_tag cmake_project_
             GIT_SHALLOW  ON
             BUILD_ALWAYS ON
     )
-    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${external_bin_dir}/${lib_name}")
-    include_directories(${external_bin_dir}/${lib_name}/install/include)
-    link_directories(${external_bin_dir}/${lib_name}/install/lib)
+
+    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${lib_dir}")
+
+    include_directories(${lib_dir}/install/include)
+    link_directories(${lib_dir}/install/lib)
 endfunction()
 
+
 # Installs header/source only project.
-function(add_external_header_only_project lib_name url external_bin_dir)
-    message(STATUS "Configuring External Project: ${lib_name}")
+function(add_external_header_only_project)
+    set(options)
+    set(oneValueArgs NAME URL EXTERNALS_BIN_DIR)
+    set(multiValueArgs)
+    cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+
+    message(STATUS "Configuring External Project: ${ARG_NAME}")
+    set(lib_dir "${ARG_EXTERNALS_BIN_DIR}/${ARG_NAME}")
+
     ExternalProject_Add(
-            ${lib_name}
-            URL            ${url}
-            PREFIX        "${external_bin_dir}/${lib_name}/prefix"
-            SOURCE_DIR    "${external_bin_dir}/${lib_name}/src"
-            LOG_DIR       "${external_bin_dir}/${lib_name}/log"
+            ${ARG_NAME}
+            URL            ${ARG_URL}
+            PREFIX         "${lib_dir}/prefix"
+            SOURCE_DIR     "${lib_dir}/src"
+            LOG_DIR        "${lib_dir}/log"
             CONFIGURE_COMMAND   ""
             BUILD_COMMAND       ""
             INSTALL_COMMAND     ""
@@ -71,13 +87,18 @@ function(add_external_header_only_project lib_name url external_bin_dir)
             LOG_OUTPUT_ON_FAILURE ON
             DOWNLOAD_NO_PROGRESS ON
     )
-    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${external_bin_dir}/${lib_name}")
-    include_directories(${external_bin_dir}/${lib_name}/src)
+
+    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${lib_dir}")
+
+    include_directories(${lib_dir}/src)
 endfunction()
 
 # ---------------------------------------------------------------------------------
 # COMMON SETTINGS
 # ---------------------------------------------------------------------------------
+
+# Externals build and install folder.
+set(EXTERNALS_BINARY_DIR "${CMAKE_BINARY_DIR}/Externals")
 
 # Common cmake project settings for the external projects.
 set(EXTERNAL_COMMON_CMAKE_ARGS
@@ -89,55 +110,42 @@ set(EXTERNAL_COMMON_CMAKE_ARGS
         -DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}
 )
 
-# Externals build and install folder.
-set(EXTERNALS_BINARY_DIR "${CMAKE_BINARY_DIR}/Externals")
-
 # ---------------------------------------------------------------------------------
 # DOCOPT CPP
 # ---------------------------------------------------------------------------------
-set(EXTERNAL_DOCOPT_CMAKE_ARGS
-        ${EXTERNAL_COMMON_CMAKE_ARGS}
-        # Project specific cmake args
-        -DBUILD_SHARED_LIBS=OFF
-)
-
 add_external_git_project(
-        "docopt_cpp"
-        "https://github.com/docopt/docopt.cpp.git"
-        "${EXTERNAL_DOCOPT_VERSION}"
-        "${EXTERNAL_DOCOPT_CMAKE_ARGS}"
-        "${EXTERNALS_BINARY_DIR}"
-        "Release"
+        NAME                docopt_cpp
+        GIT_REPOSITORY      https://github.com/docopt/docopt.cpp.git
+        GIT_TAG             ${EXTERNAL_DOCOPT_VERSION}
+        CMAKE_ARGS          ${EXTERNAL_COMMON_CMAKE_ARGS}
+                            -DBUILD_SHARED_LIBS=OFF
+        EXTERNALS_BIN_DIR   ${EXTERNALS_BINARY_DIR}
+        BUILD_TYPE          Release
 )
 
 # ---------------------------------------------------------------------------------
 # DOCTEST CPP
 # ---------------------------------------------------------------------------------
-set(EXTERNAL_DOCTEST_CMAKE_ARGS
-        ${EXTERNAL_COMMON_CMAKE_ARGS}
-        # Project specific cmake args
-        -DDOCTEST_WITH_TESTS=OFF
-)
-
 add_external_git_project(
-        "doctest_cpp"
-        "https://github.com/doctest/doctest.git"
-        "${EXTERNAL_DOCTEST_VERSION}"
-        "${EXTERNAL_DOCTEST_CMAKE_ARGS}"
-        "${EXTERNALS_BINARY_DIR}"
-        "Release"
+        NAME                doctest_cpp
+        GIT_REPOSITORY      https://github.com/doctest/doctest.git
+        GIT_TAG             ${EXTERNAL_DOCTEST_VERSION}
+        CMAKE_ARGS          ${EXTERNAL_COMMON_CMAKE_ARGS}
+                            -DDOCTEST_WITH_TESTS=OFF
+        EXTERNALS_BIN_DIR   ${EXTERNALS_BINARY_DIR}
+        BUILD_TYPE          Release
 )
 
 # ---------------------------------------------------------------------------------
 # YAML CPP
 # ---------------------------------------------------------------------------------
 add_external_git_project(
-        "yaml_cpp"
-        "https://github.com/jbeder/yaml-cpp.git"
-        "${EXTERNAL_YAML_VERSION}"
-        "${EXTERNAL_COMMON_CMAKE_ARGS}"
-        "${EXTERNALS_BINARY_DIR}"
-        "Release"
+        NAME                yaml_cpp
+        GIT_REPOSITORY      https://github.com/jbeder/yaml-cpp.git
+        GIT_TAG             ${EXTERNAL_YAML_VERSION}
+        CMAKE_ARGS          ${EXTERNAL_COMMON_CMAKE_ARGS}
+        EXTERNALS_BIN_DIR   ${EXTERNALS_BINARY_DIR}
+        BUILD_TYPE          Release
 )
 
 # ---------------------------------------------------------------------------------
@@ -145,8 +153,8 @@ add_external_git_project(
 # ---------------------------------------------------------------------------------
 if (APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     add_external_header_only_project(
-            "metal_cpp"
-            "${EXTERNAL_METAL_CPP_URL}"
-            "${EXTERNALS_BINARY_DIR}"
+            NAME                metal_cpp
+            URL                 ${EXTERNAL_METAL_CPP_URL}
+            EXTERNALS_BIN_DIR   ${EXTERNALS_BINARY_DIR}
     )
 endif()
