@@ -16,17 +16,23 @@ include(ExternalProject)
 # Builds and installs external git projects.
 function(add_external_git_project)
     set(options)
-    set(oneValueArgs NAME GIT_REPOSITORY GIT_TAG EXTERNALS_BIN_DIR BUILD_TYPE)
+    set(oneValueArgs NAME GIT_REPOSITORY GIT_TAG GIT_SHALLOW EXTERNALS_BIN_DIR BUILD_TYPE)
     set(multiValueArgs CMAKE_ARGS)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     message(STATUS "Configuring External Project: ${ARG_NAME}")
     set(lib_dir "${ARG_EXTERNALS_BIN_DIR}/${ARG_NAME}")
 
+    # By default, GIT_SHALLOW is ON.
+    if ("${ARG_GIT_SHALLOW}" STREQUAL "")
+        set(ARG_GIT_SHALLOW ON)
+    endif()
+
     ExternalProject_Add(
             ${ARG_NAME}
             GIT_REPOSITORY  ${ARG_GIT_REPOSITORY}
             GIT_TAG         ${ARG_GIT_TAG}
+            GIT_SHALLOW     ${ARG_GIT_SHALLOW}
             PREFIX          "${lib_dir}/prefix"
             SOURCE_DIR      "${lib_dir}/src"
             STAMP_DIR       "${lib_dir}/stamp"
@@ -47,7 +53,6 @@ function(add_external_git_project)
             LOG_OUTPUT_ON_FAILURE ON
             GIT_SUBMODULES_RECURSE ON
             GIT_PROGRESS OFF
-            GIT_SHALLOW  ON
             BUILD_ALWAYS ON
     )
 
@@ -120,6 +125,7 @@ add_external_git_project(
         NAME                docopt_cpp
         GIT_REPOSITORY      https://github.com/docopt/docopt.cpp.git
         GIT_TAG             ${EXTERNAL_DOCOPT_VERSION}
+        GIT_SHALLOW         OFF
         CMAKE_ARGS          ${EXTERNAL_COMMON_CMAKE_ARGS}
                             -DBUILD_SHARED_LIBS=OFF
         EXTERNALS_BIN_DIR   ${EXTERNALS_BINARY_DIR}
