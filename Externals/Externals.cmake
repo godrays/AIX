@@ -53,6 +53,9 @@ function(add_external_git_project)
 
     set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${lib_dir}")
 
+    # Make include and lib folders available to prevent linker warnings.
+    file(MAKE_DIRECTORY "${lib_dir}/install/include" "${lib_dir}/install/lib")
+
     include_directories(${lib_dir}/install/include)
     link_directories(${lib_dir}/install/lib)
 endfunction()
