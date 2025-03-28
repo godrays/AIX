@@ -2821,6 +2821,7 @@ public:
         if (m_grad.size() == 0)
         {
             m_grad = TensorValue{m_value.shape(), m_value.device(), m_value.size(), m_value.strides(), m_value.dataType()};
+            m_grad.fill(0);
         }
         return m_grad;
     }
