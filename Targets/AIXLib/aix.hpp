@@ -2446,8 +2446,9 @@ public:
             throw std::invalid_argument("Split operation needs at least a 1-dim tensor.");
         }
 
-        dim = dim < 0 ? static_cast<ssize_t>(m_shape.size()) + dim : dim;
-        if (dim < 0)
+        const auto shapeSize = static_cast<ssize_t>(m_shape.size());
+        dim = dim < 0 ? shapeSize + dim : dim;
+        if (dim < 0 || dim >= shapeSize)
         {
             throw std::invalid_argument("Split dimension is out of range.");
         }
@@ -3666,8 +3667,9 @@ public:
             throw std::invalid_argument("Split operation needs at least a 1-dim tensor.");
         }
 
-        dim = dim < 0 ? static_cast<ssize_t>(shape().size()) + dim : dim;
-        if (dim < 0)
+        const auto shapeSize = static_cast<ssize_t>(shape().size());
+        dim = dim < 0 ? shapeSize + dim : dim;
+        if (dim < 0 || dim >= shapeSize)
         {
             throw std::invalid_argument("Split dimension is out of range.");
         }
