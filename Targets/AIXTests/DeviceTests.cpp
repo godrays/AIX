@@ -1279,6 +1279,7 @@ TEST_CASE("Device Tests - createDevice")
     for (const auto type : deviceTypes)
     {
         auto device = aix::createDevice(type);
+        if (!device) continue;
         CHECK(device->type() == type);
     }
 }
@@ -2332,40 +2333,44 @@ TEST_CASE("Device Tests - loop without sync")
     constexpr float kLearningRate  = 0.01f;
     constexpr float kLossThreshold = 1e-3f;
 
-    // Create a device that uses Apple Metal for GPU computations.
-    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
-
-    aix::nn::Sequential model;
-    model.add(new aix::nn::Linear(kNumInputs, 10));
-    model.add(new aix::nn::Tanh());
-    model.add(new aix::nn::Linear(10, kNumTargets));
-    model.to(device);
-
-    // Example inputs and targets for demonstration purposes.
-    auto inputs = aix::tensor({0.0, 0.0,
-                               0.0, 1.0,
-                               1.0, 0.0,
-                               1.0, 1.0}, {kNumSamples, kNumInputs}).to(device);
-
-    auto targets = aix::tensor({0.0,
-                                1.0,
-                                1.0,
-                                0.0}, {kNumSamples, kNumTargets}).to(device);
-
-    aix::optim::Adam optimizer(model.parameters(), kLearningRate);
-    auto lossFunc = aix::nn::MSELoss();
-
-    for (size_t epoch = 0; epoch < kNumEpochs; ++epoch)
+    for (auto deviceType : testDeviceTypes)
     {
-        auto predictions = model.forward(inputs);
-        auto loss = lossFunc(predictions, targets);
-        optimizer.zeroGrad();
-        loss.backward();
-        optimizer.step();
-        // IMPORTANT NOTE: We keep optimizing without synchronizing.
-    }
-    auto loss = lossFunc(model.forward(inputs), targets);
-    device->synchronize();
+        // Check if the devices is available.
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;      // Skip if the device is not available.
 
-    CHECK(loss.value().item<float>() <= kLossThreshold);
+        aix::nn::Sequential model;
+        model.add(new aix::nn::Linear(kNumInputs, 10));
+        model.add(new aix::nn::Tanh());
+        model.add(new aix::nn::Linear(10, kNumTargets));
+        model.to(device);
+
+        // Example inputs and targets for demonstration purposes.
+        auto inputs = aix::tensor({0.0, 0.0,
+                                   0.0, 1.0,
+                                   1.0, 0.0,
+                                   1.0, 1.0}, {kNumSamples, kNumInputs}).to(device);
+
+        auto targets = aix::tensor({0.0,
+                                    1.0,
+                                    1.0,
+                                    0.0}, {kNumSamples, kNumTargets}).to(device);
+
+        aix::optim::Adam optimizer(model.parameters(), kLearningRate);
+        auto lossFunc = aix::nn::MSELoss();
+
+        for (size_t epoch = 0; epoch < kNumEpochs; ++epoch)
+        {
+            auto predictions = model.forward(inputs);
+            auto loss = lossFunc(predictions, targets);
+            optimizer.zeroGrad();
+            loss.backward();
+            optimizer.step();
+            // IMPORTANT NOTE: We keep optimizing without synchronizing.
+        }
+        auto loss = lossFunc(model.forward(inputs), targets);
+        device->synchronize();
+
+        CHECK(loss.value().item<float>() <= kLossThreshold);
+    }
 }
