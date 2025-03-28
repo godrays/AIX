@@ -222,7 +222,7 @@ NOTE: Run the benchmark without any parameters to display all the command-line o
 
 Follow the following steps to build the project and make it deployment ready.
 
-Currently, it has been built on macOS Sonoma and Windows 10 with no issues, but tested only on macOS. Supports only clang and gcc compilers.
+Currently, it has been built on macOS Sonoma and Windows 10 with no issues.
 
 ---
 
