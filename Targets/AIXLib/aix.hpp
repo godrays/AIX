@@ -1475,7 +1475,7 @@ public:
     TensorValue(float value, Shape shape, Device * device, DataType dType = DataType::kFloat32) :
         m_dType(dType), m_shape(std::move(shape)), m_device(device)
     {
-        m_size = std::accumulate(m_shape.begin(), m_shape.end(), 1, std::multiplies<>());
+        m_size = std::accumulate(m_shape.begin(), m_shape.end(), static_cast<size_t>(1), std::multiplies<>());
         // Each tensor array must use device specific memory allocator.
         m_storage = std::make_shared<TensorStorage>(device, m_size, dType);
         m_strides = computeStrides();
@@ -1487,7 +1487,7 @@ public:
     TensorValue(Shape shape, Device * device, DataType dType = DataType::kFloat32) :
         m_dType(dType), m_shape(std::move(shape)), m_device(device)
     {
-        m_size = std::accumulate(m_shape.begin(), m_shape.end(), 1, std::multiplies<>());
+        m_size = std::accumulate(m_shape.begin(), m_shape.end(), static_cast<size_t>(1), std::multiplies<>());
         // Each tensor array must use device specific memory allocator.
         m_storage = std::make_shared<TensorStorage>(device, m_size, dType);
         m_strides = computeStrides();
@@ -1651,7 +1651,7 @@ public:
     // Returns a new TensorValue with a new shape.
     TensorValue reshape(const Shape & newShape) const
     {
-        size_t newSize = std::accumulate(newShape.begin(), newShape.end(), 1, std::multiplies<>());
+        size_t newSize = std::accumulate(newShape.begin(), newShape.end(), static_cast<size_t>(1), std::multiplies<>());
         if (m_size != newSize)
         {
             throw std::invalid_argument("Reshape error: element count mismatch (" +
@@ -2280,7 +2280,7 @@ public:
         auto newShape = m_shape;
         newShape[dim] = newSizeInDim;
 
-        auto newSize = std::accumulate(newShape.begin(), newShape.end(), 1, std::multiplies<>());
+        auto newSize = std::accumulate(newShape.begin(), newShape.end(), static_cast<size_t>(1), std::multiplies<>());
 
         TensorValue result(m_storage, newSize, newOffset, newShape, device(), dataType());
         result.m_strides = newStrides;
@@ -2618,7 +2618,7 @@ private:
     size_t getIndex(const Index & indices) const
     {
         assert(indices.size() == m_shape.size());
-        return m_offset + std::inner_product(indices.begin(), indices.end(), m_strides.begin(), 0);
+        return m_offset + std::inner_product(indices.begin(), indices.end(), m_strides.begin(), static_cast<size_t>(0));
     }
 
     // Promotes data types and applies broadcasting if necessary.
@@ -2660,7 +2660,7 @@ private:
 
     static void validateSize(const size_t size, const Shape& shape)
     {
-        if (size != static_cast<size_t>(std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<>())))
+        if (size != static_cast<size_t>(std::accumulate(shape.begin(), shape.end(), static_cast<size_t>(1), std::multiplies<>())))
         {
             throw std::invalid_argument("Data size does not match the tensor shape.");
         }
@@ -2953,7 +2953,7 @@ public:
     // Returns a new Tensor with a new shape.
     Tensor reshape(const Shape & newShape) const
     {
-        size_t newSize = std::accumulate(newShape.begin(), newShape.end(), 1, std::multiplies<>());
+        size_t newSize = std::accumulate(newShape.begin(), newShape.end(), static_cast<size_t>(1), std::multiplies<>());
         if (value().size() != newSize)
         {
             throw std::invalid_argument("Reshape error: element count mismatch (" +
@@ -3824,7 +3824,7 @@ protected:
         ssize_t inferredDimIndex = -1;
         size_t inferredDimCount  = 0;
         size_t invalidDimCount   = 0;
-        ssize_t inferredDimSize  = std::accumulate(currShape.begin(), currShape.end(), 1, std::multiplies<>());
+        ssize_t inferredDimSize  = std::accumulate(currShape.begin(), currShape.end(), static_cast<ssize_t>(1), std::multiplies<>());
 
         ssize_t i = 0;
         for (const auto dim : newShape)
@@ -3949,7 +3949,7 @@ static Tensor randn(const Shape & shape, const TensorOptions & opt = {})
 {
     std::uniform_real_distribution<float> distr(-1, 1);
 
-    size_t totalSize = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<>());
+    size_t totalSize = std::accumulate(shape.begin(), shape.end(), static_cast<size_t>(1), std::multiplies<>());
     std::vector<float> rndData(totalSize);
 
     // Fill rndData with random numbers
@@ -4123,8 +4123,8 @@ private:
     {
         for (const auto & [name, param] : m_parameters)
         {
-            m_m.emplace_back(0, param.shape(), param.value().device(), m_calculationDType);
-            m_v.emplace_back(0, param.shape(), param.value().device(), m_calculationDType);
+            m_m.emplace_back(0.0f, param.shape(), param.value().device(), m_calculationDType);
+            m_v.emplace_back(0.0f, param.shape(), param.value().device(), m_calculationDType);
         }
     }
 
