@@ -43,6 +43,7 @@ function(add_external_git_project)
             CMAKE_ARGS      -DCMAKE_BUILD_TYPE=${ARG_BUILD_TYPE}
                             -DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>
                             ${ARG_CMAKE_ARGS}
+            LOG_DOWNLOAD ON
             LOG_CONFIGURE ON
             LOG_BUILD ON
             LOG_INSTALL ON
@@ -84,6 +85,7 @@ function(add_external_header_only_project)
             CONFIGURE_COMMAND   ""
             BUILD_COMMAND       ""
             INSTALL_COMMAND     ""
+            LOG_DOWNLOAD ON
             LOG_CONFIGURE ON
             LOG_BUILD ON
             LOG_INSTALL ON
