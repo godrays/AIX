@@ -53,10 +53,9 @@ function(add_external_git_project)
             LOG_OUTPUT_ON_FAILURE ON
             GIT_SUBMODULES_RECURSE ON
             GIT_PROGRESS OFF
-            BUILD_ALWAYS ON
+            BUILD_ALWAYS OFF
+            UPDATE_COMMAND ""
     )
-
-    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${lib_dir}")
 
     # Make include and lib folders available to prevent linker warnings.
     file(MAKE_DIRECTORY "${lib_dir}/install/include" "${lib_dir}/install/lib")
@@ -96,8 +95,6 @@ function(add_external_header_only_project)
             DOWNLOAD_NO_PROGRESS ON
     )
 
-    set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES "${lib_dir}")
-
     include_directories(${lib_dir}/src)
 endfunction()
 
@@ -116,6 +113,15 @@ set(EXTERNAL_COMMON_CMAKE_ARGS
         -DCMAKE_POSITION_INDEPENDENT_CODE=${CMAKE_POSITION_INDEPENDENT_CODE}
         -DCMAKE_BUILD_WITH_INSTALL_RPATH=${CMAKE_BUILD_WITH_INSTALL_RPATH}
         -DCMAKE_INSTALL_RPATH=${CMAKE_INSTALL_RPATH}
+)
+
+# ---------------------------------------------------------------------------------
+# CLEAN EXTERNALS TARGET (Cleans only the external projects)
+# ---------------------------------------------------------------------------------
+
+add_custom_target(clean_externals
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${EXTERNALS_BINARY_DIR}
+        COMMENT "Cleaning external projects."
 )
 
 # ---------------------------------------------------------------------------------

@@ -15,7 +15,7 @@ def showHelp():
     print(f"""
     Usage:
         {sys.argv[0]} build <build_type> <build_dir> <install_dir> [<build_options>...]
-        {sys.argv[0]} clean <build_dir>
+        {sys.argv[0]} (clean | clean_externals) <build_dir>
     
     Example:
         {sys.argv[0]} build release build-release product-rel
@@ -62,14 +62,14 @@ def build():
     runShellCmd(" ".join(cmakeCmd))
     runShellCmd(f"cmake --build {buildDir} --parallel {os.cpu_count()} --target install")
 
-def clean():
+def clean(target):
     # Check if there are at least three parameters.
     if len(sys.argv) < 3:
         showHelp()
         sys.exit(1)
 
     buildDir = sys.argv[2]
-    runShellCmd(f"cmake --build {buildDir} --target clean")
+    runShellCmd(f"cmake --build {buildDir} --target {target}")
 
 def main():
     if len(sys.argv) < 2:
@@ -78,8 +78,8 @@ def main():
 
     if sys.argv[1] == 'build':
         build()
-    elif sys.argv[1] == 'clean':
-        clean()
+    elif sys.argv[1] in ['clean', 'clean_externals']:
+        clean(target=sys.argv[1])
     else:
         showHelp()
 
