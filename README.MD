@@ -103,9 +103,12 @@ Examples demonstrating AIX usage can be found in the `Targets/AIXExamples` folde
 | XORMetalApp      | Use Metal acceleration on Apple Silicon.        |       
 | XORSequentialApp | Use the Sequential module.                      |
 
-Another example project that uses AIX as an external/third-party library:
+Example projects that `use AIX as an external (third-party)` library:
 
-[LLM](https://github.com/godrays/llm) - GPT2 inference implementation utilizing OpenAI weights with parameters of 124M, 355M, 774M, and 1.5B.
+| Example                                       | Description                                                                                                     |
+|-----------------------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| [LLM](https://github.com/godrays/llm)         | GPT2 inference implementation utilizing OpenAI weights with parameters of 124M, 355M, 774M, and 1.5B.           |
+| [SnakeAI](https://github.com/godrays/snakeai) | A machine learning project that employs genetic algorithms to train an AI model to play the classic Snake game. |
 
 
 # Features
