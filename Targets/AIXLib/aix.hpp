@@ -13,6 +13,7 @@
 #include "aixFloat16.hpp"
 // External includes
 // System includes
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
