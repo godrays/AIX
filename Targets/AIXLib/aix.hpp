@@ -11,6 +11,7 @@
 
 // Project includes
 #include "aixFloat16.hpp"
+#include "aixVersion.hpp"
 // External includes
 // System includes
 #include <algorithm>

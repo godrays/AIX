@@ -257,6 +257,27 @@ All options are OFF by default.
 
 Note: If you build AIX using build.py, tests and examples are enabled for development purposes only.
 
+# Versioning
+
+AIX follows semantic versioning (SemVer) with the format MAJOR.MINOR.PATCH:
+
+- MAJOR version for incompatible API changes.
+- MINOR version for backward-compatible functionality additions.
+- PATCH version for backward-compatible bug fixes.
+
+You can access the version information programmatically:
+
+```C++
+#include <aix.hpp>
+
+// Get version as string.
+std::string version = aix::getVersionString();
+
+// Get version components
+int major, minor, patch;
+aix::getVersion(major, minor, patch);
+```
+
 # Citation
 
 If you find the library useful in your research, please consider citing it and use the following BibTex entry:
@@ -266,7 +287,7 @@ If you find the library useful in your research, please consider citing it and u
    author = {Arkin Terli},
    title = {{AIX}: Single-header Machine Learning Library},
    url = {https://github.com/godrays/aix},
-   version = {0.0.0},
+   version = {0.1.0},
    year = {2024},
 }
 ```
