@@ -56,7 +56,7 @@ def build():
     # Run cmake commands.
     cmakeCmd = [
         f"cmake -S . -B {buildDir} -DCMAKE_BUILD_TYPE={buildType} -DCMAKE_INSTALL_PREFIX={installDir}",
-        "-DAIX_BUILD_EXAMPLES=ON -DAIX_BUILD_TESTS=ON"
+        "-DAIX_BUILD_EXAMPLES=ON -DAIX_BUILD_TESTS=ON -DAIX_BUILD_STATIC=ON"
     ]
     cmakeCmd.extend(buildOptions)
     runShellCmd(" ".join(cmakeCmd))
