@@ -7,16 +7,8 @@
 #  trade secret or copyright law. Dissemination of this information or reproduction of this
 #  material is strictly forbidden unless prior written permission is obtained from Arkin Terli.
 
-# Mac OS X
-.DS_Store
-
 #Generated Files
 cmake-build*
 build
 build-*
-
-#CLion
-.idea
-
-#VSCode
-.vscode
+.*
