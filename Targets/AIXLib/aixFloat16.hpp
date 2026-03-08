@@ -607,12 +607,12 @@ public:
     // Comparison operators.
     bool operator==(const bfloat16_t& other) const
     {
-        return m_data == other.m_data;
+        return toFloat32() == other.toFloat32();
     }
 
     bool operator!=(const bfloat16_t& other) const
     {
-        return m_data != other.m_data;
+        return toFloat32() != other.toFloat32();
     }
 
     bool operator<(const bfloat16_t& other) const
@@ -713,7 +713,9 @@ public:
 
     static bfloat16_t lowest() noexcept
     {
-        return {-3.382823e+38f};  // Lowest negative value
+        bfloat16_t value;
+        value.m_data = 0xFF7F;
+        return value;
     }
 
     // Stream operator for printing.
@@ -730,6 +732,13 @@ private:
         uint32_t bits;
         // std::memcpy helps to bypass any aliasing issues here.
         std::memcpy(&bits, &value, sizeof(bits));
+
+        // Preserve NaN values as NaN instead of allowing rounding to turn some payloads into infinity.
+        if ((bits & 0x7F800000u) == 0x7F800000u && (bits & 0x007FFFFFu) != 0)
+        {
+            return static_cast<uint16_t>((bits >> 16) | 0x0040u);
+        }
+
         auto bf16Bits = static_cast<uint16_t>(bits >> 16);
 
         // Implement round-to-nearest-even.
@@ -751,7 +760,7 @@ private:
         return value;
     }
 
-    uint16_t m_data;
+    uint16_t m_data{0};
 };
 
 }   // namespace
@@ -766,7 +775,7 @@ class std::numeric_limits<aix::bfloat16_t>
 public:
     static aix::bfloat16_t lowest()
     {
-        return {-3.38953139e+38f};      // Lowest negative number.
+        return aix::bfloat16_t::lowest();
     }
 };
 

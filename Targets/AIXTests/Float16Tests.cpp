@@ -159,6 +159,9 @@ TEST_CASE("bfloat16_t Tests")
 
         bfloat16_t f3(0.0f);
         CHECK(f3.toFloat32() == doctest::Approx(0.0f));
+
+        bfloat16_t f4;
+        CHECK(f4.toFloat32() == doctest::Approx(0.0f));
     }
 
     SUBCASE("Copy Constructor")
@@ -181,6 +184,9 @@ TEST_CASE("bfloat16_t Tests")
         bfloat16_t f1(3.140625f);
         bfloat16_t f2(3.140625f);
         bfloat16_t f3(1.0f);
+        bfloat16_t pz(0.0f);
+        bfloat16_t nz(-0.0f);
+        bfloat16_t nan(std::numeric_limits<float>::quiet_NaN());
 
         CHECK(f1 == f2);
         CHECK(f1 != f3);
@@ -188,6 +194,10 @@ TEST_CASE("bfloat16_t Tests")
         CHECK(f3 < f1);
         CHECK(f1 >= f2);
         CHECK(f3 <= f1);
+        CHECK(pz == nz);
+        CHECK_FALSE(pz != nz);
+        CHECK_FALSE(nan == nan);
+        CHECK(nan != nan);
     }
 
     SUBCASE("Arithmetic Operators")
@@ -258,10 +268,14 @@ TEST_CASE("bfloat16_t Tests")
         bfloat16_t inf(std::numeric_limits<float>::infinity());
         bfloat16_t ninf(-std::numeric_limits<float>::infinity());
         bfloat16_t nan(std::numeric_limits<float>::quiet_NaN());
+        auto trickyNaN = std::bit_cast<float>(uint32_t{0x7FFF8001u});
+        bfloat16_t roundedNaN(trickyNaN);
 
         CHECK(inf.toFloat32()  == std::numeric_limits<float>::infinity());
         CHECK(ninf.toFloat32() == -std::numeric_limits<float>::infinity());
         CHECK(std::isnan(nan.toFloat32()));
+        CHECK(std::isnan(roundedNaN.toFloat32()));
+        CHECK_FALSE(std::isinf(roundedNaN.toFloat32()));
     }
 
     SUBCASE("Conversion to and from float")
@@ -279,5 +293,8 @@ TEST_CASE("bfloat16_t Tests")
         bfloat16_t f1(-1);
         float f2 = f1.toFloat32();
         CHECK(f2 == doctest::Approx(-1));
+
+        CHECK(bfloat16_t::lowest().raw() == 0xFF7F);
+        CHECK(std::numeric_limits<bfloat16_t>::lowest().raw() == 0xFF7F);
     }
 }
