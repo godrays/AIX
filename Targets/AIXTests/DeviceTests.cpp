@@ -968,57 +968,57 @@ bool testMatMul(Device* testDevice, size_t n, size_t inner, size_t m)
 }
 
 
-// TEST_CASE("Device Tests - Copy clamps negative BFloat16 to UInt8")
-// {
-//     std::array<bfloat16_t, 4> source = { bfloat16_t{-1.0f}, bfloat16_t{0.0f}, bfloat16_t{42.0f}, bfloat16_t{300.0f} };
-//     std::array<uint8_t, 4> expected = { 0, 0, 42, 255 };
-//
-//     for (auto deviceType : testDeviceTypes)
-//     {
-//         auto device = aix::createDevice(deviceType);
-//         if (!device) continue;
-//
-//         aix::Device refDevice;
-//         auto cpuResult = aix::TensorValue({1, source.size()}, &refDevice).to(DataType::kUInt8);
-//         auto deviceResult = aix::TensorValue({1, source.size()}, device.get()).to(DataType::kUInt8);
-//
-//         refDevice.copy(source.data(), DataType::kBFloat16, cpuResult.data(), DataType::kUInt8, source.size());
-//         device->copy(source.data(), DataType::kBFloat16, deviceResult.data(), DataType::kUInt8, source.size());
-//         device->synchronize();
-//
-//         for (size_t i = 0; i < expected.size(); ++i)
-//         {
-//             CHECK(cpuResult.data<uint8_t>()[i] == expected[i]);
-//             CHECK(deviceResult.data<uint8_t>()[i] == expected[i]);
-//         }
-//     }
-// }
-//
-//
-// TEST_CASE("Device Tests - Fill clamps negative BFloat16 to UInt8")
-// {
-//     bfloat16_t scalar = -1.0f;
-//
-//     for (auto deviceType : testDeviceTypes)
-//     {
-//         auto device = aix::createDevice(deviceType);
-//         if (!device) continue;
-//
-//         aix::Device refDevice;
-//         auto cpuResult = aix::TensorValue({1, 4}, &refDevice).to(DataType::kUInt8);
-//         auto deviceResult = aix::TensorValue({1, 4}, device.get()).to(DataType::kUInt8);
-//
-//         refDevice.fill(&scalar, DataType::kBFloat16, cpuResult.deviceParams());
-//         device->fill(&scalar, DataType::kBFloat16, deviceResult.deviceParams());
-//         device->synchronize();
-//
-//         for (size_t i = 0; i < cpuResult.size(); ++i)
-//         {
-//             CHECK(cpuResult.data<uint8_t>()[i] == 0);
-//             CHECK(deviceResult.data<uint8_t>()[i] == 0);
-//         }
-//     }
-// }
+TEST_CASE("Device Tests - Copy clamps negative BFloat16 to UInt8")
+{
+    std::array<bfloat16_t, 4> source = { bfloat16_t{-1.0f}, bfloat16_t{0.0f}, bfloat16_t{42.0f}, bfloat16_t{300.0f} };
+    std::array<uint8_t, 4> expected = { 0, 0, 42, 255 };
+
+    for (auto deviceType : testDeviceTypes)
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+
+        aix::Device refDevice;
+        auto cpuResult = aix::TensorValue({1, source.size()}, &refDevice).to(DataType::kUInt8);
+        auto deviceResult = aix::TensorValue({1, source.size()}, device.get()).to(DataType::kUInt8);
+
+        refDevice.copy(source.data(), DataType::kBFloat16, cpuResult.data(), DataType::kUInt8, source.size());
+        device->copy(source.data(), DataType::kBFloat16, deviceResult.data(), DataType::kUInt8, source.size());
+        device->synchronize();
+
+        for (size_t i = 0; i < expected.size(); ++i)
+        {
+            CHECK(cpuResult.data<uint8_t>()[i] == expected[i]);
+            CHECK(deviceResult.data<uint8_t>()[i] == expected[i]);
+        }
+    }
+}
+
+
+TEST_CASE("Device Tests - Fill clamps negative BFloat16 to UInt8")
+{
+    bfloat16_t scalar = -1.0f;
+
+    for (auto deviceType : testDeviceTypes)
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+
+        aix::Device refDevice;
+        auto cpuResult = aix::TensorValue({1, 4}, &refDevice).to(DataType::kUInt8);
+        auto deviceResult = aix::TensorValue({1, 4}, device.get()).to(DataType::kUInt8);
+
+        refDevice.fill(&scalar, DataType::kBFloat16, cpuResult.deviceParams());
+        device->fill(&scalar, DataType::kBFloat16, deviceResult.deviceParams());
+        device->synchronize();
+
+        for (size_t i = 0; i < cpuResult.size(); ++i)
+        {
+            CHECK(cpuResult.data<uint8_t>()[i] == 0);
+            CHECK(deviceResult.data<uint8_t>()[i] == 0);
+        }
+    }
+}
 //
 //
 bool testTranspose2D(Device* testDevice, size_t n, size_t m)

@@ -23,11 +23,13 @@
 #include <functional>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <numbers>
 #include <numeric>
 #include <optional>
 #include <random>
 #include <stack>
+#include <type_traits>
 #include <utility>
 
 #if defined(_MSC_VER)
@@ -853,13 +855,36 @@ protected:
     }
 
     template <typename SrcType, typename DstType>
+    static DstType convertGenericValue(SrcType value)
+    {
+        constexpr bool isFloatLikeSrc = std::is_floating_point_v<SrcType>  ||
+                                        std::is_same_v<SrcType, float16_t> ||
+                                        std::is_same_v<SrcType, bfloat16_t>;
+
+        if constexpr (isFloatLikeSrc && std::is_integral_v<DstType>)
+        {
+            auto converted = static_cast<long double>(value);
+            if (std::isnan(converted))
+            {
+                return 0;
+            }
+
+            converted = std::clamp(converted, static_cast<long double>(std::numeric_limits<DstType>::lowest()),
+                                              static_cast<long double>(std::numeric_limits<DstType>::max()));
+            return static_cast<DstType>(converted);
+        }
+
+        return static_cast<DstType>(value);
+    }
+
+    template <typename SrcType, typename DstType>
     static void fillGeneric(const void* scalar, const DeviceTensorParams& result)
     {
         auto tSrc = static_cast<const SrcType*>(scalar);
         auto tDst = static_cast<DstType*>(result.data);
         for (size_t i=0; i<result.size; ++i)
         {
-            tDst[i] = static_cast<DstType>(tSrc[0]);
+            tDst[i] = convertGenericValue<SrcType, DstType>(tSrc[0]);
         }
     }
 
@@ -1139,7 +1164,7 @@ protected:
             auto tDst = static_cast<DstType*>(dst);
             for (size_t i=0; i<size; ++i)
             {
-                tDst[i] = static_cast<DstType>(tSrc[i]);
+                tDst[i] = convertGenericValue<SrcType, DstType>(tSrc[i]);
             }
         }
     }
