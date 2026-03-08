@@ -119,7 +119,7 @@ TEST_CASE("Model - Save/Load Test")
                                    1.0, 1.0}, {kNumSamples, kNumInputs}).to(dtype);
 
         // Save test model1 parameters
-        aix::save(model1, testModelFile);
+        aix::nn::save(model1, testModelFile);
 
         aix::nn::Sequential model2;
         model2.add(new aix::nn::Linear(kNumInputs, 1000));
@@ -130,7 +130,7 @@ TEST_CASE("Model - Save/Load Test")
         model2.to(dtype);
 
         // Load test model1 parameters into model2
-        aix::load(model2, testModelFile);
+        aix::nn::load(model2, testModelFile);
 
         auto predictions1 = model1.forward(inputs);
         auto predictions2 = model2.forward(inputs);

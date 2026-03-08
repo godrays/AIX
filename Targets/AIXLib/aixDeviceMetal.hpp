@@ -11,7 +11,7 @@
 
 
 // Project includes
-#include "aix.hpp"
+#include "aixCore.hpp"
 #include "aixDeviceType.hpp"
 // External includes
 // System includes
