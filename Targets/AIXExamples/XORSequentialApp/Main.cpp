@@ -25,7 +25,7 @@ int main()
     constexpr float kLearningRate  = 0.02f;
     constexpr float kLossThreshold = 1e-5f;
 
-    aix::Device  cpuDevice;    // aix framework can still work without device creation.
+    aix::DeviceCPU  cpuDevice;    // aix framework can still work without device creation.
 
     aix::nn::Sequential  model;
     model.add(new aix::nn::Linear(kNumInputs, 8));

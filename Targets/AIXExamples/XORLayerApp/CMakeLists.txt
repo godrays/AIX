@@ -13,6 +13,10 @@ add_executable(${TARGET_NAME}
         Main.cpp
 )
 
+target_link_libraries(${TARGET_NAME} PRIVATE
+        AIXLib
+)
+
 install(TARGETS ${TARGET_NAME}
         RUNTIME DESTINATION .
 )

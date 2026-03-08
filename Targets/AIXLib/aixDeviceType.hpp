@@ -9,20 +9,13 @@
 
 #pragma once
 
-// Project includes
-#include "aixDeviceType.hpp"
-// External includes
-// System includes
-#include <cstddef>
-#include <memory>
-
-
 namespace aix
 {
 
-// Forward declarations.
-class Device;
-
-std::unique_ptr<aix::Device> createDevice(aix::DeviceType type, size_t deviceIndex = 0);
+enum class DeviceType
+{
+    kCPU,
+    kGPU_METAL,
+};
 
 }   // aix namespace

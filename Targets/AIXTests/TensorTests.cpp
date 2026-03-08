@@ -76,7 +76,7 @@ TEST_CASE("Tensor - Device Switch")
 {
     auto x = aix::tensor({1.0, 2.0, 3.0}, {1, 3});
 
-    Device  newDevice;
+    DeviceCPU  newDevice;
     auto newX = x.to(&newDevice);
 
     CHECK(newX.device() == &newDevice);

@@ -381,11 +381,11 @@ void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& 
     assert(a.isContiguous == result.isContiguous == true);
     if (result.dtype != DataType::kInt32)
     {
-        throw std::invalid_argument("Device::argmax supports only int32 data type for its result.");
+        throw std::invalid_argument("DeviceMetal::argmax supports only int32 data type for its result.");
     }
 
     synchronize();
-    Device::argmax(a, result);
+    defaultDevice.argmax(a, result);
 }
 
 void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorParams& result)
@@ -393,11 +393,11 @@ void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorP
     assert(a.isContiguous == result.isContiguous == true);
     if (result.dtype != DataType::kInt32)
     {
-        throw std::invalid_argument("Device::argmaxIndices supports only int32 data type for its result.");
+        throw std::invalid_argument("DeviceMetal::argmaxIndices supports only int32 data type for its result.");
     }
 
     synchronize();
-    Device::argmaxIndices(a, result);
+    defaultDevice.argmaxIndices(a, result);
 }
 
 void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result)
@@ -612,7 +612,7 @@ void DeviceMetal::reduceTo(const DeviceTensorParams& src, const DeviceTensorPara
     if (!(src.dtype == DataType::kFloat32 || src.dtype == DataType::kInt32))
     {
         synchronize();
-        Device::reduceTo(src, dst);
+        defaultDevice.reduceTo(src, dst);
         return;
     }
 
@@ -631,7 +631,7 @@ void DeviceMetal::maxTo(const DeviceTensorParams& src, const DeviceTensorParams&
     if (!(src.dtype == DataType::kFloat32 || src.dtype == DataType::kInt32))
     {
         synchronize();
-        Device::maxTo(src, dst);
+        defaultDevice.maxTo(src, dst);
         return;
     }
 
@@ -645,7 +645,7 @@ void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorPara
     assert(src.isContiguous == dst.isContiguous == true);
     validateDataType(src.dtype);
     synchronize();
-    Device::argmaxTo(src, dst, dim);
+    defaultDevice.argmaxTo(src, dst, dim);
 }
 
 void DeviceMetal::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
@@ -653,7 +653,7 @@ void DeviceMetal::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTen
     assert(src.isContiguous == dst.isContiguous == true);
     validateDataType(src.dtype);
     synchronize();
-    Device::argmaxIndicesTo(src, dst, dim);
+    defaultDevice.argmaxIndicesTo(src, dst, dim);
 }
 
 void DeviceMetal::sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,
@@ -843,7 +843,7 @@ void DeviceMetal::indexAdd(const DeviceTensorParams& src, const DeviceTensorPara
     if (!(src.dtype == DataType::kFloat32 || src.dtype == DataType::kInt32))
     {
         synchronize();
-        Device::indexAdd(src, dst, indices, dim);
+        defaultDevice.indexAdd(src, dst, indices, dim);
         return;
     }
 

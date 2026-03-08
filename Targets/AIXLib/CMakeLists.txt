@@ -16,6 +16,7 @@ endif()
 
 set(SOURCE_FILES
        aixDevices.cpp
+       aixDeviceCPU.cpp
 )
 
 # Add metal device support for Apple Silicon
@@ -37,5 +38,5 @@ if (APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     )
 endif()
 
-install(FILES aix.hpp aixDevices.hpp aixFloat16.hpp aixVersion.hpp DESTINATION include)
+install(FILES aix.hpp aixDevice.hpp aixDeviceCPU.hpp aixDevices.hpp aixDeviceType.hpp aixFloat16.hpp aixVersion.hpp DESTINATION include)
 install(TARGETS ${TARGET_NAME} ARCHIVE DESTINATION lib)

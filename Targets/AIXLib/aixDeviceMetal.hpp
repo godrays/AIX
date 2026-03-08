@@ -12,6 +12,7 @@
 
 // Project includes
 #include "aix.hpp"
+#include "aixDeviceType.hpp"
 // External includes
 // System includes
 #include <mach/vm_page_size.h>

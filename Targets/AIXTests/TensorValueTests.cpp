@@ -20,7 +20,7 @@
 
 using namespace aix;
 
-Device  testDevice;     // Default CPU device.
+DeviceCPU  testDevice;     // Default CPU device.
 
 
 TEST_CASE("Simple TensorValue 1 dim - Add")
@@ -663,7 +663,7 @@ TEST_CASE("TensorValue - Device Switch")
 {
     auto x = TensorValue({1.0, 2.0, 3.0}, {1, 3}, &testDevice);
 
-    Device  newDevice;
+    DeviceCPU  newDevice;
     auto newX = x.to(&newDevice);
 
     CHECK(newX.device() == &newDevice);

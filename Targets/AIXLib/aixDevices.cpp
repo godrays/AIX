@@ -8,7 +8,7 @@
 //  material is strictly forbidden unless prior written permission is obtained from Arkin Terli.
 
 // Project includes
-#include "aix.hpp"
+#include "aixDeviceCPU.hpp"
 #include "aixDevices.hpp"
 #if defined(__APPLE__) && defined(__arm64__)
 #include "aixDeviceMetal.hpp"
@@ -33,7 +33,7 @@ std::unique_ptr<aix::Device> createDevice(aix::DeviceType type, size_t deviceInd
         #endif
 
         case DeviceType::kCPU:
-            return std::make_unique<aix::Device>(deviceIndex);
+            return std::make_unique<aix::DeviceCPU>(deviceIndex);
 
         default:
             break;
