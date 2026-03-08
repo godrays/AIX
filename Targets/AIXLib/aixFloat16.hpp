@@ -19,8 +19,8 @@
 
 
 // NOTE: C++23 will introduce float16_t and bfloat16_t as new types. The following classes are intended to be used
-//       until these types become available in compilers. The current implementations prioritize speed and are based
-//       on approximations, so a certain degree of error is anticipated.
+//       until these types become available in compilers while preserving the rounding and special-value semantics of
+//       their reduced-precision formats.
 
 
 namespace aix
@@ -66,12 +66,12 @@ public:
     // Comparison operators.
     bool operator==(const float16_t& other) const
     {
-        return m_data == other.m_data;
+        return toFloat32() == other.toFloat32();
     }
 
     bool operator!=(const float16_t& other) const
     {
-        return m_data != other.m_data;
+        return toFloat32() != other.toFloat32();
     }
 
     bool operator<(const float16_t& other) const
@@ -170,6 +170,13 @@ public:
         return oldValue;
     }
 
+    static float16_t lowest() noexcept
+    {
+        float16_t value;
+        value.m_data = 0xFBFF;
+        return value;
+    }
+
     // Stream operator for printing.
     friend std::ostream& operator<<(std::ostream& os, const float16_t& f16)
     {
@@ -177,7 +184,7 @@ public:
     }
 
 private:
-    uint16_t m_data;
+    uint16_t m_data{0};
 
     static float f16Tof32(uint16_t float16)
     {
@@ -193,10 +200,55 @@ private:
 
     static uint16_t f32Tof16(float float32)
     {
-        const auto float32Bits = std::bit_cast<uint32_t>(float32);
-        // Check for special cases, negative infinity.
-        if (float32Bits == 0xFF800000) return 0xFC00;
-        return m_baseTable[(float32Bits >> 23) & 0x1FF] + ((float32Bits & 0x007FFFFF) >> m_shiftTable[(float32Bits >> 23) & 0x1FF]);
+        const uint32_t float32Bits = std::bit_cast<uint32_t>(float32);
+        const uint16_t sign = static_cast<uint16_t>((float32Bits >> 16) & 0x8000u);
+        const uint32_t exponent = (float32Bits >> 23) & 0xFFu;
+        const uint32_t mantissa = float32Bits & 0x007FFFFFu;
+
+        if (exponent == 0xFFu)
+        {
+            if (mantissa == 0)
+            {
+                return static_cast<uint16_t>(sign | 0x7C00u);
+            }
+
+            const uint16_t payload = static_cast<uint16_t>(mantissa >> 13);
+            return static_cast<uint16_t>(sign | 0x7C00u | payload | 0x0200u);
+        }
+
+        int32_t halfExponent = static_cast<int32_t>(exponent) - 127 + 15;
+        if (halfExponent <= 0)
+        {
+            if (halfExponent < -10)
+            {
+                return sign;
+            }
+
+            const uint32_t normalizedMantissa = mantissa | 0x00800000u;
+            const uint32_t shift = static_cast<uint32_t>(14 - halfExponent);
+            uint16_t halfBits = static_cast<uint16_t>(sign | (normalizedMantissa >> shift));
+            const uint32_t roundMask = (1u << shift) - 1u;
+            const uint32_t roundBits = normalizedMantissa & roundMask;
+            const uint32_t halfway = 1u << (shift - 1u);
+            if (roundBits > halfway || (roundBits == halfway && (halfBits & 0x0001u)))
+            {
+                halfBits++;
+            }
+            return halfBits;
+        }
+
+        if (halfExponent >= 0x1F)
+        {
+            return static_cast<uint16_t>(sign | 0x7C00u);
+        }
+
+        uint16_t halfBits = static_cast<uint16_t>(sign | (static_cast<uint16_t>(halfExponent) << 10) | (mantissa >> 13));
+        const uint32_t roundBits = mantissa & 0x1FFFu;
+        if (roundBits > 0x1000u || (roundBits == 0x1000u && (halfBits & 0x0001u)))
+        {
+            halfBits++;
+        }
+        return halfBits;
     }
 
     static inline const uint32_t m_mantissaTable[2048] =
@@ -526,7 +578,8 @@ private:
         0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00,
         0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00,
         0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00,
-        0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00
+        0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00,
+        0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00, 0xFC00
     };
 
     static inline const uint8_t  m_shiftTable[512] =
@@ -785,6 +838,6 @@ class std::numeric_limits<aix::float16_t>
 public:
     static aix::float16_t lowest()
     {
-        return {-65504};                // Lowest negative number.
+        return aix::float16_t::lowest();
     }
 };
