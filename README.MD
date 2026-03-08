@@ -41,11 +41,11 @@ int main()
 
     // Create a model.
     aix::nn::Sequential  model;
-    model.add(new aix::nn::Linear(kNumInputs, 8));
-    model.add(new aix::nn::Tanh());
-    model.add(new aix::nn::Linear(8, 4));
-    model.add(new aix::nn::Tanh());
-    model.add(new aix::nn::Linear(4, kNumTargets));
+    model.add(aix::nn::Linear(kNumInputs, 8));
+    model.add(aix::nn::Tanh());
+    model.add(aix::nn::Linear(8, 4));
+    model.add(aix::nn::Tanh());
+    model.add(aix::nn::Linear(4, kNumTargets));
 
     model.to(device);       // Move the model to the device.
 

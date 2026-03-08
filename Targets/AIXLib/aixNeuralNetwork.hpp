@@ -13,6 +13,9 @@
 #include "aixCore.hpp"
 // External includes
 // System includes
+#include <concepts>
+#include <type_traits>
+#include <utility>
 
 
 // Neural Network Namespace
@@ -99,11 +102,22 @@ public:
         return x;
     }
 
+    void add(std::unique_ptr<Module> module)
+    {
+        registerModule(*module);
+        m_modules.emplace_back(std::move(module));
+    }
+
+    template<typename T> requires std::derived_from<std::decay_t<T>, Module>
+    void add(T && module)
+    {
+        add(std::make_unique<std::decay_t<T>>(std::forward<T>(module)));
+    }
+
     // Function to add modules dynamically if needed.
     void add(Module * module)
     {
-        registerModule(*module);
-        m_modules.emplace_back(module);     // Use std::unique_ptr to take ownership of the module pointer.
+        add(std::unique_ptr<Module>(module));
     }
 
 protected:

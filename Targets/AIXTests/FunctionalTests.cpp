@@ -105,11 +105,11 @@ TEST_CASE("Model - Save/Load Test")
         std::string testModelFile = "model_save_load_test.pth" + std::to_string(i);
 
         aix::nn::Sequential model1;
-        model1.add(new aix::nn::Linear(kNumInputs, 1000));
-        model1.add(new aix::nn::Tanh());
-        model1.add(new aix::nn::Linear(1000, 500));
-        model1.add(new aix::nn::Tanh());
-        model1.add(new aix::nn::Linear(500, kNumTargets));
+        model1.add(aix::nn::Linear(kNumInputs, 1000));
+        model1.add(aix::nn::Tanh());
+        model1.add(aix::nn::Linear(1000, 500));
+        model1.add(aix::nn::Tanh());
+        model1.add(aix::nn::Linear(500, kNumTargets));
         model1.to(dtype);
 
         // Example inputs and targets for demonstration purposes.

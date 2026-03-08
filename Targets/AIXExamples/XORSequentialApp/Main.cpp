@@ -28,11 +28,11 @@ int main()
     aix::DeviceCPU  cpuDevice;    // aix framework can still work without device creation.
 
     aix::nn::Sequential  model;
-    model.add(new aix::nn::Linear(kNumInputs, 8));
-    model.add(new aix::nn::Tanh());
-    model.add(new aix::nn::Linear(8, 4));
-    model.add(new aix::nn::Tanh());
-    model.add(new aix::nn::Linear(4, kNumTargets));
+    model.add(aix::nn::Linear(kNumInputs, 8));
+    model.add(aix::nn::Tanh());
+    model.add(aix::nn::Linear(8, 4));
+    model.add(aix::nn::Tanh());
+    model.add(aix::nn::Linear(4, kNumTargets));
 
     model.to(cpuDevice);
 

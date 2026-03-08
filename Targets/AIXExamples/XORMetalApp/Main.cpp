@@ -33,11 +33,11 @@ int main()
     auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
 
     aix::nn::Sequential model;
-    model.add(new aix::nn::Linear(kNumInputs, 1000));
-    model.add(new aix::nn::Tanh());
-    model.add(new aix::nn::Linear(1000, 500));
-    model.add(new aix::nn::Tanh());
-    model.add(new aix::nn::Linear(500, kNumTargets));
+    model.add(aix::nn::Linear(kNumInputs, 1000));
+    model.add(aix::nn::Tanh());
+    model.add(aix::nn::Linear(1000, 500));
+    model.add(aix::nn::Tanh());
+    model.add(aix::nn::Linear(500, kNumTargets));
 
     model.to(device);
     model.to(modelDType);
