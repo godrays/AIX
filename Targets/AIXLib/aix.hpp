@@ -920,7 +920,8 @@ protected:
 
         for (size_t i = 0; i < a.size; ++i)
         {
-            res[i] = std::sqrt(t1[i]);
+            auto value = std::sqrt(static_cast<long double>(t1[i]));
+            res[i] = convertGenericValue<long double, T>(value);
         }
     }
 
@@ -968,7 +969,8 @@ protected:
 
         for (size_t i = 0; i < a.size; ++i)
         {
-            res[i] = std::log(t1[i]);
+            auto value = std::log(static_cast<long double>(t1[i]));
+            res[i] = convertGenericValue<long double, T>(value);
         }
     }
 
@@ -980,7 +982,8 @@ protected:
 
         for (size_t i = 0; i < a.size; ++i)
         {
-            res[i] = std::exp(t1[i]);
+            auto value = std::exp(static_cast<long double>(t1[i]));
+            res[i] = convertGenericValue<long double, T>(value);
         }
     }
 
@@ -993,7 +996,8 @@ protected:
 
         for (size_t i = 0; i < a.size; ++i)
         {
-            res[i] = std::pow(t1[i], t2[i]);
+            auto value = std::pow(static_cast<long double>(t1[i]), static_cast<long double>(t2[i]));
+            res[i] = convertGenericValue<long double, T>(value);
         }
     }
 

@@ -13,6 +13,8 @@
 // External includes
 #include <doctest/doctest.h>
 // System includes
+#include <array>
+#include <limits>
 #include <sstream>
 
 
@@ -587,6 +589,73 @@ TEST_CASE("TensorValue - Cos")
     CheckVectorApproxValues(y, TensorValue({float(std::cos(0.5)),
                                             float(std::cos(0)),
                                             float(std::cos(-0.5))}, y.shape(), &testDevice));
+}
+
+
+TEST_CASE("Default Device - Sqrt maps negative Int32 to zero")
+{
+    std::array<int32_t, 3> source = {-1, 0, 4};
+    TensorValue src(source.data(), source.size(), DataType::kInt32, {1, source.size()}, &testDevice, DataType::kInt32);
+    TensorValue result({1, source.size()}, &testDevice, DataType::kInt32);
+
+    testDevice.sqrt(src.deviceParams(), result.deviceParams());
+
+    std::array<int32_t, 3> expected = {0, 0, 2};
+    for (size_t i = 0; i < expected.size(); ++i)
+    {
+        CHECK(result.data<int32_t>()[i] == expected[i]);
+    }
+}
+
+
+TEST_CASE("Default Device - Log clamps integral nonfinite results")
+{
+    std::array<int32_t, 4> source = {-1, 0, 1, 10};
+    TensorValue src(source.data(), source.size(), DataType::kInt32, {1, source.size()}, &testDevice, DataType::kInt32);
+    TensorValue result({1, source.size()}, &testDevice, DataType::kInt32);
+
+    testDevice.log(src.deviceParams(), result.deviceParams());
+
+    std::array<int32_t, 4> expected = {0, std::numeric_limits<int32_t>::lowest(), 0, 2};
+    for (size_t i = 0; i < expected.size(); ++i)
+    {
+        CHECK(result.data<int32_t>()[i] == expected[i]);
+    }
+}
+
+
+TEST_CASE("Default Device - Exp clamps integral overflow")
+{
+    std::array<int32_t, 4> source = {0, 1, 10, 100};
+    TensorValue src(source.data(), source.size(), DataType::kInt32, {1, source.size()}, &testDevice, DataType::kInt32);
+    TensorValue result({1, source.size()}, &testDevice, DataType::kInt32);
+
+    testDevice.exp(src.deviceParams(), result.deviceParams());
+
+    std::array<int32_t, 4> expected = {1, 2, 22026, std::numeric_limits<int32_t>::max()};
+    for (size_t i = 0; i < expected.size(); ++i)
+    {
+        CHECK(result.data<int32_t>()[i] == expected[i]);
+    }
+}
+
+
+TEST_CASE("Default Device - Pow clamps integral overflow")
+{
+    std::array<int32_t, 3> base = {2, 100, -2};
+    std::array<int32_t, 3> exponent = {8, 100, 31};
+    TensorValue baseTensor(base.data(), base.size(), DataType::kInt32, {1, base.size()}, &testDevice, DataType::kInt32);
+    TensorValue exponentTensor(exponent.data(), exponent.size(), DataType::kInt32,
+                               {1, exponent.size()}, &testDevice, DataType::kInt32);
+    TensorValue result({1, base.size()}, &testDevice, DataType::kInt32);
+
+    testDevice.pow(baseTensor.deviceParams(), exponentTensor.deviceParams(), result.deviceParams());
+
+    std::array<int32_t, 3> expected = {256, std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::lowest()};
+    for (size_t i = 0; i < expected.size(); ++i)
+    {
+        CHECK(result.data<int32_t>()[i] == expected[i]);
+    }
 }
 
 
