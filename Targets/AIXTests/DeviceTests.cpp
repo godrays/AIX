@@ -14,6 +14,7 @@
 // External includes
 #include <doctest/doctest.h>
 // System includes
+#include <array>
 
 using namespace aix;
 
@@ -28,6 +29,14 @@ std::vector<size_t>  testSizes = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
                                    127, 128, 129, 255, 256, 257, 511, 512, 513, 1023, 1024, 1025, 2047, 2048, 2049 };
 
 std::vector<DeviceType>  testDeviceTypes = { aix::DeviceType::kGPU_METAL };
+
+
+bool isIntegralDataType(aix::DataType dtype)
+{
+    return dtype == aix::DataType::kInt64 || dtype == aix::DataType::kInt32 ||
+           dtype == aix::DataType::kInt16 || dtype == aix::DataType::kInt8 ||
+           dtype == aix::DataType::kUInt8;
+}
 
 
 bool verifyResults(const aix::TensorValue & tv1, const aix::TensorValue & tv2, float epsilon = EPSILON)
@@ -304,7 +313,15 @@ bool testSqrt(Device* testDevice, size_t n)
 
         aix::Device  refDevice;     // Reference/CPU device.
 
-        auto array1       = (50 * aix::randn({1, n})).to(dtype).value();
+        auto array1 = [&]()
+        {
+            if (isIntegralDataType(dtype))
+            {
+                auto noise = aix::randn({1, n});
+                return (25.0f * (noise * noise)).to(dtype).value();
+            }
+            return (50 * aix::randn({1, n})).to(dtype).value();
+        }();
         auto cpuResult    = aix::TensorValue({1, n}, &refDevice).to(dtype);
         auto deviceResult = aix::TensorValue({1, n}, testDevice).to(dtype);
 
@@ -822,8 +839,24 @@ bool testPow(Device* testDevice, size_t n)
 
         aix::Device  refDevice;     // Reference/CPU device.
 
-        auto array1       = (2 + 1 * aix::randn({1, n})).to(dtype).value();
-        auto exp          = (3 + 2 * aix::randn({1, n})).to(dtype).value();       // Random numbers in [1,5]
+        auto array1 = [&]()
+        {
+            if (isIntegralDataType(dtype))
+            {
+                auto noise = aix::randn({1, n});
+                return (1.0f + 0.02f * (noise * noise)).to(dtype).value();
+            }
+            return (2 + 1 * aix::randn({1, n})).to(dtype).value();
+        }();
+        auto exp = [&]()
+        {
+            if (isIntegralDataType(dtype))
+            {
+                auto noise = aix::randn({1, n});
+                return (1.0f + 0.02f * (noise * noise)).to(dtype).value();
+            }
+            return (3 + 2 * aix::randn({1, n})).to(dtype).value();       // Random numbers in [1,5]
+        }();
         auto cpuResult    = aix::TensorValue({1, n}, &refDevice).to(dtype);
         auto deviceResult = aix::TensorValue({1, n}, testDevice).to(dtype);
 
@@ -1019,8 +1052,8 @@ TEST_CASE("Device Tests - Fill clamps negative BFloat16 to UInt8")
         }
     }
 }
-//
-//
+
+
 bool testTranspose2D(Device* testDevice, size_t n, size_t m)
 {
     for (size_t i=0; i<aix::DataTypeCount; ++i)
