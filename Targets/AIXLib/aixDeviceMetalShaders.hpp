@@ -1022,6 +1022,33 @@ template<typename T>
 }
 
 
+[[kernel]] void argmaxIndicesToSet(const device int* winningIndices [[buffer(0)]],
+                                   device int* result              [[buffer(1)]],
+                                   const device size_t* shape      [[buffer(2)]],
+                                   const device size_t* strides    [[buffer(3)]],
+                                   constant size_t& shapeSize      [[buffer(4)]],
+                                   constant size_t& dim            [[buffer(5)]],
+                                   uint reducedIndex [[thread_position_in_grid]])
+{
+    size_t baseOffset = 0;
+    size_t index = reducedIndex;
+
+    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
+    {
+        size_t dimSize = static_cast<size_t>(i) == dim ? 1 : shape[i];
+        size_t coord = index % dimSize;
+        index /= dimSize;
+        baseOffset += coord * strides[i];
+    }
+
+    auto winner = static_cast<size_t>(winningIndices[reducedIndex]);
+    if (winner < shape[dim])
+    {
+        result[baseOffset + winner * strides[dim]] = 1;
+    }
+}
+
+
 // TranslationIndex - Naive Implementation
 // -----------------------------------------------------------------
 size_t translationIndex(size_t index, device const size_t* shape, device const size_t* newShape,

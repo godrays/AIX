@@ -635,6 +635,39 @@ bool testArgmaxWithDim(Device* testDevice)
 }
 
 
+bool testArgmaxIndicesWithDim(Device* testDevice)
+{
+    for (size_t i=0; i<aix::DataTypeCount; ++i)
+    {
+        auto dtype = static_cast<DataType>(i);
+        // Apple Metal Framework does not support kFloat64 data type.
+        if (testDevice->type() == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+
+        auto shape = createRandomShape(1, 6);      // max element size 6^6 = 46,656
+        ssize_t dim = std::rand() % static_cast<ssize_t>(shape.size());
+
+        auto array = (1 + aix::randn(shape)).to(dtype);
+        auto cpuResult = array.value().argmaxIndices(dim);
+        auto deviceResult = array.to(testDevice).value().argmaxIndices(dim);
+        testDevice->synchronize();
+
+        if (!verifyResults(cpuResult, deviceResult))
+        {
+            #ifdef DEBUG_LOG
+            std::cout << "----------------------" << std::endl;
+            std::cout << "Dim: " << dim << std::endl;
+            std::cout << "Array" << std::endl << array.value() << std::endl;
+            std::cout << "Expected Result" << std::endl << cpuResult << std::endl;
+            std::cout << "DeviceCPU Result" << std::endl << deviceResult << std::endl;
+            #endif
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
 TEST_CASE("DeviceMetal Tests - Argmax keeps first max index across dtypes")
 {
     auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
@@ -699,6 +732,32 @@ TEST_CASE("DeviceMetal Tests - Argmax with dim keeps first max index across dtyp
         CHECK(verifyResults(expected, result));
         CHECK(result.data<int32_t>()[0] == 1);
         CHECK(result.data<int32_t>()[1] == 0);
+    }
+}
+
+
+TEST_CASE("DeviceMetal Tests - ArgmaxIndices with dim keeps first max index across dtypes")
+{
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    for (size_t i=0; i<aix::DataTypeCount; ++i)
+    {
+        auto dtype = static_cast<DataType>(i);
+        if (dtype == DataType::kFloat64) continue;
+
+        auto array = aix::tensor({1.0, 5.0, 5.0,
+                                  4.0, 4.0, 3.0}, {2, 3}).to(dtype);
+        auto expected = array.value().argmaxIndices(1);
+        auto result = array.to(device.get()).value().argmaxIndices(1);
+        device->synchronize();
+
+        CHECK(result.dataType() == DataType::kInt32);
+        CHECK(verifyResults(expected, result));
+        CHECK(result.data<int32_t>()[1] == 1);
+        CHECK(result.data<int32_t>()[3] == 1);
+        CHECK(result.data<int32_t>()[2] == 0);
+        CHECK(result.data<int32_t>()[4] == 0);
     }
 }
 
@@ -1791,6 +1850,22 @@ TEST_CASE("DeviceCPU Tests - Argmax with dim")
         {
             auto device2 = aix::createDevice(deviceType);
             CHECK(testArgmaxWithDim(&*device2));
+        }
+    }
+}
+
+
+TEST_CASE("DeviceCPU Tests - ArgmaxIndices with dim")
+{
+    for (auto deviceType : testDeviceTypes)
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+
+        for (size_t i=0; i<testSizes.size(); ++i)
+        {
+            auto device2 = aix::createDevice(deviceType);
+            CHECK(testArgmaxIndicesWithDim(&*device2));
         }
     }
 }

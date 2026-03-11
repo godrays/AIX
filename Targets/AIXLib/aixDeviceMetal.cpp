@@ -88,6 +88,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     }
 
     m_compFuncPSOArgmaxIndicesSet = createComputeFuncPSO(defaultLibrary, "argmaxIndicesSet");
+    m_compFuncPSOArgmaxIndicesToSet = createComputeFuncPSO(defaultLibrary, "argmaxIndicesToSet");
 
     m_cmdQueue = createCommandQueue();
     m_cmdBuffer = m_cmdQueue->commandBuffer();
@@ -149,6 +150,7 @@ DeviceMetal::~DeviceMetal()
         m_compFuncPSOIndexAdd[i]->release();
     }
     m_compFuncPSOArgmaxIndicesSet->release();
+    m_compFuncPSOArgmaxIndicesToSet->release();
 
     m_cmdQueue->release();
     m_mtlDevice->release();
@@ -783,9 +785,72 @@ void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorPara
 void DeviceMetal::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
 {
     assert(src.isContiguous == dst.isContiguous == true);
-    validateDataType(src.dtype);
-    synchronize();
-    defaultDevice.argmaxIndicesTo(src, dst, dim);
+    if (dst.dtype != DataType::kInt32)
+    {
+        throw std::invalid_argument("DeviceMetal::argmaxIndicesTo supports only int32 data type for its result.");
+    }
+
+    if (src.dtype == DataType::kFloat64 || !isDeviceBuffer(dst.data))
+    {
+        synchronize();
+        defaultDevice.argmaxIndicesTo(src, dst, dim);
+        return;
+    }
+
+    assert(dim < src.shape.size());
+    assert(src.shape.size() == src.strides.size());
+    assert(src.shape.size() == dst.strides.size());
+    assert(dst.size > 0);
+
+    auto reducedShape = src.shape;
+    reducedShape[dim] = 1;
+
+    Stride reducedStrides(reducedShape.size());
+    size_t reducedSize = 1;
+    for (int64_t i = static_cast<int64_t>(reducedShape.size()) - 1; i >= 0; --i)
+    {
+        reducedStrides[i] = reducedSize;
+        reducedSize *= reducedShape[i];
+    }
+
+    auto winningCoords = DeviceTensorParams
+    {
+        .data=allocate(reducedSize, DataType::kInt32),
+        .dtype=DataType::kInt32,
+        .isContiguous=true,
+        .offset=0,
+        .shape=reducedShape,
+        .size=reducedSize,
+        .strides=reducedStrides
+    };
+
+    argmaxTo(src, winningCoords, dim);
+
+    int32_t zero = 0;
+    fill(&zero, DataType::kInt32, dst);
+
+    auto shapeSize = src.shape.size();
+    auto bufWinningCoords = m_allocMap[winningCoords.data];
+    auto bufDst = m_allocMap[dst.data];
+    auto bufShape = getReadOnlyMTLBuffer(src.shape.data(), shapeSize, sizeof(size_t));
+    auto bufStrides = getReadOnlyMTLBuffer(dst.strides.data(), shapeSize, sizeof(size_t));
+
+    m_compEncoder->setComputePipelineState(m_compFuncPSOArgmaxIndicesToSet);
+    m_compEncoder->setBuffer(bufWinningCoords, 0, 0);
+    m_compEncoder->setBuffer(bufDst, 0, 1);
+    m_compEncoder->setBuffer(bufShape, 0, 2);
+    m_compEncoder->setBuffer(bufStrides, 0, 3);
+    m_compEncoder->setBytes(&shapeSize, sizeof(shapeSize), 4);
+    m_compEncoder->setBytes(&dim, sizeof(dim), 5);
+
+    NS::UInteger w = std::min(reducedSize,
+                              static_cast<size_t>(m_compFuncPSOArgmaxIndicesToSet->maxTotalThreadsPerThreadgroup()));
+    m_compEncoder->dispatchThreads({reducedSize, 1, 1}, {w, 1, 1});
+
+    freeTemporaryBuffer(bufShape);
+    freeTemporaryBuffer(bufStrides);
+    commitBatchQueue();
+    deallocate(winningCoords.data);
 }
 
 void DeviceMetal::sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,

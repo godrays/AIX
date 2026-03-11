@@ -229,6 +229,7 @@ protected:
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxReduce[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxTo[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxIndicesSet{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOArgmaxIndicesToSet{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulTiledBC6464888[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulTiled32x32[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulTiled32x64[aix::DataTypeCount]{nullptr};

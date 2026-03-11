@@ -316,25 +316,28 @@ static void argmaxIndicesToGeneric(const DeviceTensorParams& src, const DeviceTe
 {
     auto tSrc = static_cast<const T*>(src.data);
     auto tDst = static_cast<T2*>(dst.data);
-    auto tmaxTemp = new T[src.size];     // Temporary helper buffer to store max values for comparison.
     auto dstShape = dst.shape;
     dstShape[dim] = 1;
-
-    // Initialize the temp buffer with the lowest value of the data type, T.
-    fillMinGeneric<T>({ .data=tmaxTemp, .size=src.size });
     size_t maxElementCount = 1;
     for (auto i : dstShape)
     {
         maxElementCount *= i;
     }
 
+    auto tmaxTemp = new T[maxElementCount];     // Temporary helper buffer to store max values for comparison.
+    auto tInitialized = new bool[maxElementCount]{};
+
+    // Initialize the temp buffer with the lowest value of the data type, T.
+    fillMinGeneric<T>({ .data=tmaxTemp, .size=maxElementCount });
+
     auto tDstTemp = new T2[maxElementCount];   // Temporary helper buffer to store index of max elements.
 
     for (size_t index = 0; index < src.size; ++index)
     {
         auto transIndex = translationIndex(index, dstShape, src.shape);
-        if (tSrc[index] > tmaxTemp[transIndex])
+        if (!tInitialized[transIndex] || tSrc[index] > tmaxTemp[transIndex])
         {
+            tInitialized[transIndex] = true;
             tmaxTemp[transIndex] = tSrc[index];
             tDstTemp[transIndex] = index;
         }
@@ -346,6 +349,7 @@ static void argmaxIndicesToGeneric(const DeviceTensorParams& src, const DeviceTe
     }
 
     delete [] tmaxTemp;
+    delete [] tInitialized;
     delete [] tDstTemp;
 }
 
