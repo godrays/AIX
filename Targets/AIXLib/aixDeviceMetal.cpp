@@ -86,6 +86,8 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
         m_compFuncPSOIndexAdd[i]    = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "indexAdd_" + dtypeStr);
     }
 
+    m_compFuncPSOArgmaxIndicesSet = createComputeFuncPSO(defaultLibrary, "argmaxIndicesSet");
+
     m_cmdQueue = createCommandQueue();
     m_cmdBuffer = m_cmdQueue->commandBuffer();
     m_compEncoder = m_cmdBuffer->computeCommandEncoder();
@@ -144,6 +146,7 @@ DeviceMetal::~DeviceMetal()
         m_compFuncPSOIndexSelect[i]->release();
         m_compFuncPSOIndexAdd[i]->release();
     }
+    m_compFuncPSOArgmaxIndicesSet->release();
 
     m_cmdQueue->release();
     m_mtlDevice->release();
@@ -455,8 +458,40 @@ void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorP
         throw std::invalid_argument("DeviceMetal::argmaxIndices supports only int32 data type for its result.");
     }
 
-    synchronize();
-    defaultDevice.argmaxIndices(a, result);
+    if (a.dtype == DataType::kFloat64 || !isDeviceBuffer(result.data))
+    {
+        synchronize();
+        defaultDevice.argmaxIndices(a, result);
+        return;
+    }
+
+    auto winningIndex = DeviceTensorParams
+    {
+        .data=allocate(1, DataType::kInt32),
+        .dtype=DataType::kInt32,
+        .isContiguous=true,
+        .offset=0,
+        .shape={},
+        .size=1,
+        .strides={}
+    };
+
+    argmax(a, winningIndex);
+
+    int32_t zero = 0;
+    fill(&zero, DataType::kInt32, result);
+
+    auto bufWinningIndex = m_allocMap[winningIndex.data];
+    auto bufResult = m_allocMap[result.data];
+
+    m_compEncoder->setComputePipelineState(m_compFuncPSOArgmaxIndicesSet);
+    m_compEncoder->setBuffer(bufWinningIndex, 0, 0);
+    m_compEncoder->setBuffer(bufResult, 0, 1);
+    m_compEncoder->setBytes(&result.size, sizeof(result.size), 2);
+    m_compEncoder->dispatchThreads({1, 1, 1}, {1, 1, 1});
+    commitBatchQueue();
+
+    deallocate(winningIndex.data);
 }
 
 void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result)

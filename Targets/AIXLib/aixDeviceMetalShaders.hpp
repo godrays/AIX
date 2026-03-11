@@ -970,6 +970,22 @@ template<typename T>
 }
 
 
+[[kernel]] void argmaxIndicesSet(const device int* winningIndex [[buffer(0)]],
+                                 device int* result             [[buffer(1)]],
+                                 constant size_t& resultSize    [[buffer(2)]],
+                                 uint index [[thread_position_in_grid]])
+{
+    if (index == 0)
+    {
+        auto winner = static_cast<size_t>(winningIndex[0]);
+        if (winner < resultSize)
+        {
+            result[winner] = 1;
+        }
+    }
+}
+
+
 // TranslationIndex - Naive Implementation
 // -----------------------------------------------------------------
 size_t translationIndex(size_t index, device const size_t* shape, device const size_t* newShape,
