@@ -901,6 +901,75 @@ template<typename T>
 }
 
 
+// ArgMax - Naive Implementation
+// -----------------------------------------------------------------
+template<typename T>
+METAL_FUNC bool argmaxIsBetter(T candidateValue, int candidateIndex, T currentValue, int currentIndex)
+{
+    return candidateValue > currentValue || (candidateValue == currentValue && candidateIndex < currentIndex);
+}
+
+
+template<typename T>
+[[kernel]] void argmaxInit(const device T* src       [[buffer(0)]],
+                           device T* values          [[buffer(1)]],
+                           device int* indices       [[buffer(2)]],
+                           uint index [[thread_position_in_grid]])
+{
+    values[index] = src[index];
+    indices[index] = static_cast<int>(index);
+}
+
+
+template<typename T>
+[[kernel]] void argmaxReduce(const device T* inValues     [[buffer(0)]],
+                             const device int* inIndices  [[buffer(1)]],
+                             device T* outValues          [[buffer(2)]],
+                             device int* outIndices       [[buffer(3)]],
+                             uint li  [[thread_position_in_threadgroup]],
+                             uint tgi [[threadgroup_position_in_grid]],
+                             uint threadsPerThreadgroup [[threads_per_threadgroup]])
+{
+    const size_t MAX_THREADS = 1024;
+    const size_t baseOffset = static_cast<size_t>(tgi) * static_cast<size_t>(threadsPerThreadgroup);
+
+    threadgroup T sharedValues[MAX_THREADS];
+    threadgroup int sharedIndices[MAX_THREADS];
+    sharedValues[li] = inValues[baseOffset + li];
+    sharedIndices[li] = inIndices[baseOffset + li];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    size_t size = threadsPerThreadgroup;
+    for (uint stride = size / 2; stride > 0; stride >>= 1)
+    {
+        if (size % 2 == 1 && li == 0 &&
+            argmaxIsBetter(sharedValues[size - 1], sharedIndices[size - 1], sharedValues[0], sharedIndices[0]))
+        {
+            sharedValues[0] = sharedValues[size - 1];
+            sharedIndices[0] = sharedIndices[size - 1];
+        }
+        size >>= 1;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (li < stride &&
+            argmaxIsBetter(sharedValues[li + stride], sharedIndices[li + stride], sharedValues[li], sharedIndices[li]))
+        {
+            sharedValues[li] = sharedValues[li + stride];
+            sharedIndices[li] = sharedIndices[li + stride];
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (li == 0)
+    {
+        outValues[tgi] = sharedValues[0];
+        outIndices[tgi] = sharedIndices[0];
+    }
+}
+
+
 // TranslationIndex - Naive Implementation
 // -----------------------------------------------------------------
 size_t translationIndex(size_t index, device const size_t* shape, device const size_t* newShape,
@@ -1379,6 +1448,44 @@ SpecializeMax("i32",  int);
 SpecializeMax("i16",  short);
 SpecializeMax("i8",   char);
 SpecializeMax("ui8",  uchar);
+
+
+// ArgMax
+// -----------------------------------------------------------------
+#define SpecializeArgmaxInit(tname, type)  \
+    template [[ host_name("argmaxInit_" tname) ]]  \
+    [[kernel]] void argmaxInit(const device type* src   [[buffer(0)]], \
+                               device type* values      [[buffer(1)]], \
+                               device int* indices      [[buffer(2)]], \
+                               uint index [[thread_position_in_grid]])
+
+#define SpecializeArgmaxReduce(tname, type)  \
+    template [[ host_name("argmaxReduce_" tname) ]]  \
+    [[kernel]] void argmaxReduce(const device type* inValues     [[buffer(0)]], \
+                                 const device int* inIndices     [[buffer(1)]], \
+                                 device type* outValues          [[buffer(2)]], \
+                                 device int* outIndices          [[buffer(3)]], \
+                                 uint li  [[thread_position_in_threadgroup]], \
+                                 uint tgi [[threadgroup_position_in_grid]],   \
+                                 uint threadsPerThreadgroup [[threads_per_threadgroup]])
+
+SpecializeArgmaxInit("f32",  float);
+SpecializeArgmaxInit("f16",  half);
+SpecializeArgmaxInit("bf16", bfloat);
+SpecializeArgmaxInit("i64",  long);
+SpecializeArgmaxInit("i32",  int);
+SpecializeArgmaxInit("i16",  short);
+SpecializeArgmaxInit("i8",   char);
+SpecializeArgmaxInit("ui8",  uchar);
+
+SpecializeArgmaxReduce("f32",  float);
+SpecializeArgmaxReduce("f16",  half);
+SpecializeArgmaxReduce("bf16", bfloat);
+SpecializeArgmaxReduce("i64",  long);
+SpecializeArgmaxReduce("i32",  int);
+SpecializeArgmaxReduce("i16",  short);
+SpecializeArgmaxReduce("i8",   char);
+SpecializeArgmaxReduce("ui8",  uchar);
 
 
 // Matrix_Mul

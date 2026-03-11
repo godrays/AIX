@@ -66,6 +66,8 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
         m_compFuncPSOPow[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "pow_" + dtypeStr);
         m_compFuncPSOSum[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sum_" + dtypeStr);
         m_compFuncPSOMax[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "max_" + dtypeStr);
+        m_compFuncPSOArgmaxInit[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxInit_" + dtypeStr);
+        m_compFuncPSOArgmaxReduce[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxReduce_" + dtypeStr);
         m_compFuncPSOMatMulTiledBC6464888[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiledBC_64_64_8_8_8_" + dtypeStr);
         m_compFuncPSOMatMulTiled32x32[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiled_32_32_" + dtypeStr);
         m_compFuncPSOMatMulTiled32x64[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiled_32_64_" + dtypeStr);
@@ -123,6 +125,8 @@ DeviceMetal::~DeviceMetal()
         m_compFuncPSOPow[i]->release();
         m_compFuncPSOSum[i]->release();
         m_compFuncPSOMax[i]->release();
+        m_compFuncPSOArgmaxInit[i]->release();
+        m_compFuncPSOArgmaxReduce[i]->release();
         m_compFuncPSOMatMulTiledBC6464888[i]->release();
         m_compFuncPSOMatMulTiled32x32[i]->release();
         m_compFuncPSOMatMulTiled32x64[i]->release();
@@ -384,8 +388,63 @@ void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& 
         throw std::invalid_argument("DeviceMetal::argmax supports only int32 data type for its result.");
     }
 
-    synchronize();
-    defaultDevice.argmax(a, result);
+    if (a.dtype == DataType::kFloat64 || !isDeviceBuffer(result.data))
+    {
+        synchronize();
+        defaultDevice.argmax(a, result);
+        return;
+    }
+
+    assert(a.size > 0);
+    auto iDType = static_cast<size_t>(a.dtype);
+    auto argmaxInitPSO = m_compFuncPSOArgmaxInit[iDType];
+    auto argmaxReducePSO = m_compFuncPSOArgmaxReduce[iDType];
+    size_t maxThreadsPerTG = std::min<size_t>(MAX_THREADS_PER_THREADGROUP,
+                                              argmaxReducePSO->maxTotalThreadsPerThreadgroup());
+
+    auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
+    auto bufTempValues = m_allocMap[allocate(a.size, a.dtype)];
+    auto bufTempIndices = m_allocMap[allocate(a.size, DataType::kInt32)];
+
+    auto encodeArgmaxInit = [&]()
+    {
+        m_compEncoder->setComputePipelineState(argmaxInitPSO);
+        m_compEncoder->setBuffer(bufSrc, 0, 0);
+        m_compEncoder->setBuffer(bufTempValues, 0, 1);
+        m_compEncoder->setBuffer(bufTempIndices, 0, 2);
+
+        NS::UInteger w = std::min(a.size, static_cast<size_t>(argmaxInitPSO->maxTotalThreadsPerThreadgroup()));
+        m_compEncoder->dispatchThreads({a.size, 1, 1}, {w, 1, 1});
+        commitBatchQueue();
+    };
+
+    auto encodeArgmaxReduce = [&](size_t elementCount)
+    {
+        m_compEncoder->setComputePipelineState(argmaxReducePSO);
+        m_compEncoder->setBuffer(bufTempValues,  0, 0);
+        m_compEncoder->setBuffer(bufTempIndices, 0, 1);
+        m_compEncoder->setBuffer(bufTempValues,  0, 2);
+        m_compEncoder->setBuffer(bufTempIndices, 0, 3);
+
+        NS::UInteger w = std::min(elementCount, maxThreadsPerTG);
+        m_compEncoder->dispatchThreads({elementCount, 1, 1}, {w, 1, 1});
+        commitBatchQueue();
+    };
+
+    encodeArgmaxInit();
+
+    size_t elementCount = a.size;
+    while (elementCount > 1)
+    {
+        encodeArgmaxReduce(elementCount);
+        elementCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+    }
+
+    copy(bufTempIndices->contents(), DataType::kInt32, result.data, result.dtype, 1);
+
+    freeTemporaryBuffer(bufSrc);
+    deallocate(bufTempValues->contents());
+    deallocate(bufTempIndices->contents());
 }
 
 void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorParams& result)

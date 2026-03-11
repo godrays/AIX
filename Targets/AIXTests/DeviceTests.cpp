@@ -542,6 +542,57 @@ bool testMax(Device* testDevice, size_t n)
     return true;
 }
 
+
+bool testArgmax(Device* testDevice, size_t n)
+{
+    for (size_t i=0; i<aix::DataTypeCount; ++i)
+    {
+        auto dtype = static_cast<DataType>(i);
+        // Apple Metal Framework does not support kFloat64 data type.
+        if (testDevice->type() == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+
+        auto array        = (1 + aix::randn({1, n})).to(dtype);
+        auto cpuResult    = array.argmax().value();
+        auto deviceResult = array.to(*testDevice).argmax().value();
+        testDevice->synchronize();
+
+        if (!verifyResults(cpuResult, deviceResult))
+        {
+            #ifdef DEBUG_LOG
+            std::cout << "----------------------" << std::endl;
+            std::cout << "Array" << std::endl << array.value() << std::endl;
+            std::cout << "Expected Result" << std::endl << cpuResult << std::endl;
+            std::cout << "DeviceCPU Result" << std::endl << deviceResult << std::endl;
+            #endif
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+TEST_CASE("DeviceMetal Tests - Argmax keeps first max index across dtypes")
+{
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    for (size_t i=0; i<aix::DataTypeCount; ++i)
+    {
+        auto dtype = static_cast<DataType>(i);
+        if (dtype == DataType::kFloat64) continue;
+
+        auto array = aix::tensor({1.0, 5.0, 2.0, 5.0, 4.0}, {1, 5}).to(dtype);
+        auto expected = array.argmax().value();
+        auto result = array.to(*device).argmax().value();
+        device->synchronize();
+
+        CHECK(result.dataType() == DataType::kInt32);
+        CHECK(result.item<int32_t>() == expected.item<int32_t>());
+        CHECK(result.item<int32_t>() == 1);
+    }
+}
+
 bool testMaxWithDim(Device* testDevice)
 {
     for (size_t i=0; i<aix::DataTypeCount; ++i)
@@ -1582,6 +1633,22 @@ TEST_CASE("DeviceCPU Tests - Max")
         {
             auto device2 = aix::createDevice(deviceType);
             CHECK(testMax(&*device2, size));
+        }
+    }
+}
+
+
+TEST_CASE("DeviceCPU Tests - Argmax")
+{
+    for (auto deviceType : testDeviceTypes)
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+
+        for (auto size : testSizes)
+        {
+            auto device2 = aix::createDevice(deviceType);
+            CHECK(testArgmax(&*device2, size));
         }
     }
 }
