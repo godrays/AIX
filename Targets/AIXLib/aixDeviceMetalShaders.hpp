@@ -970,6 +970,42 @@ template<typename T>
 }
 
 
+template<typename T>
+[[kernel]] void argmaxTo(const device T* src            [[buffer(0)]],
+                         device int* dst                [[buffer(1)]],
+                         const device size_t* shape     [[buffer(2)]],
+                         const device size_t* strides   [[buffer(3)]],
+                         constant size_t& shapeSize     [[buffer(4)]],
+                         constant size_t& dim           [[buffer(5)]],
+                         uint dstIndex [[thread_position_in_grid]])
+{
+    size_t srcBaseOffset = 0;
+    size_t index = dstIndex;
+
+    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
+    {
+        size_t dimSize = static_cast<size_t>(i) == dim ? 1 : shape[i];
+        size_t coord = index % dimSize;
+        index /= dimSize;
+        srcBaseOffset += coord * strides[i];
+    }
+
+    T bestValue = src[srcBaseOffset];
+    int bestIndex = 0;
+    for (size_t i = 1; i < shape[dim]; ++i)
+    {
+        T candidateValue = src[srcBaseOffset + i * strides[dim]];
+        if (argmaxIsBetter(candidateValue, static_cast<int>(i), bestValue, bestIndex))
+        {
+            bestValue = candidateValue;
+            bestIndex = static_cast<int>(i);
+        }
+    }
+
+    dst[dstIndex] = bestIndex;
+}
+
+
 [[kernel]] void argmaxIndicesSet(const device int* winningIndex [[buffer(0)]],
                                  device int* result             [[buffer(1)]],
                                  constant size_t& resultSize    [[buffer(2)]],
@@ -1485,6 +1521,16 @@ SpecializeMax("ui8",  uchar);
                                  uint tgi [[threadgroup_position_in_grid]],   \
                                  uint threadsPerThreadgroup [[threads_per_threadgroup]])
 
+#define SpecializeArgmaxTo(tname, type)  \
+    template [[ host_name("argmaxTo_" tname) ]]  \
+    [[kernel]] void argmaxTo(const device type* src           [[buffer(0)]], \
+                             device int* dst                  [[buffer(1)]], \
+                             const device size_t* shape       [[buffer(2)]], \
+                             const device size_t* strides     [[buffer(3)]], \
+                             constant size_t& shapeSize       [[buffer(4)]], \
+                             constant size_t& dim             [[buffer(5)]], \
+                             uint dstIndex [[thread_position_in_grid]])
+
 SpecializeArgmaxInit("f32",  float);
 SpecializeArgmaxInit("f16",  half);
 SpecializeArgmaxInit("bf16", bfloat);
@@ -1502,6 +1548,15 @@ SpecializeArgmaxReduce("i32",  int);
 SpecializeArgmaxReduce("i16",  short);
 SpecializeArgmaxReduce("i8",   char);
 SpecializeArgmaxReduce("ui8",  uchar);
+
+SpecializeArgmaxTo("f32",  float);
+SpecializeArgmaxTo("f16",  half);
+SpecializeArgmaxTo("bf16", bfloat);
+SpecializeArgmaxTo("i64",  long);
+SpecializeArgmaxTo("i32",  int);
+SpecializeArgmaxTo("i16",  short);
+SpecializeArgmaxTo("i8",   char);
+SpecializeArgmaxTo("ui8",  uchar);
 
 
 // Matrix_Mul

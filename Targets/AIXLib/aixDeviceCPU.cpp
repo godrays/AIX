@@ -271,7 +271,8 @@ static void argmaxToGeneric(const DeviceTensorParams& src, const DeviceTensorPar
 {
     auto tSrc = static_cast<const T*>(src.data);
     auto tDst = static_cast<T2*>(dst.data);
-    auto tmaxTemp = new T[dst.size];     // Temporary helper buffer to store max values for comparison.
+    auto tmaxTemp = new T[dst.size];         // Temporary helper buffer to store max values for comparison.
+    auto tInitialized = new bool[dst.size]{};
 
     // Initialize the temp buffer with the lowest value of the data type, T.
     fillMinGeneric<T>({ .data=tmaxTemp, .size=dst.size });
@@ -279,13 +280,15 @@ static void argmaxToGeneric(const DeviceTensorParams& src, const DeviceTensorPar
     for (size_t index = 0; index < src.size; ++index)
     {
         auto transIndex = translationIndex(index, dst.shape, src.shape);
-        if (tSrc[index] > tmaxTemp[transIndex])
+        if (!tInitialized[transIndex] || tSrc[index] > tmaxTemp[transIndex])
         {
+            tInitialized[transIndex] = true;
             tmaxTemp[transIndex] = tSrc[index];
             tDst[transIndex] = (index / src.strides[dim]) % src.shape[dim];
         }
     }
     delete [] tmaxTemp;
+    delete [] tInitialized;
 }
 
 template <typename T, typename T2>

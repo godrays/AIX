@@ -66,8 +66,9 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
         m_compFuncPSOPow[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "pow_" + dtypeStr);
         m_compFuncPSOSum[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sum_" + dtypeStr);
         m_compFuncPSOMax[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "max_" + dtypeStr);
-        m_compFuncPSOArgmaxInit[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxInit_" + dtypeStr);
+        m_compFuncPSOArgmaxInit[i]   = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxInit_" + dtypeStr);
         m_compFuncPSOArgmaxReduce[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxReduce_" + dtypeStr);
+        m_compFuncPSOArgmaxTo[i]     = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxTo_" + dtypeStr);
         m_compFuncPSOMatMulTiledBC6464888[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiledBC_64_64_8_8_8_" + dtypeStr);
         m_compFuncPSOMatMulTiled32x32[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiled_32_32_" + dtypeStr);
         m_compFuncPSOMatMulTiled32x64[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiled_32_64_" + dtypeStr);
@@ -129,6 +130,7 @@ DeviceMetal::~DeviceMetal()
         m_compFuncPSOMax[i]->release();
         m_compFuncPSOArgmaxInit[i]->release();
         m_compFuncPSOArgmaxReduce[i]->release();
+        m_compFuncPSOArgmaxTo[i]->release();
         m_compFuncPSOMatMulTiledBC6464888[i]->release();
         m_compFuncPSOMatMulTiled32x32[i]->release();
         m_compFuncPSOMatMulTiled32x64[i]->release();
@@ -737,9 +739,45 @@ void DeviceMetal::maxTo(const DeviceTensorParams& src, const DeviceTensorParams&
 void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
 {
     assert(src.isContiguous == dst.isContiguous == true);
-    validateDataType(src.dtype);
-    synchronize();
-    defaultDevice.argmaxTo(src, dst, dim);
+    if (dst.dtype != DataType::kInt32)
+    {
+        throw std::invalid_argument("DeviceMetal::argmaxTo supports only int32 data type for its result.");
+    }
+
+    if (src.dtype == DataType::kFloat64 || !isDeviceBuffer(dst.data))
+    {
+        synchronize();
+        defaultDevice.argmaxTo(src, dst, dim);
+        return;
+    }
+
+    assert(dim < src.shape.size());
+    assert(src.shape.size() == src.strides.size());
+    assert(dst.size > 0);
+
+    auto iDType = static_cast<size_t>(src.dtype);
+    auto compFuncPSO = m_compFuncPSOArgmaxTo[iDType];
+    auto shapeSize = src.shape.size();
+    auto bufSrc = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
+    auto bufDst = m_allocMap[dst.data];
+    auto bufShape = getReadOnlyMTLBuffer(src.shape.data(), shapeSize, sizeof(size_t));
+    auto bufStrides = getReadOnlyMTLBuffer(src.strides.data(), shapeSize, sizeof(size_t));
+
+    m_compEncoder->setComputePipelineState(compFuncPSO);
+    m_compEncoder->setBuffer(bufSrc, 0, 0);
+    m_compEncoder->setBuffer(bufDst, 0, 1);
+    m_compEncoder->setBuffer(bufShape, 0, 2);
+    m_compEncoder->setBuffer(bufStrides, 0, 3);
+    m_compEncoder->setBytes(&shapeSize, sizeof(shapeSize), 4);
+    m_compEncoder->setBytes(&dim, sizeof(dim), 5);
+
+    NS::UInteger w = std::min(dst.size, static_cast<size_t>(compFuncPSO->maxTotalThreadsPerThreadgroup()));
+    m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});
+
+    freeTemporaryBuffer(bufSrc);
+    freeTemporaryBuffer(bufShape);
+    freeTemporaryBuffer(bufStrides);
+    commitBatchQueue();
 }
 
 void DeviceMetal::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
