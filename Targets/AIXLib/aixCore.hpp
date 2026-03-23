@@ -1585,8 +1585,7 @@ public:
     TensorValue  m_value;
     bool  m_requireGrad;
     bool  m_retainGrad{false};
-    std::shared_ptr<TensorNode>  m_a{nullptr};
-    std::shared_ptr<TensorNode>  m_b{nullptr};
+    std::vector<std::shared_ptr<TensorNode>> m_inputs;
     SIndex m_dims;
     size_t m_dim0{0};
     size_t m_dim1{0};
@@ -1594,7 +1593,6 @@ public:
     TensorValue  m_indices;
     std::optional<ssize_t> m_start;
     std::optional<ssize_t> m_end;
-    std::vector<std::shared_ptr<TensorNode>> m_aMulti;
     std::function<void(TensorNode * tensor, const TensorValue & seed)>  m_backwardFunc{nullptr};
 
 private:
@@ -1662,7 +1660,7 @@ public:
     }
 
     // Perform backpropagation to calculate gradients recursively.
-    void backward(float value=1)  { m_data->backward(TensorValue{value, m_data->m_a->m_value.shape(), device(), dataType()}); }
+    void backward(float value=1)  { m_data->backward(TensorValue{value, m_data->m_inputs[0]->m_value.shape(), device(), dataType()}); }
     void backward(float value, const Shape & gradShape)  { m_data->backward(TensorValue{value, gradShape, device(), dataType()}); }
 
     // Getters and setters for the tensor's value.
@@ -1711,7 +1709,7 @@ public:
         auto& tv = m_data->m_value;
         TensorOptions opt{ .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() };
         Tensor result{tv.storage(), tv.size(), tv.storageOffset(), newShape, opt};
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = reshapeBackwardFunc;
         return result;
     }
@@ -1728,7 +1726,7 @@ public:
         TensorValue tValue = m_data->m_value.broadcastTo(newShape);
         Tensor result{tValue.data(), tValue.size(), tValue.dataType(), tValue.shape(),
                       { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device()}};
-        result.m_data->m_a = m_data;            // Keep the reference to the original tensor node
+        result.m_data->m_inputs = { m_data };            // Keep the reference to the original tensor node
         result.m_data->m_backwardFunc = broadcastBackwardFunc;
         return result;
     }
@@ -1742,7 +1740,7 @@ public:
         if (&newDevice == m_data->device()) return *this;
         Tensor result{shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=&newDevice }};
         result.m_data->m_value = m_data->m_value.to(&newDevice);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = toDeviceBackwardFunc;
         return result;
     }
@@ -1752,7 +1750,7 @@ public:
         if (dataType() == newDataType) return *this;
         TensorOptions opt{ .m_requireGrad=isRequireGrad(), .m_dtype=newDataType, .m_device=device() };
         Tensor result{value().data(), value().size(), value().dataType(), value().shape(), opt};
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = toDataTypeBackwardFunc;
         return result;
     }
@@ -1768,167 +1766,167 @@ public:
 
     static void reshapeBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
-        node->m_a->backward(seed.reshape(node->m_a->m_value.shape()));
+        if (node->m_inputs.empty()) return;
+        node->m_inputs[0]->backward(seed.reshape(node->m_inputs[0]->m_value.shape()));
     }
 
     static void broadcastBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // Accumulate the gradient to the original node by reducing the gradient from the broadcasted shape to the
         // original shape. Summation is used for gradient accumulation when reducing dimensions because each element
         // of the original tensor contributes to multiple elements of the resulting tensor after broadcasting.
-        node->m_a->backward(seed.reduceTo(node->m_a->m_value.shape()));
+        node->m_inputs[0]->backward(seed.reduceTo(node->m_inputs[0]->m_value.shape()));
     }
 
     static void toDeviceBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
-        if (seed.device() != node->m_a->m_value.device())
+        if (node->m_inputs.empty()) return;
+        if (seed.device() != node->m_inputs[0]->m_value.device())
         {
             // Synchronize seed to ensure the seed's data is available before copying it to a different device.
             seed.device()->synchronize();
         }
-        node->m_a->backward(seed.to(node->m_a->m_value.device()));
+        node->m_inputs[0]->backward(seed.to(node->m_inputs[0]->m_value.device()));
     }
 
     static void toDataTypeBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // Ensure that the seed gradient is converted back to the data type of the original tensor.
-        node->m_a->backward(seed.to(node->m_a->m_value.dataType()));
+        node->m_inputs[0]->backward(seed.to(node->m_inputs[0]->m_value.dataType()));
     }
 
     static void addBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a || !node->m_b) return;
+        if (node->m_inputs.size() < 2) return;
         // Calculate gradients.
-        node->m_a->backward(seed);
-        node->m_b->backward(seed);
+        node->m_inputs[0]->backward(seed);
+        node->m_inputs[1]->backward(seed);
     }
 
     static void subBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a || !node->m_b) return;
+        if (node->m_inputs.size() < 2) return;
         // Calculate gradients.
-        node->m_a->backward(seed);
-        node->m_b->backward(-seed);
+        node->m_inputs[0]->backward(seed);
+        node->m_inputs[1]->backward(-seed);
     }
 
     static void mulBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a || !node->m_b) return;
+        if (node->m_inputs.size() < 2) return;
         // Calculate gradients.
-        node->m_a->backward(node->m_b->m_value * seed);
-        node->m_b->backward(node->m_a->m_value * seed);
+        node->m_inputs[0]->backward(node->m_inputs[1]->m_value * seed);
+        node->m_inputs[1]->backward(node->m_inputs[0]->m_value * seed);
     }
 
     static void divBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a || !node->m_b) return;
+        if (node->m_inputs.size() < 2) return;
         // Calculate gradients.
-        node->m_a->backward(seed / node->m_b->m_value);                                               // ∂f/∂a = 1 / b
-        node->m_b->backward(-node->m_a->m_value * seed / (node->m_b->m_value * node->m_b->m_value));  // ∂f/∂b = -a / b^2
+        node->m_inputs[0]->backward(seed / node->m_inputs[1]->m_value);                                               // ∂f/∂a = 1 / b
+        node->m_inputs[1]->backward(-node->m_inputs[0]->m_value * seed / (node->m_inputs[1]->m_value * node->m_inputs[1]->m_value));  // ∂f/∂b = -a / b^2
     }
 
     static void unaryBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // Calculate gradients.
-        node->m_a->backward(-seed);
+        node->m_inputs[0]->backward(-seed);
     }
 
     static void sqrtBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // The derivative of sqrt(a) with respect to 'a' is 0.5/sqrt(a).
         // Therefore, the gradient of the input is multiplied by 0.5/sqrt(a).
-        node->m_a->backward(0.5 / node->m_a->m_value.sqrt() * seed);   // ∂f/∂a = 0.5/sqrt(a)
+        node->m_inputs[0]->backward(0.5 / node->m_inputs[0]->m_value.sqrt() * seed);   // ∂f/∂a = 0.5/sqrt(a)
     }
 
     static void sinBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // The derivative of sin(a) with respect to 'a' is cos(a).
         // Therefore, the gradient of the input is multiplied by cos(a).
-        node->m_a->backward(node->m_a->m_value.cos() * seed);   // ∂f/∂a = cos(a)
+        node->m_inputs[0]->backward(node->m_inputs[0]->m_value.cos() * seed);   // ∂f/∂a = cos(a)
     }
 
     static void cosBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // The derivative of cos(a) with respect to 'a' is -sin(a).
         // Therefore, the gradient of the input is multiplied by -sin(a).
-        node->m_a->backward(-node->m_a->m_value.sin() * seed);   // ∂f/∂a = -sin(a)
+        node->m_inputs[0]->backward(-node->m_inputs[0]->m_value.sin() * seed);   // ∂f/∂a = -sin(a)
     }
 
     static void tanhBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // The derivative of tanh(a) with respect to 'a' is 1 - tanh^2(a).
         // Therefore, the gradient of the input is multiplied by (1 - tanh^2(a)).
-        const auto & tanhValue = node->m_a->m_value.tanh();
-        node->m_a->backward((float(1) - tanhValue * tanhValue) * seed);  // ∂f/∂a = (1 - tanh^2(a))
+        const auto & tanhValue = node->m_inputs[0]->m_value.tanh();
+        node->m_inputs[0]->backward((float(1) - tanhValue * tanhValue) * seed);  // ∂f/∂a = (1 - tanh^2(a))
     }
 
     static void logBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // TODO: Handle division by zero case.
         // The derivative of log(a) with respect to 'a' is 1/a.
-        node->m_a->backward(seed / node->m_a->m_value);  // ∂f/∂a = 1/a
+        node->m_inputs[0]->backward(seed / node->m_inputs[0]->m_value);  // ∂f/∂a = 1/a
     }
 
     static void expBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // The derivative of exp(a) with respect to 'a' is exp(a), itself.
-        node->m_a->backward(seed * node->m_a->m_value.exp());  // ∂f/∂a = exp(a)
+        node->m_inputs[0]->backward(seed * node->m_inputs[0]->m_value.exp());  // ∂f/∂a = exp(a)
     }
 
     static void maxBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // The derivative of max(a) with respect to 'a' is a zero tensor with argmax index set to 1.
-        node->m_a->backward(seed * node->m_a->m_value.argmaxIndices());
+        node->m_inputs[0]->backward(seed * node->m_inputs[0]->m_value.argmaxIndices());
     }
 
     static void maxBackwardFunc2(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // The derivative of max(a) with respect to 'a' is a zero tensor with max indexes set to 1.
-        node->m_a->backward(seed * node->m_a->m_value.argmaxIndices(static_cast<ssize_t>(node->m_dim0)));
+        node->m_inputs[0]->backward(seed * node->m_inputs[0]->m_value.argmaxIndices(static_cast<ssize_t>(node->m_dim0)));
     }
 
     static void powBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a || !node->m_b) return;
+        if (node->m_inputs.size() < 2) return;
         // The derivative of pow(a, b) with respect to 'a' is b * a^(b-1).
         // ∂f/∂a = b * pow(a, b-1)
-        node->m_a->backward(seed * node->m_b->m_value * node->m_a->m_value.pow(node->m_b->m_value - float(1)));
+        node->m_inputs[0]->backward(seed * node->m_inputs[1]->m_value * node->m_inputs[0]->m_value.pow(node->m_inputs[1]->m_value - float(1)));
     }
 
     static void matmulBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a || !node->m_b) return;
-        // Assuming m_a and m_b are the input matrices a and b, respectively,
+        if (node->m_inputs.size() < 2) return;
+        // Assuming m_inputs[0] and m_inputs[1] are the input matrices a and b, respectively,
         // and seed is ∂E/∂c, the gradient of the loss with respect to the output matrix c.
         // Compute gradients with respect to a and b
 
         // Corrected to use matrix multiplication for backward pass calculations
-        node->m_a->backward(seed.matmul(node->m_b->m_value.transpose(0, 1)));      // ∂E/∂a = ∂E/∂c * b^T
-        node->m_b->backward(node->m_a->m_value.transpose(0, 1).matmul(seed));      // ∂E/∂b = a^T * ∂E/∂c
+        node->m_inputs[0]->backward(seed.matmul(node->m_inputs[1]->m_value.transpose(0, 1)));      // ∂E/∂a = ∂E/∂c * b^T
+        node->m_inputs[1]->backward(node->m_inputs[0]->m_value.transpose(0, 1).matmul(seed));      // ∂E/∂b = a^T * ∂E/∂c
     }
 
     static void transposeBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
-        node->m_a->backward(seed.transpose(node->m_dim0, node->m_dim1));
+        if (node->m_inputs.empty()) return;
+        node->m_inputs[0]->backward(seed.transpose(node->m_dim0, node->m_dim1));
     }
 
     static void permuteBackwardFunc(TensorNode* node, const TensorValue& seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
 
         // Convert negative reference indices to positive.
         SIndex orgDims = node->m_dims;
@@ -1944,83 +1942,83 @@ public:
             auto it = std::find(orgDims.begin(), orgDims.end(), i);
             dims[i] = std::distance(orgDims.begin(), it);
         }
-        node->m_a->backward(seed.permute(dims));
+        node->m_inputs[0]->backward(seed.permute(dims));
     }
 
     static void sliceBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
-        node->m_a->backward(node->m_a->m_value.sliceSet(seed, node->m_dim0, node->m_start, node->m_end, node->m_dim1));
+        if (node->m_inputs.empty()) return;
+        node->m_inputs[0]->backward(node->m_inputs[0]->m_value.sliceSet(seed, node->m_dim0, node->m_start, node->m_end, node->m_dim1));
     }
 
     static void sumBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         // For the sum operation, the gradient is simply the seed
-        node->m_a->backward(seed);
+        node->m_inputs[0]->backward(seed);
     }
 
     static void sumBackwardFunc2(TensorNode* node, const TensorValue& seed)
     {
-        if (!node->m_a) return;
-        const auto& originalShape = node->m_a->m_value.shape();
+        if (node->m_inputs.empty()) return;
+        const auto& originalShape = node->m_inputs[0]->m_value.shape();
 
         // For keepDim=False case, 1 dimension was squeezed. That dimension needs to be unsqueezed.
         if (!node->m_keepDim)
-            node->m_a->backward(seed.unsqueeze(static_cast<ssize_t>(node->m_dim0)).broadcastTo(originalShape));
+            node->m_inputs[0]->backward(seed.unsqueeze(static_cast<ssize_t>(node->m_dim0)).broadcastTo(originalShape));
         else
-            node->m_a->backward(seed.broadcastTo(originalShape));
+            node->m_inputs[0]->backward(seed.broadcastTo(originalShape));
     }
 
     static void squeezeBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
-        node->m_a->backward(seed.unsqueeze(node->m_dim0));
+        if (node->m_inputs.empty()) return;
+        node->m_inputs[0]->backward(seed.unsqueeze(node->m_dim0));
     }
 
     static void unsqueezeBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
-        node->m_a->backward(seed.squeeze(node->m_dim0));
+        if (node->m_inputs.empty()) return;
+        node->m_inputs[0]->backward(seed.squeeze(node->m_dim0));
     }
 
     static void trillBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         auto onesLikeSeed = TensorValue(1.0, seed.shape(), seed.device(), seed.dataType());
-        node->m_a->backward(seed * onesLikeSeed.tril(static_cast<ssize_t>(node->m_dim0)));      // m_dim0 = diagonal
+        node->m_inputs[0]->backward(seed * onesLikeSeed.tril(static_cast<ssize_t>(node->m_dim0)));      // m_dim0 = diagonal
     }
 
     static void triuBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
-        if (!node->m_a) return;
+        if (node->m_inputs.empty()) return;
         auto onesLikeSeed = TensorValue(1.0, seed.shape(), seed.device(), seed.dataType());
-        node->m_a->backward(seed * onesLikeSeed.triu(static_cast<ssize_t>(node->m_dim0)));      // m_dim0 = diagonal
+        node->m_inputs[0]->backward(seed * onesLikeSeed.triu(static_cast<ssize_t>(node->m_dim0)));      // m_dim0 = diagonal
     }
 
     static void indexSelectBackwardFunc(TensorNode * node, const TensorValue& seed)
     {
-        if (!node->m_a) return;
-        auto zeros = aix::TensorValue(0.0, node->m_a->m_value.shape(), seed.device(), seed.dataType());
-        node->m_a->backward(zeros.indexAdd(static_cast<ssize_t>(node->m_dim0), node->m_indices, seed, true));
+        if (node->m_inputs.empty()) return;
+        auto zeros = aix::TensorValue(0.0, node->m_inputs[0]->m_value.shape(), seed.device(), seed.dataType());
+        node->m_inputs[0]->backward(zeros.indexAdd(static_cast<ssize_t>(node->m_dim0), node->m_indices, seed, true));
     }
 
     static void catBackwardFunc(TensorNode* node, const TensorValue& seed)
     {
-        size_t numTensors = node->m_aMulti.size();
+        size_t numTensors = node->m_inputs.size();
         if (numTensors == 0) return;
 
         // The dimension along which tensors were concatenated.
         auto dim = static_cast<ssize_t>(node->m_dim0);
 
         // Get the shape of the original tensors.
-        size_t dimSize = node->m_aMulti[0]->m_value.shape()[dim];
+        size_t dimSize = node->m_inputs[0]->m_value.shape()[dim];
 
         // Iterate over each original tensor and propagate the gradient.
         for (size_t i=0; i<numTensors; ++i)
         {
             // Propagate this sliced gradient to the corresponding original tensor.
-            node->m_aMulti[i]->backward(seed.slice(dim, i * dimSize, (i + 1) * dimSize, 1));
+            node->m_inputs[i]->backward(seed.slice(dim, i * dimSize, (i + 1) * dimSize, 1));
         }
     }
 
@@ -2041,8 +2039,7 @@ public:
         Tensor result(shape(), { .m_requireGrad=isRequireGrad() || other.isRequireGrad(), .m_dtype=dataType(),
                                  .m_device=device()});
         result.m_data->m_value = lhs.m_data->m_value + rhs.m_data->m_value;
-        result.m_data->m_a = lhs.m_data;
-        result.m_data->m_b = rhs.m_data;
+        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
         result.m_data->m_backwardFunc = addBackwardFunc;
         return result;
     }
@@ -2058,8 +2055,7 @@ public:
         Tensor result(shape(), { .m_requireGrad=isRequireGrad() || other.isRequireGrad(), .m_dtype=dataType(),
                                  .m_device=device()});
         result.m_data->m_value = lhs.m_data->m_value - rhs.m_data->m_value;
-        result.m_data->m_a = lhs.m_data;
-        result.m_data->m_b = rhs.m_data;
+        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
         result.m_data->m_backwardFunc = subBackwardFunc;
         return result;
     }
@@ -2075,8 +2071,7 @@ public:
         Tensor result(shape(), { .m_requireGrad=isRequireGrad() || other.isRequireGrad(), .m_dtype=dataType(),
                                  .m_device=device()});
         result.m_data->m_value = lhs.m_data->m_value * rhs.m_data->m_value;
-        result.m_data->m_a = lhs.m_data;
-        result.m_data->m_b = rhs.m_data;
+        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
         result.m_data->m_backwardFunc = mulBackwardFunc;
         return result;
     }
@@ -2092,8 +2087,7 @@ public:
         Tensor result(bcShape, { .m_requireGrad=isRequireGrad() || other.isRequireGrad(), .m_dtype=dataType(),
                                  .m_device=device() });
         result.m_data->m_value = lhs.m_data->m_value / rhs.m_data->m_value;
-        result.m_data->m_a = lhs.m_data;
-        result.m_data->m_b = rhs.m_data;
+        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
         result.m_data->m_backwardFunc = divBackwardFunc;
         return result;
     }
@@ -2102,7 +2096,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = -m_data->m_value;
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = unaryBackwardFunc;
         return result;
     }
@@ -2167,7 +2161,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.sqrt();
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = sqrtBackwardFunc;
         return result;
     };
@@ -2176,7 +2170,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.sin();
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = sinBackwardFunc;
         return result;
     };
@@ -2185,7 +2179,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.cos();
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = cosBackwardFunc;
         return result;
     };
@@ -2194,7 +2188,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.tanh();
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = tanhBackwardFunc;
         return result;
     };
@@ -2203,7 +2197,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.log();
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = logBackwardFunc;
         return result;
     };
@@ -2212,7 +2206,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.exp();
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = expBackwardFunc;
         return result;
     };
@@ -2221,7 +2215,7 @@ public:
     {
         Tensor result({}, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.sum();
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = sumBackwardFunc;
         return result;
     }
@@ -2230,7 +2224,7 @@ public:
     {
         Tensor result({}, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.sum(dim, keepDim);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dim0 = dim >= 0 ? dim : dim + m_data->m_value.shape().size();
         result.m_data->m_keepDim = keepDim;
         result.m_data->m_backwardFunc = sumBackwardFunc2;
@@ -2252,7 +2246,7 @@ public:
     {
         Tensor result({}, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.max();
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = maxBackwardFunc;
         return result;
     }
@@ -2261,7 +2255,7 @@ public:
     {
         Tensor result({}, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.max(dim, keepDim);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dim0 = dim >= 0 ? dim : dim + m_data->m_value.shape().size();
         result.m_data->m_backwardFunc = maxBackwardFunc2;
         return result;
@@ -2289,8 +2283,7 @@ public:
         Tensor expTensor(exp, shape(), opt);
         Tensor result(shape(), opt);
         result.m_data->m_value = m_data->m_value.pow(expTensor.m_data->m_value);
-        result.m_data->m_a = m_data;
-        result.m_data->m_b = expTensor.m_data;
+        result.m_data->m_inputs = { m_data, expTensor.m_data };
         result.m_data->m_backwardFunc = powBackwardFunc;
         return result;
     }
@@ -2304,8 +2297,7 @@ public:
 
         Tensor result(bcShape, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = lhs.m_data->m_value.pow(rhs.m_data->m_value);
-        result.m_data->m_a = lhs.m_data;
-        result.m_data->m_b = rhs.m_data;
+        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
         result.m_data->m_backwardFunc = powBackwardFunc;
         return result;
     }
@@ -2319,8 +2311,7 @@ public:
         Tensor result({shape()[0], rhs.shape()[1]}, { .m_requireGrad=isRequireGrad() || rhs.isRequireGrad(),
                                                       .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = lhs.m_data->m_value.matmul(rhs.m_data->m_value);
-        result.m_data->m_a = lhs.m_data;
-        result.m_data->m_b = rhs.m_data;
+        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
         result.m_data->m_backwardFunc = matmulBackwardFunc;
         return result;
     }
@@ -2329,7 +2320,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.transpose(dim0, dim1);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dim0 = dim0;
         result.m_data->m_dim1 = dim1;
         result.m_data->m_backwardFunc = transposeBackwardFunc;
@@ -2340,7 +2331,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.permute(dims);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dims = dims;
         result.m_data->m_backwardFunc = permuteBackwardFunc;
         return result;
@@ -2351,7 +2342,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.slice(dim, startOpt, endOpt, step);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dim0 = dim;
         result.m_data->m_dim1 = step;
         result.m_data->m_start = startOpt;
@@ -2364,7 +2355,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.squeeze(dim);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dim0 = dim;
         result.m_data->m_backwardFunc = squeezeBackwardFunc;
         return result;
@@ -2374,7 +2365,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.unsqueeze(dim);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dim0 = dim;
         result.m_data->m_backwardFunc = unsqueezeBackwardFunc;
         return result;
@@ -2438,7 +2429,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.tril(diagonal);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dim0 = diagonal;
         result.m_data->m_backwardFunc = trillBackwardFunc;
         return result;
@@ -2448,7 +2439,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.triu(diagonal);
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dim0 = diagonal;
         result.m_data->m_backwardFunc = triuBackwardFunc;
         return result;
@@ -2477,7 +2468,7 @@ public:
 
         Tensor result(newShape, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.indexSelect(dim, indices.value());
-        result.m_data->m_a = m_data;
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_dim0 = dim;
         result.m_data->m_indices = indices.value();
         result.m_data->m_backwardFunc = indexSelectBackwardFunc;
@@ -2538,7 +2529,7 @@ public:
         {
             result.value().sliceSet(tensors[i].to(promotedDType).value(), dim, dimSize, dimSize + tensors[i].shape()[dim], 1, true);
             // Store original tensors for the back prop.
-            result.m_data->m_aMulti.emplace_back(tensors[i].m_data);
+            result.m_data->m_inputs.emplace_back(tensors[i].m_data);
             dimSize += tensors[i].shape()[dim];
         }
         result.m_data->m_dim0 = dim;
