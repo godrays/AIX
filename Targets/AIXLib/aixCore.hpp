@@ -31,6 +31,7 @@
 #include <stack>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #if defined(_MSC_VER)
 #include <BaseTsd.h>
@@ -438,17 +439,29 @@ public:
     // Returns a new TensorValue with a new shape.
     TensorValue reshape(const Shape & newShape) const
     {
-        if (!isContiguous())
-        {
-            return contiguous().reshape(newShape);
-        }
         size_t newSize = std::accumulate(newShape.begin(), newShape.end(), static_cast<size_t>(1), std::multiplies<>());
         if (m_size != newSize)
         {
             throw std::invalid_argument("Reshape error: element count mismatch (" +
                                         std::to_string(m_size) + " vs " + std::to_string(newSize) + ").");
         }
-        return {m_storage, m_size, m_offset, newShape, m_device, m_dType};
+
+        if (newShape == m_shape)
+        {
+            return *this;
+        }
+
+        if (isContiguous())
+        {
+            return {m_storage, m_size, m_offset, newShape, m_device, m_dType};
+        }
+
+        if (auto newStrides = computeReshapeViewStrides(m_shape, m_strides, newShape, m_size))
+        {
+            return {m_storage, m_size, m_offset, newShape, *newStrides, m_device, m_dType};
+        }
+
+        return contiguous().reshape(newShape);
     }
 
     // Equalize tensor data types by promoting data type of tensors.
@@ -531,17 +544,19 @@ public:
 
         // Calculate new strides for broadcasting.
         std::vector<size_t> newStrides(newShape.size(), 0);
-        size_t currentStride = 1;
         for (int i = m_shape.size() - 1, j = newShape.size() - 1; j >= 0; --i, --j)
         {
-            if (i < 0 || m_shape[i] != newShape[j])
+            if (i < 0)
             {
                 newStrides[j] = 0;      // Broadcast dimension.
             }
+            else if (m_shape[i] == newShape[j])
+            {
+                newStrides[j] = m_strides[i];
+            }
             else
             {
-                newStrides[j] = currentStride;
-                currentStride *= m_shape[i];
+                newStrides[j] = 0;      // Broadcast dimension.
             }
         }
 
@@ -972,8 +987,10 @@ public:
         if (m_shape[dim] == 1)
         {
             auto squeezedShape = m_shape;
+            auto squeezedStrides = m_strides;
             squeezedShape.erase(squeezedShape.begin() + dim);
-            return reshape(squeezedShape);
+            squeezedStrides.erase(squeezedStrides.begin() + dim);
+            return {m_storage, m_size, m_offset, squeezedShape, squeezedStrides, m_device, m_dType};
         }
         return *this;
     }
@@ -987,8 +1004,24 @@ public:
         }
 
         auto unsqueezedShape = m_shape;
+        auto unsqueezedStrides = m_strides;
         unsqueezedShape.insert(unsqueezedShape.begin() + dim, 1);
-        return reshape(unsqueezedShape);
+
+        size_t insertedStride = 1;
+        if (!m_shape.empty())
+        {
+            if (dim < static_cast<ssize_t>(m_shape.size()))
+            {
+                insertedStride = m_strides[dim] * m_shape[dim];
+            }
+            else
+            {
+                insertedStride = 1;
+            }
+        }
+
+        unsqueezedStrides.insert(unsqueezedStrides.begin() + dim, insertedStride);
+        return {m_storage, m_size, m_offset, unsqueezedShape, unsqueezedStrides, m_device, m_dType};
     }
 
     TensorValue slice(ssize_t dim=0, std::optional<ssize_t> startOpt = std::nullopt,
@@ -1376,15 +1409,131 @@ private:
         return m_strides == expectedStrides;
     }
 
+    static std::optional<Stride> computeReshapeViewStrides(const Shape& oldShape, const Stride& oldStrides,
+                                                           const Shape& newShape, size_t size)
+    {
+        if (oldShape == newShape)
+        {
+            return oldStrides;
+        }
+
+        if (size <= 1)
+        {
+            return computeContiguousStrides(newShape);
+        }
+
+        for (size_t i = 0; i < oldStrides.size(); ++i)
+        {
+            if (oldStrides[i] == 0)
+            {
+                return std::nullopt;
+            }
+        }
+
+        struct Chunk
+        {
+            size_t numel;
+            size_t baseStride;
+        };
+
+        std::vector<Chunk> chunks;
+        size_t chunkNumel = 1;
+        size_t chunkBaseStride = 1;
+        bool hasChunk = false;
+        for (int64_t i = static_cast<int64_t>(oldShape.size()) - 1; i >= 0; --i)
+        {
+            if (oldShape[i] == 1)
+            {
+                continue;
+            }
+
+            if (!hasChunk)
+            {
+                chunkNumel = oldShape[i];
+                chunkBaseStride = oldStrides[i];
+                hasChunk = true;
+                continue;
+            }
+
+            if (oldStrides[i] == chunkBaseStride * chunkNumel)
+            {
+                chunkNumel *= oldShape[i];
+                continue;
+            }
+
+            chunks.push_back({chunkNumel, chunkBaseStride});
+            chunkNumel = oldShape[i];
+            chunkBaseStride = oldStrides[i];
+        }
+
+        if (!hasChunk)
+        {
+            return computeContiguousStrides(newShape);
+        }
+        chunks.push_back({chunkNumel, chunkBaseStride});
+
+        Stride newStrides(newShape.size(), 1);
+        int64_t newDim = static_cast<int64_t>(newShape.size()) - 1;
+        for (const auto& chunk : chunks)
+        {
+            size_t viewNumel = 1;
+            size_t viewStride = chunk.baseStride;
+
+            do
+            {
+                while (newDim >= 0 && newShape[newDim] == 1)
+                {
+                    newStrides[newDim] = viewStride;
+                    --newDim;
+                }
+
+                if (newDim < 0)
+                {
+                    return std::nullopt;
+                }
+
+                newStrides[newDim] = viewStride;
+                viewStride *= newShape[newDim];
+                viewNumel *= newShape[newDim];
+                --newDim;
+            }
+            while (viewNumel < chunk.numel);
+
+            if (viewNumel != chunk.numel)
+            {
+                return std::nullopt;
+            }
+        }
+
+        while (newDim >= 0 && newShape[newDim] == 1)
+        {
+            newStrides[newDim] = (newDim + 1 < static_cast<int64_t>(newShape.size()))
+                                 ? newStrides[newDim + 1] * newShape[newDim + 1] : 1;
+            --newDim;
+        }
+
+        if (newDim >= 0)
+        {
+            return std::nullopt;
+        }
+
+        return newStrides;
+    }
+
     // Compute the strides based on the shape of the tensor
     Stride computeStrides() const
     {
-        Stride strides(m_shape.size());
+        return computeContiguousStrides(m_shape);
+    }
+
+    static Stride computeContiguousStrides(const Shape& shape)
+    {
+        Stride strides(shape.size());
         size_t stride = 1;
         for (int64_t i = strides.size() - 1; i >= 0; --i)
         {
             strides[i] = stride;
-            stride *= m_shape[i];
+            stride *= shape[i];
         }
         return strides;
     }

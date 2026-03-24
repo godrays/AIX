@@ -788,6 +788,45 @@ TEST_CASE("TensorValue - Reshape")
         CheckVectorApproxValues(x, TensorValue(data, newShape, &testDevice));
     }
 
+    SUBCASE("Stride-compatible non-contiguous reshape stays a view")
+    {
+        auto input = TensorValue({1.0f, 2.0f, 3.0f, 4.0f,
+                                  5.0f, 6.0f, 7.0f, 8.0f,
+                                  9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, &testDevice);
+        auto view = input.slice(1, 0, 4, 2);
+        auto reshaped = view.reshape({6});
+
+        CHECK_FALSE(view.isContiguous());
+        CHECK(reshaped.storage() == view.storage());
+        CHECK(reshaped.storageOffset() == view.storageOffset());
+        CHECK(reshaped.strides() == Stride{2});
+        CheckVectorApproxValues(reshaped, TensorValue({1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f}, {6}, &testDevice));
+    }
+
+    SUBCASE("Singleton-dimension reshape on non-contiguous view stays metadata-only")
+    {
+        auto input = TensorValue({1.0f, 2.0f, 3.0f, 4.0f,
+                                  5.0f, 6.0f, 7.0f, 8.0f,
+                                  9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, &testDevice);
+        auto view = input.slice(1, 0, 4, 2);
+        auto reshaped = view.reshape({3, 1, 2});
+
+        CHECK(reshaped.storage() == view.storage());
+        CHECK(reshaped.storageOffset() == view.storageOffset());
+        CHECK(reshaped.strides() == Stride{4, 4, 2});
+        CheckVectorApproxValues(reshaped, TensorValue({1.0f, 3.0f,
+                                                       5.0f, 7.0f,
+                                                       9.0f, 11.0f}, {3, 1, 2}, &testDevice));
+    }
+
+    SUBCASE("Broadcast stride-0 reshape remains rejected")
+    {
+        auto view = TensorValue({1.0f, 2.0f, 3.0f}, {1, 3}, &testDevice).broadcastTo({2, 3});
+
+        CHECK_FALSE(view.isContiguous());
+        DOCTEST_CHECK_THROWS_AS(view.reshape({6}), std::invalid_argument);
+    }
+
     SUBCASE("Invalid reshape throws invalid_argument")
     {
         TensorValue inputs = TensorValue({1.0,2.0,3.0,4.0,5.0}, {1,5}, &testDevice);

@@ -2303,6 +2303,58 @@ TEST_CASE("Auto Grad - Reshape")
                                                           -7.0, -8.0,}, t222.grad().shape()).value());
     }
 
+    SUBCASE("Non-contiguous zero-copy reshape backward")
+    {
+        auto base = aix::arange(1.0, 13.0, 1.0).reshape({3, 4}).requireGrad(true);
+        auto reshaped = base.slice(1, 0, 4, 2).reshape({6});
+        auto weights = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, Shape{6});
+
+        auto out = reshaped * weights;
+        out.backward(1, out.shape());
+
+        CheckVectorApproxValues(base.grad(), aix::tensor({1.0f, 0.0f, 2.0f, 0.0f,
+                                                          3.0f, 0.0f, 4.0f, 0.0f,
+                                                          5.0f, 0.0f, 6.0f, 0.0f}, {3, 4}).value());
+    }
+
+    SUBCASE("Non-contiguous copy-required reshape backward")
+    {
+        auto base = aix::arange(1.0, 7.0, 1.0).reshape({2, 3}).requireGrad(true);
+        auto reshaped = base.transpose(0, 1).reshape({2, 3});
+        auto weights = aix::tensor({1.0f, 2.0f, 3.0f,
+                                    4.0f, 5.0f, 6.0f}, {2, 3});
+
+        auto out = reshaped * weights;
+        out.backward(1, out.shape());
+
+        CheckVectorApproxValues(base.grad(), aix::tensor({1.0f, 3.0f, 5.0f,
+                                                          2.0f, 4.0f, 6.0f}, {2, 3}).value());
+    }
+
+    SUBCASE("Metal non-contiguous zero-copy reshape backward parity")
+    {
+        auto metalDevice = aix::createDevice(aix::DeviceType::kGPU_METAL);
+        if (!metalDevice)
+        {
+            return;
+        }
+
+        auto base = aix::arange(1.0, 13.0, 1.0, { .m_device=metalDevice.get() }).reshape({3, 4}).requireGrad(true);
+        auto reshaped = base.slice(1, 0, 4, 2).reshape({6});
+        auto weights = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, Shape{6}, { .m_device=metalDevice.get() });
+
+        CHECK(reshaped.value().storage() == base.slice(1, 0, 4, 2).value().storage());
+        CHECK(reshaped.value().strides() == Stride{2});
+
+        auto out = reshaped * weights;
+        out.backward(1, out.shape());
+
+        CheckVectorApproxValues(base.grad(), aix::tensor({1.0f, 0.0f, 2.0f, 0.0f,
+                                                          3.0f, 0.0f, 4.0f, 0.0f,
+                                                          5.0f, 0.0f, 6.0f, 0.0f}, {3, 4},
+                                                        { .m_device=metalDevice.get() }).value());
+    }
+
 }
 
 

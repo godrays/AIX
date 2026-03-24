@@ -174,6 +174,61 @@ TEST_CASE("Tensor - matmul()")
 }
 
 
+TEST_CASE("Tensor - matmul equivalent broadcast reduction expression")
+{
+    auto check = [](aix::Device* device)
+    {
+        auto a = tensor({1.0f, 2.0f, 3.0f,
+                         4.0f, 5.0f, 6.0f,
+                         7.0f, 8.0f, 9.0f}, {3, 3}, { .m_device=device });
+        auto b = tensor({9.0f, 8.0f, 7.0f,
+                         6.0f, 5.0f, 4.0f,
+                         3.0f, 2.0f, 1.0f}, {3, 3}, { .m_device=device });
+
+        auto lhsView = a.reshape({3, 1, 3});
+        auto rhsTranspose = b.transpose(0, 1);
+        auto rhsReshaped = rhsTranspose.reshape({1, 3, 3});
+        auto expr = (lhsView * rhsReshaped).sum(2);
+        auto mm = a.matmul(b);
+
+        CheckVectorApproxValues(expr, mm);
+
+        CHECK(lhsView.value().storage() == a.value().storage());
+        CHECK(lhsView.value().storageOffset() == a.value().storageOffset());
+        CHECK(lhsView.value().data() == a.value().data());
+
+        CHECK(rhsTranspose.value().storage() == b.value().storage());
+        CHECK(rhsTranspose.value().storageOffset() == b.value().storageOffset());
+        CHECK(rhsTranspose.value().data() == b.value().data());
+        CHECK_FALSE(rhsTranspose.value().isContiguous());
+
+        CHECK(rhsReshaped.value().storage() == rhsTranspose.value().storage());
+        CHECK(rhsReshaped.value().storageOffset() == rhsTranspose.value().storageOffset());
+        CHECK(rhsReshaped.value().data() == rhsTranspose.value().data());
+        CHECK_FALSE(rhsReshaped.value().isContiguous());
+        CHECK(rhsReshaped.value().strides() == Stride{3, 1, 3});
+
+        auto lhsBroadcast = lhsView.broadcastTo({3, 3, 3});
+        auto rhsBroadcast = rhsReshaped.broadcastTo({3, 3, 3});
+        CHECK(lhsBroadcast.value().storage() == lhsView.value().storage());
+        CHECK(rhsBroadcast.value().storage() == rhsReshaped.value().storage());
+    };
+
+    SUBCASE("CPU")
+    {
+        aix::DeviceCPU device;
+        check(&device);
+    }
+
+    SUBCASE("Metal")
+    {
+        auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+        if (!device) return;
+        check(device.get());
+    }
+}
+
+
 TEST_CASE("Tensor - print")
 {
     SUBCASE("scalar tensor")
@@ -705,6 +760,66 @@ TEST_CASE("Tensor - Reshape")
         CheckVectorApproxValues(reshaped, tensor({1.0f, 4.0f, 2.0f,
                                                   5.0f, 3.0f, 6.0f}, {2, 3}));
         CHECK(reshaped.value().contiguous().data<float>()[1] == Approx(4.0f));
+    }
+
+    SUBCASE("Stride-compatible non-contiguous reshape stays zero-copy on CPU and Metal")
+    {
+        DeviceCPU cpuDevice;
+        auto expected = tensor({1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f}, {6}, { .m_device=&cpuDevice });
+
+        Tensor cpuInput = tensor({1.0f, 2.0f, 3.0f, 4.0f,
+                                  5.0f, 6.0f, 7.0f, 8.0f,
+                                  9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, { .m_device=&cpuDevice });
+        auto cpuView = cpuInput.slice(1, 0, 4, 2);
+        auto cpuReshaped = cpuView.reshape({6});
+
+        CHECK_FALSE(cpuView.value().isContiguous());
+        CHECK(cpuReshaped.value().storage() == cpuView.value().storage());
+        CHECK(cpuReshaped.value().storageOffset() == cpuView.value().storageOffset());
+        CHECK(cpuReshaped.value().strides() == Stride{2});
+        CheckVectorApproxValues(cpuReshaped, expected);
+
+        auto metalDevice = aix::createDevice(aix::DeviceType::kGPU_METAL);
+        if (metalDevice)
+        {
+            Tensor metalInput = tensor({1.0f, 2.0f, 3.0f, 4.0f,
+                                        5.0f, 6.0f, 7.0f, 8.0f,
+                                        9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, { .m_device=metalDevice.get() });
+            auto metalView = metalInput.slice(1, 0, 4, 2);
+            auto metalReshaped = metalView.reshape({6});
+
+            CHECK_FALSE(metalView.value().isContiguous());
+            CHECK(metalReshaped.value().storage() == metalView.value().storage());
+            CHECK(metalReshaped.value().storageOffset() == metalView.value().storageOffset());
+            CHECK(metalReshaped.value().strides() == Stride{2});
+            CheckVectorApproxValues(metalReshaped, tensor({1.0f, 3.0f, 5.0f, 7.0f, 9.0f, 11.0f}, {6},
+                                                          { .m_device=metalDevice.get() }));
+        }
+    }
+
+    SUBCASE("Singleton reshape on non-contiguous view stays zero-copy")
+    {
+        auto input = tensor({1.0f, 2.0f, 3.0f, 4.0f,
+                             5.0f, 6.0f, 7.0f, 8.0f,
+                             9.0f, 10.0f, 11.0f, 12.0f}, {3, 4});
+        auto view = input.slice(1, 0, 4, 2);
+        auto reshaped = view.reshape({3, 1, 2});
+
+        CHECK(reshaped.value().storage() == view.value().storage());
+        CHECK(reshaped.value().storageOffset() == view.value().storageOffset());
+        CHECK(reshaped.value().strides() == Stride{4, 4, 2});
+        CheckVectorApproxValues(reshaped, tensor({1.0f, 3.0f,
+                                                  5.0f, 7.0f,
+                                                  9.0f, 11.0f}, {3, 1, 2}));
+    }
+
+    SUBCASE("Broadcast stride-0 reshape remains rejected")
+    {
+        auto input = tensor({1.0f, 2.0f, 3.0f}, {1, 3});
+        auto view = input.broadcastTo({2, 3});
+
+        CHECK_FALSE(view.value().isContiguous());
+        DOCTEST_CHECK_THROWS_AS(view.reshape({6}), std::invalid_argument);
     }
 
     SUBCASE("Size mismatch")
