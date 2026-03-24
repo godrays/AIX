@@ -187,6 +187,10 @@ protected:
                                           const MTL::ComputePipelineState* compFuncPSO, const MTL::Size& gridSize,
                                           const MTL::Size& threadsPerTG) const;
 
+    DeviceTensorParams ensureContiguous(const DeviceTensorParams& params);
+
+    void clearContiguousTemps();
+
     void executeDoubleArrayCmd(const DeviceTensorParams& a, const DeviceTensorParams& result,
                                const MTL::ComputePipelineState* compFuncPSO, const std::string & cmdName);
 
@@ -250,6 +254,7 @@ protected:
     MTL::ComputePipelineState*   m_compFuncPSOIndexSelect[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOIndexAdd[aix::DataTypeCount]{nullptr};
     std::vector<std::pair<MTL::Buffer*, void*>>    m_tempBuffers;
+    std::vector<void*>                              m_contiguousTempAllocations;
     std::unordered_map<const void*, MTL::Buffer*>  m_allocMap;
     std::unique_ptr<MetalAllocator>  m_allocator;
     std::unique_ptr<MTLBufferCache>  m_bufferCache;

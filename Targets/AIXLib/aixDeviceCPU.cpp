@@ -21,6 +21,7 @@ namespace aix
 static size_t translationIndex(size_t index, const Shape& shape, const Shape& newShape);
 static size_t flattenIndex(const Stride& indices, const Stride& strides);
 static Stride unflattenIndex(size_t index, const Stride& strides);
+static size_t physicalIndex(size_t flatIndex, size_t offset, const Shape& shape, const Stride& strides);
 
 Device::~Device() = default;
 
@@ -31,9 +32,10 @@ static void addGeneric(const DeviceTensorParams& a1, const DeviceTensorParams& a
     auto t2  = static_cast<const T*>(a2.data);
     auto res = static_cast<T*>(result.data);
 
-    for (size_t i = 0; i < a1.size; ++i)
+    for (size_t i = 0; i < result.size; ++i)
     {
-        res[i] = t1[i] + t2[i];
+        res[i] = t1[physicalIndex(i, a1.offset, a1.shape, a1.strides)]
+               + t2[physicalIndex(i, a2.offset, a2.shape, a2.strides)];
     }
 }
 
@@ -44,9 +46,10 @@ static void subGeneric(const DeviceTensorParams& a1, const DeviceTensorParams& a
     auto t2  = static_cast<const T*>(a2.data);
     auto res = static_cast<T*>(result.data);
 
-    for (size_t i = 0; i < a1.size; ++i)
+    for (size_t i = 0; i < result.size; ++i)
     {
-        res[i] = t1[i] - t2[i];
+        res[i] = t1[physicalIndex(i, a1.offset, a1.shape, a1.strides)]
+               - t2[physicalIndex(i, a2.offset, a2.shape, a2.strides)];
     }
 }
 
@@ -57,9 +60,10 @@ static void mulGeneric(const DeviceTensorParams& a1, const DeviceTensorParams& a
     auto t2  = static_cast<const T*>(a2.data);
     auto res = static_cast<T*>(result.data);
 
-    for (size_t i = 0; i < a1.size; ++i)
+    for (size_t i = 0; i < result.size; ++i)
     {
-        res[i] = t1[i] * t2[i];
+        res[i] = t1[physicalIndex(i, a1.offset, a1.shape, a1.strides)]
+               * t2[physicalIndex(i, a2.offset, a2.shape, a2.strides)];
     }
 }
 
@@ -70,9 +74,10 @@ static void divGeneric(const DeviceTensorParams& a1, const DeviceTensorParams& a
     auto t2  = static_cast<const T*>(a2.data);
     auto res = static_cast<T*>(result.data);
 
-    for (size_t i = 0; i < a1.size; ++i)
+    for (size_t i = 0; i < result.size; ++i)
     {
-        res[i] = t1[i] / t2[i];
+        res[i] = t1[physicalIndex(i, a1.offset, a1.shape, a1.strides)]
+               / t2[physicalIndex(i, a2.offset, a2.shape, a2.strides)];
     }
 }
 
@@ -84,7 +89,7 @@ static void unaryGeneric(const DeviceTensorParams& a1, const DeviceTensorParams&
 
     for (size_t i = 0; i < a1.size; ++i)
     {
-        res[i] = -t1[i];
+        res[i] = -t1[physicalIndex(i, a1.offset, a1.shape, a1.strides)];
     }
 }
 
@@ -141,7 +146,7 @@ static void sumGeneric(const DeviceTensorParams& a, const DeviceTensorParams& re
     T sum = 0;
     for (size_t i = 0; i < a.size; ++i)
     {
-        sum += t1[i];
+        sum += t1[physicalIndex(i, a.offset, a.shape, a.strides)];
     }
     *res = sum;
 }
@@ -154,7 +159,7 @@ static void sqrtGeneric(const DeviceTensorParams& a, const DeviceTensorParams& r
 
     for (size_t i = 0; i < a.size; ++i)
     {
-        auto value = std::sqrt(static_cast<long double>(t1[i]));
+        auto value = std::sqrt(static_cast<long double>(t1[physicalIndex(i, a.offset, a.shape, a.strides)]));
         res[i] = convertGenericValue<long double, T>(value);
     }
 }
@@ -167,7 +172,7 @@ static void sinGeneric(const DeviceTensorParams& a, const DeviceTensorParams& re
 
     for (size_t i = 0; i < a.size; ++i)
     {
-        res[i] = std::sin(t1[i]);
+        res[i] = std::sin(t1[physicalIndex(i, a.offset, a.shape, a.strides)]);
     }
 }
 
@@ -179,7 +184,7 @@ static void cosGeneric(const DeviceTensorParams& a, const DeviceTensorParams& re
 
     for (size_t i = 0; i < a.size; ++i)
     {
-        res[i] = std::cos(t1[i]);
+        res[i] = std::cos(t1[physicalIndex(i, a.offset, a.shape, a.strides)]);
     }
 }
 
@@ -191,7 +196,7 @@ static void tanhGeneric(const DeviceTensorParams& a, const DeviceTensorParams& r
 
     for (size_t i = 0; i < a.size; ++i)
     {
-        res[i] = std::tanh(t1[i]);
+        res[i] = std::tanh(t1[physicalIndex(i, a.offset, a.shape, a.strides)]);
     }
 }
 
@@ -203,7 +208,7 @@ static void logGeneric(const DeviceTensorParams& a, const DeviceTensorParams& re
 
     for (size_t i = 0; i < a.size; ++i)
     {
-        auto value = std::log(static_cast<long double>(t1[i]));
+        auto value = std::log(static_cast<long double>(t1[physicalIndex(i, a.offset, a.shape, a.strides)]));
         res[i] = convertGenericValue<long double, T>(value);
     }
 }
@@ -216,7 +221,7 @@ static void expGeneric(const DeviceTensorParams& a, const DeviceTensorParams& re
 
     for (size_t i = 0; i < a.size; ++i)
     {
-        auto value = std::exp(static_cast<long double>(t1[i]));
+        auto value = std::exp(static_cast<long double>(t1[physicalIndex(i, a.offset, a.shape, a.strides)]));
         res[i] = convertGenericValue<long double, T>(value);
     }
 }
@@ -230,7 +235,8 @@ static void powGeneric(const DeviceTensorParams& a, const DeviceTensorParams& ex
 
     for (size_t i = 0; i < a.size; ++i)
     {
-        auto value = std::pow(static_cast<long double>(t1[i]), static_cast<long double>(t2[i]));
+        auto value = std::pow(static_cast<long double>(t1[physicalIndex(i, a.offset, a.shape, a.strides)]),
+                              static_cast<long double>(t2[physicalIndex(i, exp.offset, exp.shape, exp.strides)]));
         res[i] = convertGenericValue<long double, T>(value);
     }
 }
@@ -241,10 +247,10 @@ static void maxGeneric(const DeviceTensorParams& a, const DeviceTensorParams& re
     auto t  = static_cast<const T*>(a.data);
     auto res = static_cast<T*>(result.data);
 
-    res[0] = t[0];
+    res[0] = t[physicalIndex(0, a.offset, a.shape, a.strides)];
     for (size_t i = 1; i < a.size; ++i)
     {
-        res[0] = std::max<T>(res[0], t[i]);
+        res[0] = std::max<T>(res[0], t[physicalIndex(i, a.offset, a.shape, a.strides)]);
     }
 }
 
@@ -254,13 +260,13 @@ static void argmaxGeneric(const DeviceTensorParams& a, const DeviceTensorParams&
     auto t  = static_cast<const T*>(a.data);
     auto res = static_cast<T2*>(result.data);
 
-    T max = t[0];
+    T max = t[physicalIndex(0, a.offset, a.shape, a.strides)];
     res[0] = 0;
     for (size_t i = 1; i < a.size; ++i)
     {
-        if (t[i] > max)
+        if (t[physicalIndex(i, a.offset, a.shape, a.strides)] > max)
         {
-            max = t[i];
+            max = t[physicalIndex(i, a.offset, a.shape, a.strides)];
             res[0] = i;
         }
     }
@@ -280,10 +286,10 @@ static void argmaxToGeneric(const DeviceTensorParams& src, const DeviceTensorPar
     for (size_t index = 0; index < src.size; ++index)
     {
         auto transIndex = translationIndex(index, dst.shape, src.shape);
-        if (!tInitialized[transIndex] || tSrc[index] > tmaxTemp[transIndex])
+        if (!tInitialized[transIndex] || tSrc[physicalIndex(index, src.offset, src.shape, src.strides)] > tmaxTemp[transIndex])
         {
             tInitialized[transIndex] = true;
-            tmaxTemp[transIndex] = tSrc[index];
+            tmaxTemp[transIndex] = tSrc[physicalIndex(index, src.offset, src.shape, src.strides)];
             tDst[transIndex] = (index / src.strides[dim]) % src.shape[dim];
         }
     }
@@ -297,14 +303,14 @@ static void argmaxIndicesGeneric(const DeviceTensorParams& a, const DeviceTensor
     auto t  = static_cast<const T*>(a.data);
     auto res = static_cast<T2*>(result.data);
 
-    T max = t[0];
+    T max = t[physicalIndex(0, a.offset, a.shape, a.strides)];
     T2 index = res[0] = 0;
     for (size_t i = 1; i < a.size; ++i)
     {
         res[i] = 0;
-        if (t[i] > max)
+        if (t[physicalIndex(i, a.offset, a.shape, a.strides)] > max)
         {
-            max = t[i];
+            max = t[physicalIndex(i, a.offset, a.shape, a.strides)];
             index = i;
         }
     }
@@ -335,10 +341,10 @@ static void argmaxIndicesToGeneric(const DeviceTensorParams& src, const DeviceTe
     for (size_t index = 0; index < src.size; ++index)
     {
         auto transIndex = translationIndex(index, dstShape, src.shape);
-        if (!tInitialized[transIndex] || tSrc[index] > tmaxTemp[transIndex])
+        if (!tInitialized[transIndex] || tSrc[physicalIndex(index, src.offset, src.shape, src.strides)] > tmaxTemp[transIndex])
         {
             tInitialized[transIndex] = true;
-            tmaxTemp[transIndex] = tSrc[index];
+            tmaxTemp[transIndex] = tSrc[physicalIndex(index, src.offset, src.shape, src.strides)];
             tDstTemp[transIndex] = index;
         }
     }
@@ -373,7 +379,9 @@ static void matmulGeneric(const DeviceTensorParams& a, const DeviceTensorParams&
             T sum = 0;
             for (size_t k = 0; k < inner; ++k)
             {
-                sum += t1[i * a.shape[1] + k] * t2[k * n + j];
+                size_t aIdx = physicalIndex(i * inner + k, a.offset, a.shape, a.strides);
+                size_t bIdx = physicalIndex(k * n + j, b.offset, b.shape, b.strides);
+                sum += t1[aIdx] * t2[bIdx];
             }
             res[i * n + j] = sum;
         }
@@ -422,14 +430,7 @@ static void contiguousGeneric(const DeviceTensorParams& src, const DeviceTensorP
 
     for (size_t i=0; i<dst.size; ++i)
     {
-        size_t idx = i;
-        size_t ofs = src.offset;
-        for (ssize_t dim = ssize_t(src.shape.size()) - 1; dim >= 0; --dim)
-        {
-            auto dimIndex = idx % src.shape[dim];
-            idx /= src.shape[dim];
-            ofs += dimIndex * src.strides[dim];
-        }
+        size_t ofs = physicalIndex(i, src.offset, src.shape, src.strides);
 
         // Copy the element from non-contiguous source to contiguous destination.
         tDst[i] = tSrc[ofs];
@@ -447,7 +448,7 @@ static void reduceToGeneric(const DeviceTensorParams& src, const DeviceTensorPar
     // Summing the gradients correctly aggregates these contributions.
     for (size_t index = 0; index < src.size; ++index)
     {
-        tDst[translationIndex(index, dst.shape, src.shape)] += tSrc[index];
+        tDst[translationIndex(index, dst.shape, src.shape)] += tSrc[physicalIndex(index, src.offset, src.shape, src.strides)];
     }
 }
 
@@ -460,7 +461,7 @@ static void maxToGeneric(const DeviceTensorParams& src, const DeviceTensorParams
     for (size_t index = 0; index < src.size; ++index)
     {
         auto transIndex = translationIndex(index, dst.shape, src.shape);
-        tDst[transIndex] = std::max<T>(tDst[transIndex], tSrc[index]);
+        tDst[transIndex] = std::max<T>(tDst[transIndex], tSrc[physicalIndex(index, src.offset, src.shape, src.strides)]);
     }
 }
 
@@ -490,7 +491,7 @@ static void sliceSetGeneric(const DeviceTensorParams& src, const DeviceTensorPar
                 srcIndex += coordinate * dst.strides[i];
         }
 
-        tDst[srcIndex] = tSrc[index];
+        tDst[srcIndex] = tSrc[physicalIndex(index, src.offset, src.shape, src.strides)];
     }
 }
 
@@ -524,7 +525,7 @@ static void indexSelectGeneric(const DeviceTensorParams& src, const DeviceTensor
         size_t dstOffset = outer * indices.size * sliceSize + idx * sliceSize + elementWithinSlice;
 
         // Perform the copy operation.
-        tDst[dstOffset] = tSrc[srcOffset];
+        tDst[dstOffset] = tSrc[physicalIndex(srcOffset, src.offset, src.shape, src.strides)];
     }
 }
 
@@ -558,7 +559,7 @@ static void indexAddGeneric(const DeviceTensorParams& src, const DeviceTensorPar
         size_t srcOffset = outer * indices.size * sliceSize + idx * sliceSize + elementWithinSlice;
 
         // Perform the addition operation.
-        tDst[dstOffset] += tSrc[srcOffset];
+        tDst[dstOffset] += tSrc[physicalIndex(srcOffset, src.offset, src.shape, src.strides)];
     }
 }
 
@@ -654,6 +655,19 @@ static Stride unflattenIndex(size_t index, const Stride& strides)
         index %= strides[i];
     }
     return indices;
+}
+
+static size_t physicalIndex(size_t flatIndex, size_t offset, const Shape& shape, const Stride& strides)
+{
+    size_t idx = flatIndex;
+    size_t ofs = offset;
+    for (ssize_t dim = static_cast<ssize_t>(shape.size()) - 1; dim >= 0; --dim)
+    {
+        auto dimIndex = idx % shape[dim];
+        idx /= shape[dim];
+        ofs += dimIndex * strides[dim];
+    }
+    return ofs;
 }
 
 size_t Device::dataTypeSize(DataType dtype)

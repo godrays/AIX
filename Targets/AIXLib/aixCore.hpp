@@ -206,6 +206,16 @@ public:
         m_offset = offset;
     }
 
+    TensorValue(const std::shared_ptr<TensorStorage>& storage, size_t size, size_t offset, Shape shape, Stride strides,
+                Device* device, DataType dType = DataType::kFloat32) : m_dType(dType), m_shape(std::move(shape)),
+                m_strides(std::move(strides)), m_device(device)
+    {
+        assert(storage->device() == device);
+        m_storage = storage;
+        m_size = size;
+        m_offset = offset;
+    }
+
     // Constructor
     template<typename T>
     TensorValue(const std::initializer_list<T> & data, Shape shape, Device * device, DataType dType = DataType::kFloat32) :
@@ -248,6 +258,7 @@ public:
         validateSize(m_size, m_shape);
         // Each tensor array must use device specific memory allocator.
         m_storage = std::make_shared<TensorStorage>(device, m_size, dType);
+        m_isContiguous = computeIsContiguous();
     }
 
     // Constructor
@@ -268,29 +279,47 @@ public:
     }
 
     // Copy constructor
-    TensorValue(const TensorValue& other) noexcept
+    TensorValue(const TensorValue& other)
     {
         m_dType   = other.m_dType;
-        m_size    = other.m_size;
         m_shape   = other.m_shape;
-        m_strides = other.m_strides;
         m_device  = other.m_device;
-        m_storage = std::make_shared<TensorStorage>(m_device, other.m_size, other.m_dType);
-        m_device->copy(other.data(), other.m_dType, data(), other.m_dType, other.m_size);
+        m_size    = size();
+        m_storage = std::make_shared<TensorStorage>(m_device, m_size, m_dType);
+
+        if (other.isContiguous() && other.m_offset == 0)
+        {
+            m_strides = other.m_strides;
+            m_device->copy(other.data(), other.m_dType, data(), other.m_dType, m_size);
+        }
+        else
+        {
+            m_strides = computeStrides();
+            other.m_device->contiguous(other.deviceParams(), deviceParams());
+        }
     }
 
     // Copy assignment operator
-    TensorValue& operator=(const TensorValue& other) noexcept
+    TensorValue& operator=(const TensorValue& other)
     {
-        if (this != &other)     // Protect against self-assignment
+        if (this != &other)
         {
             m_dType   = other.m_dType;
-            m_size    = other.m_size;
             m_shape   = other.m_shape;
-            m_strides = other.m_strides;
             m_device  = other.m_device;
-            m_storage = std::make_shared<TensorStorage>(m_device, other.m_size, other.m_dType);
-            m_device->copy(other.data(), other.m_dType, data(), other.m_dType, other.m_size);
+            m_size    = size();
+            m_storage = std::make_shared<TensorStorage>(m_device, m_size, m_dType);
+
+            if (other.isContiguous() && other.m_offset == 0)
+            {
+                m_strides = other.m_strides;
+                m_device->copy(other.data(), other.m_dType, data(), other.m_dType, m_size);
+            }
+            else
+            {
+                m_strides = computeStrides();
+                other.m_device->contiguous(other.deviceParams(), deviceParams());
+            }
         }
 
         return *this;
@@ -299,14 +328,17 @@ public:
     // Move constructor
     TensorValue(TensorValue&& other) noexcept
     {
-        m_dType   = other.m_dType;
-        m_storage = other.m_storage;
-        m_size    = other.m_size;
-        m_shape   = other.m_shape;
-        m_strides = other.m_strides;
-        m_device  = other.m_device;
-        other.m_size   = 0;
-        other.m_device = nullptr;
+        m_dType         = other.m_dType;
+        m_storage       = other.m_storage;
+        m_size          = other.m_size;
+        m_offset        = other.m_offset;
+        m_shape         = other.m_shape;
+        m_strides       = other.m_strides;
+        m_isContiguous  = other.m_isContiguous;
+        m_device        = other.m_device;
+        other.m_size    = 0;
+        other.m_offset  = 0;
+        other.m_device  = nullptr;
     }
 
     // Move assignment operator
@@ -314,14 +346,17 @@ public:
     {
         if (this != &other)
         {
-            m_dType   = other.m_dType;
-            m_storage = other.m_storage;
-            m_size    = other.m_size;
-            m_shape   = other.m_shape;
-            m_strides = other.m_strides;
-            m_device  = other.m_device;
-            other.m_size   = 0;
-            other.m_device = nullptr;
+            m_dType         = other.m_dType;
+            m_storage       = other.m_storage;
+            m_size          = other.m_size;
+            m_offset        = other.m_offset;
+            m_shape         = other.m_shape;
+            m_strides       = other.m_strides;
+            m_isContiguous  = other.m_isContiguous;
+            m_device        = other.m_device;
+            other.m_size    = 0;
+            other.m_offset  = 0;
+            other.m_device  = nullptr;
         }
 
         return *this;
@@ -365,7 +400,10 @@ public:
     T* data()                   { return static_cast<T*>(m_storage->data()); }
 
     // Get the size of the data
-    size_t size() const         { return m_size; }
+    size_t size() const
+    {
+        return std::accumulate(m_shape.begin(), m_shape.end(), static_cast<size_t>(1), std::multiplies<>());
+    }
 
     // Get the device
     Device * device() const     { return m_device; }
@@ -373,15 +411,16 @@ public:
     // Get device tensor parameters.
     DeviceTensorParams deviceParams() const
     {
-        return { .data=m_storage->data(), .dtype=m_dType, .isContiguous=m_isContiguous, .offset=m_offset,
-                 .shape=m_shape, .size=m_size, .strides=m_strides };
+        return { .data=m_storage->data(), .dtype=m_dType, .isContiguous=isContiguous(), .offset=m_offset,
+                 .shape=m_shape, .size=size(), .strides=m_strides };
     };
 
     // Set the device
     TensorValue to(Device * device) const
     {
         if (m_device == device) return *this;
-        return {data(), m_size, m_dType, m_shape, device, m_dType};
+        auto materialized = isContiguous() && m_offset == 0 ? *this : contiguous();
+        return {materialized.data(), materialized.size(), materialized.dataType(), materialized.shape(), device, materialized.dataType()};
     }
     inline TensorValue to(std::unique_ptr<Device>& device) const    { return to(device.get()); }
     inline TensorValue to(std::shared_ptr<Device>& device) const    { return to(device.get()); }
@@ -399,6 +438,10 @@ public:
     // Returns a new TensorValue with a new shape.
     TensorValue reshape(const Shape & newShape) const
     {
+        if (!isContiguous())
+        {
+            return contiguous().reshape(newShape);
+        }
         size_t newSize = std::accumulate(newShape.begin(), newShape.end(), static_cast<size_t>(1), std::multiplies<>());
         if (m_size != newSize)
         {
@@ -413,7 +456,8 @@ public:
     {
         if (dataType() != newDataType)
         {
-            return {data(), size(), dataType(), shape(), device(), newDataType};
+            auto materialized = isContiguous() && m_offset == 0 ? *this : contiguous();
+            return {materialized.data(), materialized.size(), materialized.dataType(), materialized.shape(), device(), newDataType};
         }
         return *this;
     }
@@ -504,8 +548,7 @@ public:
         // Create a new TensorValue that shares the same storage.
         TensorValue result(m_storage, m_size, m_offset, newShape, m_device, m_dType);
         result.m_strides = std::move(newStrides);
-        result.m_isContiguous = false;
-        return result.contiguous();
+        return result;
     }
 
     // Reduces the TensorValue back to the original shape.
@@ -521,12 +564,12 @@ public:
     // Returns true if the tensor is contiguous.
     bool isContiguous() const
     {
-        return m_isContiguous;
+        return computeIsContiguous();
     }
 
     TensorValue contiguous() const
     {
-        if (isContiguous()) return *this;
+        if (isContiguous() && m_offset == 0) return *this;
 
         TensorValue result(m_shape, m_device, m_dType);
         m_device->contiguous(deviceParams(), result.deviceParams());
@@ -861,18 +904,16 @@ public:
         auto shapeSize = static_cast<ssize_t>(shape().size());
         dim0 = dim0 < 0 ? shapeSize + dim0 : dim0;
         dim1 = dim1 < 0 ? shapeSize + dim1 : dim1;
-
-        // Check dimensions
         if (dim0 < 0 || dim0 >= shapeSize || dim1 < 0 || dim1 >= shapeSize)
         {
             throw std::invalid_argument("Dimension is out of range for transpose.");
         }
-
         Shape newShape = m_shape;
+        Stride newStrides = m_strides;
         std::swap(newShape[dim0], newShape[dim1]);
-        TensorValue result(newShape, device(), m_dType);
-        m_device->transpose(deviceParams(), result.deviceParams(), dim0, dim1);
-        return result;
+        std::swap(newStrides[dim0], newStrides[dim1]);
+
+        return {m_storage, m_size, m_offset, newShape, newStrides, m_device, m_dType};
     }
 
     TensorValue permute(SIndex newDims) const
@@ -910,41 +951,14 @@ public:
 
         // Create the new shape.
         Shape newShape(shapeSize);
+        Stride newStrides(shapeSize);
         for (ssize_t i = 0; i < shapeSize; ++i)
         {
             newShape[i] = m_shape[newDims[i]];
+            newStrides[i] = m_strides[newDims[i]];
         }
 
-        TensorValue result(newShape, device(), m_dType);
-
-        // Perform series of transpositions.
-        Shape currShape = m_shape;
-        Stride currStride = m_strides;
-        TensorValue currTensor = *this;
-
-        SIndex currDims(shapeSize);
-        std::iota(currDims.begin(), currDims.end(), 0);     // Initialize to [0, 1, 2, ...]
-
-        for (ssize_t i=0; i<shapeSize; ++i)
-        {
-            if (currDims[i] == newDims[i]) continue;
-
-            // Find the position of newDims[i] in currentDims.
-            auto it = std::find(currDims.begin() + i, currDims.end(), newDims[i]);
-            size_t j = std::distance(currDims.begin(), it);
-
-            // Swap dimensions i and j.
-            std::swap(currDims[i], currDims[j]);
-            std::swap(currShape[i], currShape[j]);
-
-            // Perform the transpose.
-            TensorValue tempTensor(currShape, m_device, m_dType);
-            m_device->transpose(currTensor.deviceParams(), tempTensor.deviceParams(), j, i);
-            currTensor = std::move(tempTensor);
-            currStride = currTensor.strides();
-        }
-
-        return currTensor;
+        return {m_storage, m_size, m_offset, newShape, newStrides, m_device, m_dType};
     }
 
     TensorValue squeeze(ssize_t dim) const
@@ -1032,8 +1046,7 @@ public:
 
         TensorValue result(m_storage, newSize, newOffset, newShape, device(), dataType());
         result.m_strides = newStrides;
-        result.m_isContiguous = false;
-        return result.contiguous();
+        return result;
     }
 
     TensorValue sliceSet(const TensorValue& tensor, ssize_t dim=0, std::optional<ssize_t> startOpt = std::nullopt,
@@ -1318,17 +1331,24 @@ private:
     {
         if (shape() != other.shape() || dataType() != other.dataType())
         {
-            TensorValue lhs = *this;
-            TensorValue rhs = other;
-            prepareTensors(lhs, rhs);
-            (m_device->*func)(lhs.deviceParams(), rhs.deviceParams(), lhs.deviceParams());
-            *this = TensorValue(lhs.data(), lhs.size(), lhs.dataType(), lhs.shape(), lhs.device(), dataType());
+            TensorValue rhs = (dataType() != other.dataType()) ? other.to(m_dType) : TensorValue(other);
+            if (shape() != rhs.shape())
+            {
+                TensorValue lhs = *this;
+                auto bcShape = broadcastShapes(lhs.shape(), rhs.shape());
+                lhs = lhs.broadcastTo(bcShape);
+                rhs = rhs.broadcastTo(bcShape);
+                TensorValue result(lhs.shape(), lhs.device(), lhs.dataType());
+                (m_device->*func)(lhs.deviceParams(), rhs.deviceParams(), result.deviceParams());
+                *this = std::move(result);
+            }
+            else
+            {
+                (m_device->*func)(deviceParams(), rhs.deviceParams(), deviceParams());
+            }
             return *this;
         }
-        else
-        {
-            (m_device->*func)(deviceParams(), other.deviceParams(), deviceParams());
-        }
+        (m_device->*func)(deviceParams(), other.deviceParams(), deviceParams());
         return *this;
     }
 
@@ -1347,6 +1367,13 @@ private:
         TensorValue result(m_shape, m_device, m_dType);
         (m_device->*func)(deviceParams(), result.deviceParams());
         return result;
+    }
+
+    bool computeIsContiguous() const
+    {
+        if (m_shape.empty()) return true;
+        Stride expectedStrides = computeStrides();
+        return m_strides == expectedStrides;
     }
 
     // Compute the strides based on the shape of the tensor
@@ -1571,7 +1598,7 @@ public:
 
     TensorValue& grad()
     {
-        if (m_grad.size() == 0)
+        if (!m_grad.storage())
         {
             m_grad = TensorValue{m_value.shape(), m_value.device(), m_value.size(), m_value.strides(), m_value.dataType()};
             m_grad.fill(0);
@@ -1723,10 +1750,9 @@ public:
     Tensor broadcastTo(const Shape & newShape) const
     {
         if (shape() == newShape) return *this;
-        TensorValue tValue = m_data->m_value.broadcastTo(newShape);
-        Tensor result{tValue.data(), tValue.size(), tValue.dataType(), tValue.shape(),
-                      { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device()}};
-        result.m_data->m_inputs = { m_data };            // Keep the reference to the original tensor node
+        Tensor result(newShape, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device()});
+        result.m_data->m_value = m_data->m_value.broadcastTo(newShape);
+        result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = broadcastBackwardFunc;
         return result;
     }
@@ -1749,7 +1775,8 @@ public:
     {
         if (dataType() == newDataType) return *this;
         TensorOptions opt{ .m_requireGrad=isRequireGrad(), .m_dtype=newDataType, .m_device=device() };
-        Tensor result{value().data(), value().size(), value().dataType(), value().shape(), opt};
+        Tensor result{shape(), opt};
+        result.m_data->m_value = m_data->m_value.to(newDataType);
         result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = toDataTypeBackwardFunc;
         return result;
@@ -1909,13 +1936,8 @@ public:
     static void matmulBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
-        // Assuming m_inputs[0] and m_inputs[1] are the input matrices a and b, respectively,
-        // and seed is ∂E/∂c, the gradient of the loss with respect to the output matrix c.
-        // Compute gradients with respect to a and b
-
-        // Corrected to use matrix multiplication for backward pass calculations
-        node->m_inputs[0]->backward(seed.matmul(node->m_inputs[1]->m_value.transpose(0, 1)));      // ∂E/∂a = ∂E/∂c * b^T
-        node->m_inputs[1]->backward(node->m_inputs[0]->m_value.transpose(0, 1).matmul(seed));      // ∂E/∂b = a^T * ∂E/∂c
+        node->m_inputs[0]->backward(seed.matmul(node->m_inputs[1]->m_value.transpose(0, 1).contiguous()));
+        node->m_inputs[1]->backward(node->m_inputs[0]->m_value.transpose(0, 1).contiguous().matmul(seed));
     }
 
     static void transposeBackwardFunc(TensorNode * node, const TensorValue & seed)
