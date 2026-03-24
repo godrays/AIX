@@ -20,87 +20,96 @@ inline auto Approx(auto value, double epsilon = 1e-4)
     return doctest::Approx(value).epsilon(epsilon);
 }
 
-inline void CheckVectorApproxValues(aix::TensorValue results, aix::TensorValue expected, double epsilon = 1e-4)
+inline void CheckVectorApproxValues(const aix::TensorValue& results, const aix::TensorValue& expected, double epsilon = 1e-4)
 {
-    results = results.contiguous();
-    expected = expected.contiguous();
+    auto actual = results.contiguous();
+    auto expectedValue = expected.contiguous();
 
-    if (results.size() != expected.size())
+    if (actual.device())
+    {
+        actual.device()->synchronize();
+    }
+    if (expectedValue.device() && expectedValue.device() != actual.device())
+    {
+        expectedValue.device()->synchronize();
+    }
+
+    if (actual.size() != expectedValue.size())
     {
         throw std::invalid_argument("Tensor data sizes do no match for test result comparison.");
     }
 
-    if (results.dataType() != expected.dataType())
+    if (actual.dataType() != expectedValue.dataType())
     {
         throw std::invalid_argument("Tensor data types do no match for test result comparison.");
     }
 
-    if (static_cast<size_t>(results.dataType()) >= aix::DataTypeCount)
+    if (static_cast<size_t>(actual.dataType()) >= aix::DataTypeCount)
     {
         throw std::invalid_argument("CheckVectorApproxValues does not support the new data type.");
     }
 
-    if (results.dataType() == aix::DataType::kFloat64)
+    if (actual.dataType() == aix::DataType::kFloat64)
     {
-        for (size_t i=0; i<expected.size(); ++i)
+        for (size_t i=0; i<expectedValue.size(); ++i)
         {
-            CHECK(results.data<double>()[i] == Approx(expected.data<double>()[i], epsilon));
+            CHECK(actual.data<double>()[i] == Approx(expectedValue.data<double>()[i], epsilon));
         }
     }
-    else if (results.dataType() == aix::DataType::kFloat32)
+    else if (actual.dataType() == aix::DataType::kFloat32)
     {
-        for (size_t i=0; i<expected.size(); ++i)
+        for (size_t i=0; i<expectedValue.size(); ++i)
         {
-            CHECK(results.data<float>()[i] == Approx(expected.data<float>()[i], epsilon));
+            CHECK(actual.data<float>()[i] == Approx(expectedValue.data<float>()[i], epsilon));
         }
     }
-    else if (results.dataType() == aix::DataType::kFloat16)
+    else if (actual.dataType() == aix::DataType::kFloat16)
     {
-        for (size_t i=0; i<expected.size(); ++i)
+        for (size_t i=0; i<expectedValue.size(); ++i)
         {
-            CHECK(results.data<aix::float16_t>()[i] == Approx(expected.data<aix::float16_t>()[i], epsilon));
+            CHECK(actual.data<aix::float16_t>()[i] == Approx(expectedValue.data<aix::float16_t>()[i], epsilon));
         }
     }
-    else if (results.dataType() == aix::DataType::kBFloat16)
+    else if (actual.dataType() == aix::DataType::kBFloat16)
     {
-        for (size_t i=0; i<expected.size(); ++i)
+        for (size_t i=0; i<expectedValue.size(); ++i)
         {
-            CHECK(results.data<aix::bfloat16_t>()[i] == Approx(expected.data<aix::bfloat16_t>()[i], epsilon));
+            CHECK(actual.data<aix::bfloat16_t>()[i] == Approx(expectedValue.data<aix::bfloat16_t>()[i], epsilon));
         }
     }
-    else if (results.dataType() == aix::DataType::kInt64)
+    else if (actual.dataType() == aix::DataType::kInt64)
     {
-        for (size_t i=0; i<expected.size(); ++i)
+        for (size_t i=0; i<expectedValue.size(); ++i)
         {
-            CHECK(results.data<int64_t>()[i] == Approx(expected.data<int64_t>()[i], epsilon));
+            CHECK(actual.data<int64_t>()[i] == Approx(expectedValue.data<int64_t>()[i], epsilon));
         }
     }
-    else if (results.dataType() == aix::DataType::kInt32)
+    else if (actual.dataType() == aix::DataType::kInt32)
     {
-        for (size_t i=0; i<expected.size(); ++i)
+        for (size_t i=0; i<expectedValue.size(); ++i)
         {
-            CHECK(results.data<int32_t>()[i] == Approx(expected.data<int32_t>()[i], epsilon));
+            CHECK(actual.data<int32_t>()[i] == Approx(expectedValue.data<int32_t>()[i], epsilon));
         }
     }
-    else if (results.dataType() == aix::DataType::kInt16)
+    else if (actual.dataType() == aix::DataType::kInt16)
     {
-        for (size_t i=0; i<expected.size(); ++i)
+        for (size_t i=0; i<expectedValue.size(); ++i)
         {
-            CHECK(results.data<int16_t>()[i] == Approx(expected.data<int16_t>()[i], epsilon));
+            CHECK(actual.data<int16_t>()[i] == Approx(expectedValue.data<int16_t>()[i], epsilon));
         }
     }
-    else if (results.dataType() == aix::DataType::kInt8)
+    else if (actual.dataType() == aix::DataType::kInt8)
     {
-        for (size_t i=0; i<expected.size(); ++i)
+        for (size_t i=0; i<expectedValue.size(); ++i)
         {
-            CHECK(results.data<int8_t>()[i] == Approx(expected.data<int8_t>()[i], epsilon));
+            CHECK(actual.data<int8_t>()[i] == Approx(expectedValue.data<int8_t>()[i], epsilon));
         }
     }
-    else if (results.dataType() == aix::DataType::kUInt8)
+    else if (actual.dataType() == aix::DataType::kUInt8)
     {
-        for (size_t i=0; i<expected.size(); ++i)
+        for (size_t i=0; i<expectedValue.size(); ++i)
         {
-            CHECK(results.data<uint8_t>()[i] == Approx(expected.data<uint8_t>()[i], epsilon));
+            CHECK(actual.data<uint8_t>()[i] == Approx(expectedValue.data<uint8_t>()[i], epsilon));
         }
     }
 }

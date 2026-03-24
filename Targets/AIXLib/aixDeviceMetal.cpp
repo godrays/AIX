@@ -52,23 +52,36 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
         bool isNull = iDType == DataType::kFloat64;
         std::string dtypeStr = toString(i);
         m_compFuncPSOAdd[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "add_" + dtypeStr);
+        m_compFuncPSOAddStrided[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "add_strided_" + dtypeStr);
         m_compFuncPSOSub[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sub_" + dtypeStr);
+        m_compFuncPSOSubStrided[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sub_strided_" + dtypeStr);
         m_compFuncPSOMul[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "mul_" + dtypeStr);
+        m_compFuncPSOMulStrided[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "mul_strided_" + dtypeStr);
         m_compFuncPSODiv[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "div_" + dtypeStr);
+        m_compFuncPSODivStrided[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "div_strided_" + dtypeStr);
         m_compFuncPSOUnary[i]       = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "unary_" + dtypeStr);
+        m_compFuncPSOUnaryStrided[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "unary_strided_" + dtypeStr);
         m_compFuncPSOFillMin[i]     = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "fillMin_" + dtypeStr);
         m_compFuncPSOSqrt[i]        = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sqrt_" + dtypeStr);
+        m_compFuncPSOSqrtStrided[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sqrt_strided_" + dtypeStr);
         m_compFuncPSOSin[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sin_" + dtypeStr);
+        m_compFuncPSOSinStrided[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sin_strided_" + dtypeStr);
         m_compFuncPSOCos[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "cos_" + dtypeStr);
+        m_compFuncPSOCosStrided[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "cos_strided_" + dtypeStr);
         m_compFuncPSOTanh[i]        = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "tanh_" + dtypeStr);
+        m_compFuncPSOTanhStrided[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "tanh_strided_" + dtypeStr);
         m_compFuncPSOLog[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "log_" + dtypeStr);
+        m_compFuncPSOLogStrided[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "log_strided_" + dtypeStr);
         m_compFuncPSOExp[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "exp_" + dtypeStr);
+        m_compFuncPSOExpStrided[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "exp_strided_" + dtypeStr);
         m_compFuncPSOPow[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "pow_" + dtypeStr);
+        m_compFuncPSOPowStrided[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "pow_strided_" + dtypeStr);
         m_compFuncPSOSum[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sum_" + dtypeStr);
         m_compFuncPSOMax[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "max_" + dtypeStr);
         m_compFuncPSOArgmaxInit[i]   = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxInit_" + dtypeStr);
         m_compFuncPSOArgmaxReduce[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxReduce_" + dtypeStr);
         m_compFuncPSOArgmaxTo[i]     = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxTo_" + dtypeStr);
+        m_compFuncPSOMatMulStrided[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulStrided_" + dtypeStr);
         m_compFuncPSOMatMulTiledBC6464888[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiledBC_64_64_8_8_8_" + dtypeStr);
         m_compFuncPSOMatMulTiled32x32[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiled_32_32_" + dtypeStr);
         m_compFuncPSOMatMulTiled32x64[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiled_32_64_" + dtypeStr);
@@ -116,17 +129,29 @@ DeviceMetal::~DeviceMetal()
             m_compFuncPSOFill[i][j]->release();
         }
         m_compFuncPSOAdd[i]->release();
+        m_compFuncPSOAddStrided[i]->release();
         m_compFuncPSOSub[i]->release();
+        m_compFuncPSOSubStrided[i]->release();
         m_compFuncPSOMul[i]->release();
+        m_compFuncPSOMulStrided[i]->release();
         m_compFuncPSODiv[i]->release();
+        m_compFuncPSODivStrided[i]->release();
         m_compFuncPSOUnary[i]->release();
+        m_compFuncPSOUnaryStrided[i]->release();
         m_compFuncPSOSqrt[i]->release();
+        m_compFuncPSOSqrtStrided[i]->release();
         m_compFuncPSOSin[i]->release();
+        m_compFuncPSOSinStrided[i]->release();
         m_compFuncPSOCos[i]->release();
+        m_compFuncPSOCosStrided[i]->release();
         m_compFuncPSOTanh[i]->release();
+        m_compFuncPSOTanhStrided[i]->release();
         m_compFuncPSOLog[i]->release();
+        m_compFuncPSOLogStrided[i]->release();
         m_compFuncPSOExp[i]->release();
+        m_compFuncPSOExpStrided[i]->release();
         m_compFuncPSOPow[i]->release();
+        m_compFuncPSOPowStrided[i]->release();
         m_compFuncPSOSum[i]->release();
         m_compFuncPSOMax[i]->release();
         m_compFuncPSOArgmaxInit[i]->release();
@@ -184,31 +209,36 @@ void DeviceMetal::deallocate(void * memory)
 void DeviceMetal::add(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a1, a2, result, m_compFuncPSOAdd[iDType], "add_" + toString(result.dtype));
+    executeTripleArrayCmd(a1, a2, result, m_compFuncPSOAdd[iDType], m_compFuncPSOAddStrided[iDType],
+                          "add_" + toString(result.dtype));
 }
 
 void DeviceMetal::sub(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a1, a2, result, m_compFuncPSOSub[iDType], "sub_" + toString(result.dtype));
+    executeTripleArrayCmd(a1, a2, result, m_compFuncPSOSub[iDType], m_compFuncPSOSubStrided[iDType],
+                          "sub_" + toString(result.dtype));
 }
 
 void DeviceMetal::mul(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a1, a2, result, m_compFuncPSOMul[iDType], "mul_" + toString(result.dtype));
+    executeTripleArrayCmd(a1, a2, result, m_compFuncPSOMul[iDType], m_compFuncPSOMulStrided[iDType],
+                          "mul_" + toString(result.dtype));
 }
 
 void DeviceMetal::div(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a1, a2, result, m_compFuncPSODiv[iDType], "div_" + toString(result.dtype));
+    executeTripleArrayCmd(a1, a2, result, m_compFuncPSODiv[iDType], m_compFuncPSODivStrided[iDType],
+                          "div_" + toString(result.dtype));
 }
 
 void DeviceMetal::unary(const DeviceTensorParams& a1, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a1, result, m_compFuncPSOUnary[iDType], "unary_" + toString(result.dtype));
+    executeDoubleArrayCmd(a1, result, m_compFuncPSOUnary[iDType], m_compFuncPSOUnaryStrided[iDType],
+                          "unary_" + toString(result.dtype));
 }
 
 void DeviceMetal::fill(const void* scalar, DataType scalarDType, const DeviceTensorParams& result)
@@ -312,43 +342,50 @@ void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& res
 void DeviceMetal::sqrt(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOSqrt[iDType], "sqrt_" + toString(result.dtype));
+    executeDoubleArrayCmd(a, result, m_compFuncPSOSqrt[iDType], m_compFuncPSOSqrtStrided[iDType],
+                          "sqrt_" + toString(result.dtype));
 }
 
 void DeviceMetal::sin(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOSin[iDType], "sin_" + toString(result.dtype));
+    executeDoubleArrayCmd(a, result, m_compFuncPSOSin[iDType], m_compFuncPSOSinStrided[iDType],
+                          "sin_" + toString(result.dtype));
 }
 
 void DeviceMetal::cos(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOCos[iDType], "cos_" + toString(result.dtype));
+    executeDoubleArrayCmd(a, result, m_compFuncPSOCos[iDType], m_compFuncPSOCosStrided[iDType],
+                          "cos_" + toString(result.dtype));
 }
 
 void DeviceMetal::tanh(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOTanh[iDType], "tanh_" + toString(result.dtype));
+    executeDoubleArrayCmd(a, result, m_compFuncPSOTanh[iDType], m_compFuncPSOTanhStrided[iDType],
+                          "tanh_" + toString(result.dtype));
 }
 
 void DeviceMetal::log(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOLog[iDType], "log_" + toString(result.dtype));
+    executeDoubleArrayCmd(a, result, m_compFuncPSOLog[iDType], m_compFuncPSOLogStrided[iDType],
+                          "log_" + toString(result.dtype));
 }
 
 void DeviceMetal::exp(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOExp[iDType], "exp_" + toString(result.dtype));
+    executeDoubleArrayCmd(a, result, m_compFuncPSOExp[iDType], m_compFuncPSOExpStrided[iDType],
+                          "exp_" + toString(result.dtype));
 }
 
 void DeviceMetal::pow(const DeviceTensorParams& a, const DeviceTensorParams& exp, const DeviceTensorParams& result)
 {
     auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a, exp, result, m_compFuncPSOPow[iDType], "pow_" + toString(result.dtype));
+    executeTripleArrayCmd(a, exp, result, m_compFuncPSOPow[iDType], m_compFuncPSOPowStrided[iDType],
+                          "pow_" + toString(result.dtype));
 }
 
 void DeviceMetal::max(const DeviceTensorParams& a, const DeviceTensorParams& result)
@@ -507,8 +544,6 @@ void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorP
 void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result)
 {
     assert(result.isContiguous == true);
-    auto ca = ensureContiguous(a);
-    auto cb = ensureContiguous(b);
     validateDataType(result.dtype);
     auto iDType = static_cast<size_t>(result.dtype);
 
@@ -517,11 +552,11 @@ void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& 
         throw std::invalid_argument("DeviceMetal::matmul() result must have GPU memory.");
 
     // Memory could be a GPU allocated memory or system memory.
-    auto buf1 = getReadOnlyMTLBuffer(ca.data, ca.shape[0] * ca.shape[1], dataTypeSize(ca.dtype));
-    auto buf2 = getReadOnlyMTLBuffer(cb.data, cb.shape[0] * cb.shape[1], dataTypeSize(cb.dtype));
+    auto buf1 = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
+    auto buf2 = getReadOnlyMTLBuffer(b.data, b.size, dataTypeSize(b.dtype));
     auto bufResult = m_allocMap[result.data];
-    auto buf1Size = MatrixSize{ca.shape[0], ca.shape[1]};
-    auto buf2Size = MatrixSize{cb.shape[0], cb.shape[1]};
+    auto buf1Size = MatrixSize{a.shape[0], a.shape[1]};
+    auto buf2Size = MatrixSize{b.shape[0], b.shape[1]};
 
     size_t M = buf1Size.rows;
     size_t K = buf1Size.cols;
@@ -547,13 +582,32 @@ void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& 
         m_compEncoder->dispatchThreadgroups({numThreadgroupsX, numThreadgroupsY, 1}, {tileSizeX, tileSizeY/tileSizeX, 1});
     };
 
-    bool commonCondition = K % 32 == 0 && N % 32 == 0 &&
+    bool packedOperands = a.isContiguous && a.offset == 0 && b.isContiguous && b.offset == 0;
+    bool commonCondition = packedOperands && K % 32 == 0 && N % 32 == 0 &&
                            (result.dtype == aix::DataType::kFloat32 ||
                             result.dtype == aix::DataType::kFloat16 ||
                             result.dtype == aix::DataType::kBFloat16);
+    if (!packedOperands)
+    {
+        auto compFuncPSO = m_compFuncPSOMatMulStrided[iDType];
+        m_compEncoder->setComputePipelineState(compFuncPSO);
+        m_compEncoder->setBuffer(buf1, 0, 0);
+        m_compEncoder->setBuffer(buf2, 0, 1);
+        m_compEncoder->setBuffer(bufResult, 0, 2);
+        m_compEncoder->setBytes(&buf1Size, sizeof(MatrixSize), 3);
+        m_compEncoder->setBytes(&buf2Size, sizeof(MatrixSize), 4);
+        auto boundLayoutA = bindTensorLayout(a, {.bufferIndex=5});
+        auto boundLayoutB = bindTensorLayout(b, {.bufferIndex=6});
+        constexpr NS::UInteger tileWidth = 8;
+        constexpr NS::UInteger tileHeight = 8;
+        assert(tileWidth * tileHeight <= compFuncPSO->maxTotalThreadsPerThreadgroup());
+        m_compEncoder->dispatchThreads({N, M, 1}, {tileWidth, tileHeight, 1});
+        releaseTensorLayout(boundLayoutA);
+        releaseTensorLayout(boundLayoutB);
+    }
     // Use fast matmul where dimensions are multiple of TSY.
     // TODO: Make SIMD comparison.
-    if (M % 128 == 0 && commonCondition)
+    else if (M % 128 == 0 && commonCondition)
     {
         dispatchTiled(m_compFuncPSOMatMulTiled32x128[iDType], 32, 128);
     }
@@ -580,24 +634,21 @@ void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& 
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(buf1);
     freeTemporaryBuffer(buf2);
-    clearContiguousTemps();
     commitBatchQueue();
 }
 
 void DeviceMetal::transpose(const DeviceTensorParams& a, const DeviceTensorParams& result, size_t dim0, size_t dim1)
 {
     assert(result.isContiguous == true);
-    auto ca = ensureContiguous(a);
     auto iDType = static_cast<size_t>(result.dtype);
     // Use fast and simplified version of the general transpose for matrix transpose operations.
-    if (ca.shape.size() == 2 && dim0 == 0 && dim1 == 1)
+    if (a.isContiguous && a.offset == 0 && a.shape.size() == 2 && dim0 == 0 && dim1 == 1)
     {
-        transpose2D(ca, result);
-        clearContiguousTemps();
+        transpose2D(a, result);
         return;
     }
 
-    if (ca.strides.size() > 16)
+    if (a.strides.size() > 16)
         throw std::invalid_argument("Metal device does not support tensors with more than 16 dimensions for acceleration.");
 
     validateDataType(result.dtype);
@@ -606,37 +657,27 @@ void DeviceMetal::transpose(const DeviceTensorParams& a, const DeviceTensorParam
         throw std::invalid_argument("DeviceMetal::transpose() result must have GPU memory.");
 
     // Memory could be a GPU allocated memory or system memory.
-    auto bufData       = getReadOnlyMTLBuffer(ca.data, ca.size, dataTypeSize(ca.dtype));
-    auto bufResult     = m_allocMap[result.data];
-    auto bufStrides    = getReadOnlyMTLBuffer(ca.strides.data(), ca.strides.size(), sizeof(size_t));
-    size_t stridesSize = ca.strides.size();
-    auto bufNewStrides = getReadOnlyMTLBuffer(result.strides.data(), result.strides.size(), sizeof(size_t));
-    size_t newStridesSize = result.strides.size();
+    auto bufData   = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
+    auto bufResult = m_allocMap[result.data];
 
     // Serialize resources and states to be used by the GPU.
     m_compEncoder->setComputePipelineState(m_compFuncPSOTranspose[iDType]);
-    m_compEncoder->setBuffer(bufData,        0,                       0);
-    m_compEncoder->setBuffer(bufResult,      0,                       1);
-    m_compEncoder->setBytes(&dim0,           sizeof(dim0),            2);
-    m_compEncoder->setBytes(&dim1,           sizeof(dim1),            3);
-    m_compEncoder->setBuffer(bufStrides,     0,                       4);
-    m_compEncoder->setBytes(&stridesSize,    sizeof(stridesSize),     5);
-    m_compEncoder->setBuffer(bufNewStrides,  0,                       6);
-    m_compEncoder->setBytes(&newStridesSize, sizeof(newStridesSize),  7);
-    m_compEncoder->setBytes(&ca.size,        sizeof(ca.size),         8);
+    m_compEncoder->setBuffer(bufData,   0,                0);
+    m_compEncoder->setBuffer(bufResult, 0,                1);
+    m_compEncoder->setBytes(&dim0,      sizeof(dim0),     2);
+    m_compEncoder->setBytes(&dim1,      sizeof(dim1),     3);
+    auto boundSrcLayout = bindTensorLayout(a, {.bufferIndex=4});
+    m_compEncoder->setBytes(&a.size,    sizeof(a.size),   5);
 
     // Calculate maximum thread group dimensions
-    NS::UInteger w = std::min(ca.size, m_compFuncPSOTranspose[iDType]->maxTotalThreadsPerThreadgroup());
+    NS::UInteger w = std::min(a.size, m_compFuncPSOTranspose[iDType]->maxTotalThreadsPerThreadgroup());
 
     // Use dispatch threads which is the most efficient but requires non-uniform grid size feature support in HW.
-    m_compEncoder->dispatchThreads({ca.size, 1, 1}, {w, 1, 1});
+    m_compEncoder->dispatchThreads({a.size, 1, 1}, {w, 1, 1});
 
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(bufData);
-    freeTemporaryBuffer(bufResult);
-    freeTemporaryBuffer(bufStrides);
-    freeTemporaryBuffer(bufNewStrides);
-    clearContiguousTemps();
+    releaseTensorLayout(boundSrcLayout);
     commitBatchQueue();
 }
 
@@ -681,13 +722,9 @@ void DeviceMetal::contiguous(const DeviceTensorParams& src, const DeviceTensorPa
         throw std::invalid_argument("DeviceMetal::contiguous() result must have GPU memory.");
 
     auto iDType = static_cast<size_t>(src.dtype);
-    size_t shapeSize  = src.shape.size();
-    size_t strideSize = src.strides.size();
-    assert(shapeSize == strideSize);
+    assert(src.shape.size() == src.strides.size());
 
     auto bufSrc     = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
-    auto bufShape   = shapeSize  != 0 ? getReadOnlyMTLBuffer(src.shape.data(), shapeSize,  sizeof(size_t)) : nullptr;
-    auto bufStrides = strideSize != 0 ? getReadOnlyMTLBuffer(src.strides.data(), strideSize, sizeof(size_t)) : nullptr;
     auto bufDst     = m_allocMap[dst.data];
     auto computePSO = m_compFuncPSOContiguous[iDType];
 
@@ -695,10 +732,7 @@ void DeviceMetal::contiguous(const DeviceTensorParams& src, const DeviceTensorPa
     m_compEncoder->setComputePipelineState(computePSO);
     m_compEncoder->setBuffer(bufSrc,     0, 0);
     m_compEncoder->setBuffer(bufDst,     0, 1);
-    m_compEncoder->setBuffer(bufShape,   0, 2);
-    m_compEncoder->setBuffer(bufStrides, 0, 3);
-    m_compEncoder->setBytes(&shapeSize,  sizeof(shapeSize),  4);
-    m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 5);
+    auto boundLayout = bindTensorLayout(src, {.bufferIndex=2});
 
     // Calculate maximum thread group dimensions
     NS::UInteger w = std::min(dst.size, computePSO->maxTotalThreadsPerThreadgroup());
@@ -708,8 +742,7 @@ void DeviceMetal::contiguous(const DeviceTensorParams& src, const DeviceTensorPa
 
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(bufSrc);
-    freeTemporaryBuffer(bufShape);
-    freeTemporaryBuffer(bufStrides);
+    releaseTensorLayout(boundLayout);
     commitBatchQueue();
 }
 
@@ -726,13 +759,10 @@ void DeviceMetal::reduceTo(const DeviceTensorParams& src, const DeviceTensorPara
         return;
     }
 
-    auto cs = ensureContiguous(src);
     auto iDType = static_cast<size_t>(src.dtype);
-    translation(cs.data, dst.data, cs.size, cs.shape, dst.shape, m_compFuncPSOReduceTo[iDType], src.dtype,
-                "reduceTo_" + toString(src.dtype));
+    translation(src, dst, m_compFuncPSOReduceTo[iDType], "reduceTo_" + toString(src.dtype));
     // NOTE: The ReduceTo function performs a sum operation. The order of these operations by GPU threads is not
     // guaranteed, which might result in minor differences in the final results due to floating-point precision limits.
-    clearContiguousTemps();
 }
 
 void DeviceMetal::maxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst)
@@ -747,11 +777,8 @@ void DeviceMetal::maxTo(const DeviceTensorParams& src, const DeviceTensorParams&
         return;
     }
 
-    auto cs = ensureContiguous(src);
     auto iDType = static_cast<size_t>(src.dtype);
-    translation(cs.data, dst.data, cs.size, cs.shape, dst.shape, m_compFuncPSOMaxTo[iDType], src.dtype,
-                "maxTo_" + toString(src.dtype));
-    clearContiguousTemps();
+    translation(src, dst, m_compFuncPSOMaxTo[iDType], "maxTo_" + toString(src.dtype));
 }
 
 void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
@@ -773,30 +800,22 @@ void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorPara
     assert(src.shape.size() == src.strides.size());
     assert(dst.size > 0);
 
-    auto cs = ensureContiguous(src);
-    auto iDType = static_cast<size_t>(cs.dtype);
+    auto iDType = static_cast<size_t>(src.dtype);
     auto compFuncPSO = m_compFuncPSOArgmaxTo[iDType];
-    auto shapeSize = cs.shape.size();
-    auto bufSrc = getReadOnlyMTLBuffer(cs.data, cs.size, dataTypeSize(cs.dtype));
+    auto bufSrc = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
     auto bufDst = m_allocMap[dst.data];
-    auto bufShape = getReadOnlyMTLBuffer(cs.shape.data(), shapeSize, sizeof(size_t));
-    auto bufStrides = getReadOnlyMTLBuffer(cs.strides.data(), shapeSize, sizeof(size_t));
 
     m_compEncoder->setComputePipelineState(compFuncPSO);
     m_compEncoder->setBuffer(bufSrc, 0, 0);
     m_compEncoder->setBuffer(bufDst, 0, 1);
-    m_compEncoder->setBuffer(bufShape, 0, 2);
-    m_compEncoder->setBuffer(bufStrides, 0, 3);
-    m_compEncoder->setBytes(&shapeSize, sizeof(shapeSize), 4);
-    m_compEncoder->setBytes(&dim, sizeof(dim), 5);
+    auto boundLayout = bindTensorLayout(src, {.bufferIndex=2});
+    m_compEncoder->setBytes(&dim, sizeof(dim), 3);
 
     NS::UInteger w = std::min(dst.size, static_cast<size_t>(compFuncPSO->maxTotalThreadsPerThreadgroup()));
     m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});
 
     freeTemporaryBuffer(bufSrc);
-    freeTemporaryBuffer(bufShape);
-    freeTemporaryBuffer(bufStrides);
-    clearContiguousTemps();
+    releaseTensorLayout(boundLayout);
     commitBatchQueue();
 }
 
@@ -874,13 +893,10 @@ void DeviceMetal::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTen
 void DeviceMetal::sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,
                            size_t dim, size_t start, size_t end, size_t step)
 {
-    assert(dst.isContiguous == true);
     validateDataType(src.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
     if (!isDeviceBuffer(dst.data))
         throw std::invalid_argument("DeviceMetal::sliceSet() result must have GPU memory.");
-
-    auto cs = ensureContiguous(src);
 
     auto newShape = dst.shape;
     newShape[dim] = (end - start + step - 1) / step; // This computes the size along the slicing dimension.
@@ -888,50 +904,36 @@ void DeviceMetal::sliceSet(const DeviceTensorParams& src, const DeviceTensorPara
     // For a special case, two scalar tensors, use just a copy operation.
     if (dst.shape.empty() && newShape.empty())
     {
-        copy(cs.data, cs.dtype, dst.data, dst.dtype, cs.size);
-        clearContiguousTemps();
+        copy(src.data, src.dtype, dst.data, dst.dtype, src.size);
         return;
     }
 
-    size_t shapeSize    = dst.shape.size();
-    size_t newShapeSize = newShape.size();
-    size_t stridesSize  = dst.strides.size();
-    assert(cs.size > 0);
+    assert(src.size > 0);
 
-    // NOTE: For a scalar tensor shape size could be zero.
-    auto bufSrc     = getReadOnlyMTLBuffer(cs.data, cs.size, dataTypeSize(cs.dtype));
-    auto bufShape1  = shapeSize    != 0 ? getReadOnlyMTLBuffer(dst.shape.data(),   shapeSize,    sizeof(size_t)) : nullptr;
-    auto bufShape2  = newShapeSize != 0 ? getReadOnlyMTLBuffer(newShape.data(),    newShapeSize, sizeof(size_t)) : nullptr;
-    auto bufStrides = stridesSize  != 0 ? getReadOnlyMTLBuffer(dst.strides.data(), stridesSize,  sizeof(size_t)) : nullptr;
+    auto bufSrc     = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
     auto bufDst     = m_allocMap[dst.data];
-    auto compFuncPSO = m_compFuncPSOSliceSet[static_cast<size_t>(cs.dtype)];
+    auto compFuncPSO = m_compFuncPSOSliceSet[static_cast<size_t>(src.dtype)];
 
     // Serialize resources and states to be used by the GPU.
     m_compEncoder->setComputePipelineState(compFuncPSO);
     m_compEncoder->setBuffer(bufSrc,     0, 0);
     m_compEncoder->setBuffer(bufDst,     0, 1);
-    m_compEncoder->setBuffer(bufShape1,  0, 2);
-    m_compEncoder->setBuffer(bufShape2,  0, 3);
-    m_compEncoder->setBuffer(bufStrides, 0, 4);
-    m_compEncoder->setBytes(&shapeSize,    sizeof(shapeSize),    5);
-    m_compEncoder->setBytes(&newShapeSize, sizeof(newShapeSize), 6);
-    m_compEncoder->setBytes(&stridesSize,  sizeof(stridesSize),  7);
-    m_compEncoder->setBytes(&dim,   sizeof(dim),   8);
-    m_compEncoder->setBytes(&start, sizeof(start), 9);
-    m_compEncoder->setBytes(&step,  sizeof(step),  10);
+    auto boundSrcLayout = bindTensorLayout(src, {.bufferIndex=2});
+    auto boundDstLayout = bindTensorLayout(dst, {.bufferIndex=3});
+    m_compEncoder->setBytes(&dim,   sizeof(dim),   4);
+    m_compEncoder->setBytes(&start, sizeof(start), 5);
+    m_compEncoder->setBytes(&step,  sizeof(step),  6);
 
     // Calculate maximum thread group dimensions
-    NS::UInteger w = std::min(cs.size, compFuncPSO->maxTotalThreadsPerThreadgroup());
+    NS::UInteger w = std::min(src.size, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
     // Use dispatch threads which is the most efficient but requires non-uniform grid size feature support in HW.
-    m_compEncoder->dispatchThreads({cs.size, 1, 1}, {w, 1, 1});
+    m_compEncoder->dispatchThreads({src.size, 1, 1}, {w, 1, 1});
 
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(bufSrc);
-    freeTemporaryBuffer(bufShape1);
-    freeTemporaryBuffer(bufShape2);
-    freeTemporaryBuffer(bufStrides);
-    clearContiguousTemps();
+    releaseTensorLayout(boundSrcLayout);
+    releaseTensorLayout(boundDstLayout);
     commitBatchQueue();
 }
 
@@ -1024,21 +1026,20 @@ void DeviceMetal::indexSelect(const DeviceTensorParams& src, const DeviceTensorP
     if (!isDeviceBuffer(dst.data))
         throw std::invalid_argument("DeviceMetal::indexSelect() result must have GPU memory.");
 
-    auto cs = ensureContiguous(src);
-    auto ci = ensureContiguous(indices);
-
     // Calculate the number of elements in one slice after the specified dimension.
     size_t sliceSize = 1;
-    for (size_t i = dim + 1; i < cs.shape.size(); ++i)
+    for (size_t i = dim + 1; i < src.shape.size(); ++i)
     {
-        sliceSize *= cs.shape[i];
+        sliceSize *= src.shape[i];
     }
-    size_t dimSize = !cs.shape.empty() ? cs.shape[dim] * sliceSize : 0;   // Size of one entire slice for the dimension.
+    size_t dimSize = !src.shape.empty() ? src.shape[dim] * sliceSize : 0;   // Size of one entire slice for the dimension.
 
-    auto bufSrc      = getReadOnlyMTLBuffer(cs.data, cs.size, dataTypeSize(cs.dtype));
+    auto ci = ensureContiguous(indices);
+
+    auto bufSrc      = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
     auto bufIndices  = getReadOnlyMTLBuffer(ci.data, ci.size, dataTypeSize(aix::DataType::kInt32));
     auto bufDst      = m_allocMap[dst.data];
-    auto compFuncPSO = m_compFuncPSOIndexSelect[static_cast<size_t>(cs.dtype)];
+    auto compFuncPSO = m_compFuncPSOIndexSelect[static_cast<size_t>(src.dtype)];
 
     // Serialize resources and states to be used by the GPU.
     m_compEncoder->setComputePipelineState(compFuncPSO);
@@ -1048,11 +1049,15 @@ void DeviceMetal::indexSelect(const DeviceTensorParams& src, const DeviceTensorP
     m_compEncoder->setBytes(&indices.size, sizeof(size_t), 3);
     m_compEncoder->setBytes(&dimSize,      sizeof(size_t), 4);
     m_compEncoder->setBytes(&sliceSize,    sizeof(size_t), 5);
+    auto boundSrcLayout = bindTensorLayout(src, {.bufferIndex=6});
 
     NS::UInteger w = std::min(dst.size, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
     m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});
 
+    freeTemporaryBuffer(bufSrc);
+    freeTemporaryBuffer(bufIndices);
+    releaseTensorLayout(boundSrcLayout);
     clearContiguousTemps();
     commitBatchQueue();
 }
@@ -1060,7 +1065,6 @@ void DeviceMetal::indexSelect(const DeviceTensorParams& src, const DeviceTensorP
 void DeviceMetal::indexAdd(const DeviceTensorParams& src, const DeviceTensorParams& dst, const DeviceTensorParams& indices,
                            size_t dim)
 {
-    assert(dst.isContiguous == true);
     validateDataType(src.dtype);
     // NOTE: Only certain data types are supported due to limitation of Metal Framework atomics.
     if (!(src.dtype == DataType::kFloat32 || src.dtype == DataType::kInt32))
@@ -1074,9 +1078,6 @@ void DeviceMetal::indexAdd(const DeviceTensorParams& src, const DeviceTensorPara
     if (!isDeviceBuffer(dst.data))
         throw std::invalid_argument("DeviceMetal::indexAdd() result must have GPU memory.");
 
-    auto cs = ensureContiguous(src);
-    auto ci = ensureContiguous(indices);
-
     // Calculate the number of elements in one slice after the specified dimension.
     size_t sliceSize = 1;
     for (size_t i = dim + 1; i < dst.shape.size(); ++i)
@@ -1084,12 +1085,13 @@ void DeviceMetal::indexAdd(const DeviceTensorParams& src, const DeviceTensorPara
         sliceSize *= dst.shape[i];
     }
     size_t dimSize = !dst.shape.empty() ? dst.shape[dim] * sliceSize : 0;   // Size of one entire slice for the dimension.
-    size_t srcBufSize = cs.size;
+    size_t srcBufSize = src.size;
+    auto ci = ensureContiguous(indices);
 
-    auto bufSrc      = getReadOnlyMTLBuffer(cs.data, srcBufSize, dataTypeSize(cs.dtype));
+    auto bufSrc      = getReadOnlyMTLBuffer(src.data, srcBufSize, dataTypeSize(src.dtype));
     auto bufIndices  = getReadOnlyMTLBuffer(ci.data, ci.size, dataTypeSize(aix::DataType::kInt32));
     auto bufDst      = m_allocMap[dst.data];
-    auto compFuncPSO = m_compFuncPSOIndexAdd[static_cast<size_t>(cs.dtype)];
+    auto compFuncPSO = m_compFuncPSOIndexAdd[static_cast<size_t>(src.dtype)];
 
     // Serialize resources and states to be used by the GPU.
     m_compEncoder->setComputePipelineState(compFuncPSO);
@@ -1099,11 +1101,17 @@ void DeviceMetal::indexAdd(const DeviceTensorParams& src, const DeviceTensorPara
     m_compEncoder->setBytes(&indices.size, sizeof(size_t), 3);
     m_compEncoder->setBytes(&dimSize,      sizeof(size_t), 4);
     m_compEncoder->setBytes(&sliceSize,    sizeof(size_t), 5);
+    auto boundSrcLayout = bindTensorLayout(src, {.bufferIndex=6});
+    auto boundDstLayout = bindTensorLayout(dst, {.bufferIndex=7});
 
-    NS::UInteger w = std::min(cs.size, compFuncPSO->maxTotalThreadsPerThreadgroup());
+    NS::UInteger w = std::min(src.size, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
-    m_compEncoder->dispatchThreads({cs.size, 1, 1}, {w, 1, 1});
+    m_compEncoder->dispatchThreads({src.size, 1, 1}, {w, 1, 1});
 
+    freeTemporaryBuffer(bufSrc);
+    freeTemporaryBuffer(bufIndices);
+    releaseTensorLayout(boundSrcLayout);
+    releaseTensorLayout(boundDstLayout);
     clearContiguousTemps();
     commitBatchQueue();
 }
@@ -1381,107 +1389,153 @@ void DeviceMetal::encodeComputeCommandTripleBuffer(const MTL::Buffer* buf1, cons
     m_compEncoder->dispatchThreads(gridSize, threadsPerTG);
 }
 
+DeviceMetal::MetalBoundLayout DeviceMetal::bindTensorLayout(const DeviceTensorParams& params,
+                                                            const MetalLayoutBindingSlots& slots)
+{
+    assert(params.shape.size() == params.strides.size());
+
+    MetalBoundLayout layout;
+    const size_t rank = params.shape.size();
+
+    auto entryCount = 2 + rank + rank;
+    layout.data.resize(entryCount);
+    auto layoutData = layout.data.data();
+    layoutData[0] = params.offset;
+    layoutData[1] = rank;
+    for (size_t i = 0; i < rank; ++i)
+    {
+        layoutData[2 + i] = params.shape[i];
+        layoutData[2 + rank + i] = params.strides[i];
+    }
+
+    m_compEncoder->setBytes(layoutData, entryCount * sizeof(size_t), slots.bufferIndex);
+
+    return layout;
+}
+
+void DeviceMetal::releaseTensorLayout(const MetalBoundLayout& layout)
+{
+    (void) layout;
+}
+
 void DeviceMetal::executeDoubleArrayCmd(const DeviceTensorParams& a, const DeviceTensorParams& result,
-                                        const MTL::ComputePipelineState* compFuncPSO, const std::string & cmdName)
+                                        const MTL::ComputePipelineState* contiguousPSO,
+                                        const MTL::ComputePipelineState* stridedPSO, const std::string & cmdName)
 {
     assert(result.isContiguous == true);
-    auto ca = ensureContiguous(a);
     validateDataType(result.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
     if (!isDeviceBuffer(result.data))
         throw std::invalid_argument("DeviceMetal::" + cmdName + "() result must have GPU memory.");
 
     // Memory could be a GPU allocated memory or system memory.
-    auto buf = getReadOnlyMTLBuffer(ca.data, ca.size, dataTypeSize(ca.dtype));
+    auto buf = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
     auto bufResult = m_allocMap[result.data];
 
-    // Calculate maximum thread group dimensions
-    auto asize = align(ca.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
-    NS::UInteger w = std::min(asize, compFuncPSO->maxTotalThreadsPerThreadgroup());
+    if (a.isContiguous && a.offset == 0)
+    {
+        auto asize = align(a.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
+        NS::UInteger w = std::min(asize, contiguousPSO->maxTotalThreadsPerThreadgroup());
+        encodeComputeCommandDoubleBuffer(buf, bufResult, contiguousPSO, {asize, 1, 1}, {w, 1, 1});
+    }
+    else
+    {
+        m_compEncoder->setComputePipelineState(stridedPSO);
+        m_compEncoder->setBuffer(buf, 0, 0);
+        m_compEncoder->setBuffer(bufResult, 0, 1);
+        auto boundLayout = bindTensorLayout(a, {.bufferIndex=2});
+        NS::UInteger w = std::min(result.size, stridedPSO->maxTotalThreadsPerThreadgroup());
+        m_compEncoder->dispatchThreads({result.size, 1, 1}, {w, 1, 1});
+        releaseTensorLayout(boundLayout);
+    }
 
-    // Serialize resource and states to be called by GPU.
-    encodeComputeCommandDoubleBuffer(buf, bufResult, compFuncPSO, {asize, 1, 1}, {w, 1, 1});
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(buf);
-    clearContiguousTemps();
     commitBatchQueue();
 }
 
 void DeviceMetal::executeTripleArrayCmd(const DeviceTensorParams& a1, const DeviceTensorParams& a2,
-                                        const DeviceTensorParams& result, const MTL::ComputePipelineState* compFuncPSO,
-                                        const std::string & cmdName)
+                                        const DeviceTensorParams& result, const MTL::ComputePipelineState* contiguousPSO,
+                                        const MTL::ComputePipelineState* stridedPSO, const std::string & cmdName)
 {
     assert(result.isContiguous == true);
-    auto ca1 = ensureContiguous(a1);
-    auto ca2 = ensureContiguous(a2);
     validateDataType(result.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
     if (!isDeviceBuffer(result.data))
         throw std::invalid_argument("DeviceMetal::" + cmdName + "() result must have GPU memory.");
 
     // Memory could be a GPU allocated memory or system memory.
-    auto buf1 = getReadOnlyMTLBuffer(ca1.data, ca1.size, dataTypeSize(ca1.dtype));
-    auto buf2 = getReadOnlyMTLBuffer(ca2.data, ca2.size, dataTypeSize(ca2.dtype));
+    auto buf1 = getReadOnlyMTLBuffer(a1.data, a1.size, dataTypeSize(a1.dtype));
+    auto buf2 = getReadOnlyMTLBuffer(a2.data, a2.size, dataTypeSize(a2.dtype));
     auto bufResult = m_allocMap[result.data];
 
-    // Calculate maximum thread group dimensions
-    auto asize = align(ca1.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
-    NS::UInteger w = std::min(asize, compFuncPSO->maxTotalThreadsPerThreadgroup());
+    if (a1.isContiguous && a1.offset == 0 && a2.isContiguous && a2.offset == 0)
+    {
+        auto asize = align(a1.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
+        NS::UInteger w = std::min(asize, contiguousPSO->maxTotalThreadsPerThreadgroup());
+        encodeComputeCommandTripleBuffer(buf1, buf2, bufResult, contiguousPSO, {asize, 1, 1}, {w, 1, 1});
+    }
+    else
+    {
+        m_compEncoder->setComputePipelineState(stridedPSO);
+        m_compEncoder->setBuffer(buf1, 0, 0);
+        m_compEncoder->setBuffer(buf2, 0, 1);
+        m_compEncoder->setBuffer(bufResult, 0, 2);
+        auto boundLayout1 = bindTensorLayout(a1, {.bufferIndex=3});
+        auto boundLayout2 = bindTensorLayout(a2, {.bufferIndex=4});
+        NS::UInteger w = std::min(result.size, stridedPSO->maxTotalThreadsPerThreadgroup());
+        m_compEncoder->dispatchThreads({result.size, 1, 1}, {w, 1, 1});
+        releaseTensorLayout(boundLayout1);
+        releaseTensorLayout(boundLayout2);
+    }
 
-    // Serialize resource and states to be called by GPU.
-    encodeComputeCommandTripleBuffer(buf1, buf2, bufResult, compFuncPSO, {asize, 1, 1}, {w, 1, 1});
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(buf1);
     freeTemporaryBuffer(buf2);
-    clearContiguousTemps();
     commitBatchQueue();
 }
 
-void DeviceMetal::translation(const void* src, void* dst, size_t size, const Shape& shape, const Shape& newShape,
-                              const MTL::ComputePipelineState* computePSO, DataType dtype, const std::string & name)
+void DeviceMetal::translation(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                              const MTL::ComputePipelineState* computePSO, const std::string & name)
 {
-    validateDataType(dtype);
+    validateDataType(src.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
-    if (!isDeviceBuffer(dst))
+    if (!isDeviceBuffer(dst.data))
         throw std::invalid_argument("DeviceMetal::" + name + "() result must have GPU memory.");
 
     // For a special case, two scalar tensors, use just a copy operation.
-    if (shape.empty() && newShape.empty())
+    if (src.shape.empty() && dst.shape.empty())
     {
-        copy(src, dtype, dst, dtype, size);
+        copy(src.data, src.dtype, dst.data, dst.dtype, src.size);
         return;
     }
 
-    size_t shapeSize    = shape.size();
-    size_t newShapeSize = newShape.size();
-    size_t srcBufSize   = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<>());
-    assert(srcBufSize > 0);
+    size_t newShapeSize = dst.shape.size();
+    assert(src.size > 0);
 
     // NOTE: For a scalar tensor shape size could be zero.
-    auto bufSrc    = getReadOnlyMTLBuffer(src, srcBufSize, dataTypeSize(dtype));
-    auto bufShape1 = shapeSize    != 0 ? getReadOnlyMTLBuffer(shape.data(),    shapeSize,    sizeof(size_t)) : nullptr;
-    auto bufShape2 = newShapeSize != 0 ? getReadOnlyMTLBuffer(newShape.data(), newShapeSize, sizeof(size_t)) : nullptr;
-    auto bufDst    = m_allocMap[dst];
+    auto bufSrc = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
+    auto bufShape = newShapeSize != 0 ? getReadOnlyMTLBuffer(dst.shape.data(), newShapeSize, sizeof(size_t)) : nullptr;
+    auto bufDst = m_allocMap[dst.data];
 
     // Serialize resources and states to be used by the GPU.
     m_compEncoder->setComputePipelineState(computePSO);
-    m_compEncoder->setBuffer(bufSrc,    0, 0);
-    m_compEncoder->setBuffer(bufDst,    0, 1);
-    m_compEncoder->setBuffer(bufShape1, 0, 2);
-    m_compEncoder->setBuffer(bufShape2, 0, 3);
-    m_compEncoder->setBytes(&shapeSize,    sizeof(shapeSize),    4);
-    m_compEncoder->setBytes(&newShapeSize, sizeof(newShapeSize), 5);
+    m_compEncoder->setBuffer(bufSrc, 0, 0);
+    m_compEncoder->setBuffer(bufDst, 0, 1);
+    m_compEncoder->setBuffer(bufShape, 0, 2);
+    m_compEncoder->setBytes(&newShapeSize, sizeof(newShapeSize), 3);
+    auto boundLayout = bindTensorLayout(src, {.bufferIndex=4});
 
     // Calculate maximum thread group dimensions
-    NS::UInteger w = std::min(size, computePSO->maxTotalThreadsPerThreadgroup());
+    NS::UInteger w = std::min(src.size, computePSO->maxTotalThreadsPerThreadgroup());
 
     // Use dispatch threads which is the most efficient but requires non-uniform grid size feature support in HW.
-    m_compEncoder->dispatchThreads({size, 1, 1}, {w, 1, 1});
+    m_compEncoder->dispatchThreads({src.size, 1, 1}, {w, 1, 1});
 
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(bufSrc);
-    freeTemporaryBuffer(bufShape1);
-    freeTemporaryBuffer(bufShape2);
+    freeTemporaryBuffer(bufShape);
+    releaseTensorLayout(boundLayout);
     commitBatchQueue();
 }
 

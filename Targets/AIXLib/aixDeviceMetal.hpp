@@ -15,6 +15,8 @@
 #include "aixDeviceType.hpp"
 // External includes
 // System includes
+#include <cstdint>
+#include <cstddef>
 #include <mach/vm_page_size.h>
 
 
@@ -143,6 +145,16 @@ public:
     void synchronize() override;
 
 protected:
+    struct MetalLayoutBindingSlots
+    {
+        uint32_t bufferIndex;
+    };
+
+    struct MetalBoundLayout
+    {
+        std::vector<size_t> data{};
+    };
+
     void commit();
     void commitBatchQueue();
 
@@ -187,20 +199,24 @@ protected:
                                           const MTL::ComputePipelineState* compFuncPSO, const MTL::Size& gridSize,
                                           const MTL::Size& threadsPerTG) const;
 
+    MetalBoundLayout bindTensorLayout(const DeviceTensorParams& params, const MetalLayoutBindingSlots& slots);
+
+    void releaseTensorLayout(const MetalBoundLayout& layout);
+
     DeviceTensorParams ensureContiguous(const DeviceTensorParams& params);
 
     void clearContiguousTemps();
 
     void executeDoubleArrayCmd(const DeviceTensorParams& a, const DeviceTensorParams& result,
-                               const MTL::ComputePipelineState* compFuncPSO, const std::string & cmdName);
+                               const MTL::ComputePipelineState* contiguousPSO,
+                               const MTL::ComputePipelineState* stridedPSO, const std::string & cmdName);
 
     void executeTripleArrayCmd(const DeviceTensorParams& a1, const DeviceTensorParams& a2,
-                               const DeviceTensorParams& result, const MTL::ComputePipelineState* compFuncPSO,
-                               const std::string & cmdName);
+                               const DeviceTensorParams& result, const MTL::ComputePipelineState* contiguousPSO,
+                               const MTL::ComputePipelineState* stridedPSO, const std::string & cmdName);
 
-    // Common method for broadcastTo and reduceTo methods.
-    void translation(const void* src, void* dst, size_t size, const Shape& shape, const Shape& newShape,
-                     const MTL::ComputePipelineState *computePSO, DataType dtype, const std::string & name);
+    void translation(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                     const MTL::ComputePipelineState *computePSO, const std::string & name);
 
     void transpose2D(const DeviceTensorParams& mat, const DeviceTensorParams& result);
 
@@ -216,17 +232,29 @@ protected:
     MTL::CommandBuffer*    m_committedCmdBuffer{nullptr};
     MTL::ComputeCommandEncoder*  m_compEncoder{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOAdd[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOAddStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOSub[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOSubStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMul[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOMulStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSODiv[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSODivStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOUnary[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOUnaryStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOSqrt[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOSqrtStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOSin[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOSinStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOCos[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOCosStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOTanh[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOTanhStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOLog[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOLogStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOExp[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOExpStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOPow[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOPowStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOSum[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMax[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxInit[aix::DataTypeCount]{nullptr};
@@ -234,6 +262,7 @@ protected:
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxTo[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxIndicesSet{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxIndicesToSet{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOMatMulStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulTiledBC6464888[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulTiled32x32[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulTiled32x64[aix::DataTypeCount]{nullptr};

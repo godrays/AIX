@@ -27,6 +27,275 @@ struct MatrixSize
     size_t cols;
 };
 
+METAL_FUNC size_t layoutOffset(const constant size_t* layout)
+{
+    return layout[0];
+}
+
+METAL_FUNC size_t layoutRank(const constant size_t* layout)
+{
+    return layout[1];
+}
+
+METAL_FUNC const constant size_t* layoutShape(const constant size_t* layout)
+{
+    return layout + 2;
+}
+
+METAL_FUNC const constant size_t* layoutStrides(const constant size_t* layout)
+{
+    return layout + 2 + layoutRank(layout);
+}
+
+METAL_FUNC size_t physicalIndex(size_t flatIndex, const constant size_t* layout)
+{
+    size_t idx = flatIndex;
+    size_t ofs = layoutOffset(layout);
+    const constant size_t* shape = layoutShape(layout);
+    const constant size_t* strides = layoutStrides(layout);
+    size_t rank = layoutRank(layout);
+    for (int64_t dim = static_cast<int64_t>(rank) - 1; dim >= 0; --dim)
+    {
+        size_t dimIndex = idx % shape[dim];
+        idx /= shape[dim];
+        ofs += dimIndex * strides[dim];
+    }
+    return ofs;
+}
+
+METAL_FUNC size_t physicalIndex2D(size_t row, size_t col, const constant size_t* layout)
+{
+    const constant size_t* strides = layoutStrides(layout);
+    return layoutOffset(layout) + row * strides[0] + col * strides[1];
+}
+
+template <typename T>
+struct NegateOp
+{
+    T operator()(T a) const { return -a; }
+};
+
+template <typename T>
+struct SqrtOp
+{
+    T operator()(T a) const { return static_cast<T>(metal::sqrt(static_cast<float>(a))); }
+};
+
+template <typename T>
+struct SinOp
+{
+    T operator()(T a) const { return static_cast<T>(metal::sin(static_cast<float>(a))); }
+};
+
+template <typename T>
+struct CosOp
+{
+    T operator()(T a) const { return static_cast<T>(metal::cos(static_cast<float>(a))); }
+};
+
+template <typename T>
+struct TanhOp
+{
+    T operator()(T a) const { return static_cast<T>(metal::tanh(static_cast<float>(a))); }
+};
+
+template <typename T>
+struct LogOp
+{
+    T operator()(T a) const { return static_cast<T>(metal::log(static_cast<float>(a))); }
+};
+
+template <typename T>
+struct ExpOp
+{
+    T operator()(T a) const { return static_cast<T>(metal::exp(static_cast<float>(a))); }
+};
+
+template <typename T>
+struct AddOp
+{
+    T operator()(T a, T b) const { return a + b; }
+};
+
+template <typename T>
+struct SubOp
+{
+    T operator()(T a, T b) const { return a - b; }
+};
+
+template <typename T>
+struct MulOp
+{
+    T operator()(T a, T b) const { return a * b; }
+};
+
+template <typename T>
+struct DivOp
+{
+    T operator()(T a, T b) const { return a / b; }
+};
+
+template <typename T>
+struct PowOp
+{
+    T operator()(T a, T b) const { return static_cast<T>(metal::pow(static_cast<float>(a), static_cast<float>(b))); }
+};
+
+METAL_FUNC size_t translateLogicalIndex(size_t index,
+                                        const device size_t* shape,
+                                        const device size_t* newShape,
+                                        size_t shapeSize,
+                                        size_t newShapeSize)
+{
+    size_t originalIndex = 0;
+    size_t targetStride = 1;
+    size_t originalStride = 1;
+
+    for (int64_t i = static_cast<int64_t>(newShapeSize) - 1, j = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
+    {
+        size_t dimIndex = (index / targetStride) % newShape[i];
+        if (j >= 0 && shape[j] == newShape[i])
+        {
+            originalIndex += dimIndex * originalStride;
+            originalStride *= shape[--j + 1];
+        }
+        else if (j >= 0 && shape[j] == 1)
+        {
+            originalStride *= shape[--j + 1];
+        }
+        targetStride *= newShape[i];
+    }
+
+    return originalIndex;
+}
+
+METAL_FUNC size_t translateLogicalIndex(size_t index,
+                                        const device size_t* shape,
+                                        const constant size_t* newShape,
+                                        size_t shapeSize,
+                                        size_t newShapeSize)
+{
+    size_t originalIndex = 0;
+    size_t targetStride = 1;
+    size_t originalStride = 1;
+
+    for (int64_t i = static_cast<int64_t>(newShapeSize) - 1, j = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
+    {
+        size_t dimIndex = (index / targetStride) % newShape[i];
+        if (j >= 0 && shape[j] == newShape[i])
+        {
+            originalIndex += dimIndex * originalStride;
+            originalStride *= shape[--j + 1];
+        }
+        else if (j >= 0 && shape[j] == 1)
+        {
+            originalStride *= shape[--j + 1];
+        }
+        targetStride *= newShape[i];
+    }
+
+    return originalIndex;
+}
+
+METAL_FUNC size_t translateLogicalIndex(size_t index,
+                                        const constant size_t* shape,
+                                        const device size_t* newShape,
+                                        size_t shapeSize,
+                                        size_t newShapeSize)
+{
+    size_t originalIndex = 0;
+    size_t targetStride = 1;
+    size_t originalStride = 1;
+
+    for (int64_t i = static_cast<int64_t>(newShapeSize) - 1, j = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
+    {
+        size_t dimIndex = (index / targetStride) % newShape[i];
+        if (j >= 0 && shape[j] == newShape[i])
+        {
+            originalIndex += dimIndex * originalStride;
+            originalStride *= shape[--j + 1];
+        }
+        else if (j >= 0 && shape[j] == 1)
+        {
+            originalStride *= shape[--j + 1];
+        }
+        targetStride *= newShape[i];
+    }
+
+    return originalIndex;
+}
+
+METAL_FUNC size_t reducedSourceBaseOffset(size_t reducedIndex,
+                                          const device size_t* shape,
+                                          const device size_t* strides,
+                                          size_t shapeSize,
+                                          size_t dim)
+{
+    size_t srcBaseOffset = 0;
+    size_t index = reducedIndex;
+
+    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
+    {
+        size_t dimSize = static_cast<size_t>(i) == dim ? 1 : shape[i];
+        size_t coord = index % dimSize;
+        index /= dimSize;
+        srcBaseOffset += coord * strides[i];
+    }
+
+    return srcBaseOffset;
+}
+
+METAL_FUNC size_t reducedSourceBaseOffset(size_t reducedIndex,
+                                          const constant size_t* shape,
+                                          const constant size_t* strides,
+                                          size_t shapeSize,
+                                          size_t dim)
+{
+    size_t srcBaseOffset = 0;
+    size_t index = reducedIndex;
+
+    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
+    {
+        size_t dimSize = static_cast<size_t>(i) == dim ? 1 : shape[i];
+        size_t coord = index % dimSize;
+        index /= dimSize;
+        srcBaseOffset += coord * strides[i];
+    }
+
+    return srcBaseOffset;
+}
+
+METAL_FUNC size_t reducedLogicalBaseIndex(size_t reducedIndex,
+                                          const constant size_t* shape,
+                                          size_t shapeSize,
+                                          size_t dim)
+{
+    size_t logicalIndex = 0;
+    size_t logicalStride = 1;
+    size_t index = reducedIndex;
+
+    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
+    {
+        size_t dimSize = static_cast<size_t>(i) == dim ? 1 : shape[i];
+        size_t coord = index % dimSize;
+        index /= dimSize;
+        logicalIndex += coord * logicalStride;
+        logicalStride *= shape[i];
+    }
+
+    return logicalIndex;
+}
+
+METAL_FUNC size_t logicalStrideForDimension(const constant size_t* shape, size_t shapeSize, size_t dim)
+{
+    size_t logicalStride = 1;
+    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i > static_cast<int64_t>(dim); --i)
+    {
+        logicalStride *= shape[i];
+    }
+    return logicalStride;
+}
+
 // -----------------------------------------------------------------
 // ATOMIC UTILS
 // -----------------------------------------------------------------
@@ -399,6 +668,50 @@ template<typename T>
         result[index + i] = inA[index + i] / inB[index + i];
 }
 
+template<typename T>
+[[kernel]] void addStrided(const device T* inA         [[buffer(0)]],
+                           const device T* inB         [[buffer(1)]],
+                           device T* result            [[buffer(2)]],
+                           const constant size_t* layoutA [[buffer(3)]],
+                           const constant size_t* layoutB [[buffer(4)]],
+                           uint index [[thread_position_in_grid]])
+{
+    result[index] = inA[physicalIndex(index, layoutA)] + inB[physicalIndex(index, layoutB)];
+}
+
+template<typename T>
+[[kernel]] void subStrided(const device T* inA         [[buffer(0)]],
+                           const device T* inB         [[buffer(1)]],
+                           device T* result            [[buffer(2)]],
+                           const constant size_t* layoutA [[buffer(3)]],
+                           const constant size_t* layoutB [[buffer(4)]],
+                           uint index [[thread_position_in_grid]])
+{
+    result[index] = inA[physicalIndex(index, layoutA)] - inB[physicalIndex(index, layoutB)];
+}
+
+template<typename T>
+[[kernel]] void mulStrided(const device T* inA         [[buffer(0)]],
+                           const device T* inB         [[buffer(1)]],
+                           device T* result            [[buffer(2)]],
+                           const constant size_t* layoutA [[buffer(3)]],
+                           const constant size_t* layoutB [[buffer(4)]],
+                           uint index [[thread_position_in_grid]])
+{
+    result[index] = inA[physicalIndex(index, layoutA)] * inB[physicalIndex(index, layoutB)];
+}
+
+template<typename T>
+[[kernel]] void divStrided(const device T* inA         [[buffer(0)]],
+                           const device T* inB         [[buffer(1)]],
+                           device T* result            [[buffer(2)]],
+                           const constant size_t* layoutA [[buffer(3)]],
+                           const constant size_t* layoutB [[buffer(4)]],
+                           uint index [[thread_position_in_grid]])
+{
+    result[index] = inA[physicalIndex(index, layoutA)] / inB[physicalIndex(index, layoutB)];
+}
+
 
 // Sqrt - Naive Implementation
 // -----------------------------------------------------------------
@@ -483,6 +796,69 @@ template<typename T>
         result[index + i] = static_cast<T>(exp(static_cast<float4>(inA[index + i])));
 }
 
+template<typename T>
+[[kernel]] void unaryStrided(const device T* inA         [[buffer(0)]],
+                             device T* result            [[buffer(1)]],
+                             const constant size_t* layoutA [[buffer(2)]],
+                             uint index [[thread_position_in_grid]])
+{
+    result[index] = -inA[physicalIndex(index, layoutA)];
+}
+
+template<typename T>
+[[kernel]] void sqrtStrided(const device T* inA         [[buffer(0)]],
+                            device T* result            [[buffer(1)]],
+                            const constant size_t* layoutA [[buffer(2)]],
+                            uint index [[thread_position_in_grid]])
+{
+    result[index] = static_cast<T>(metal::sqrt(static_cast<float>(inA[physicalIndex(index, layoutA)])));
+}
+
+template<typename T>
+[[kernel]] void sinStrided(const device T* inA          [[buffer(0)]],
+                           device T* result             [[buffer(1)]],
+                           const constant size_t* layoutA [[buffer(2)]],
+                           uint index [[thread_position_in_grid]])
+{
+    result[index] = static_cast<T>(metal::sin(static_cast<float>(inA[physicalIndex(index, layoutA)])));
+}
+
+template<typename T>
+[[kernel]] void cosStrided(const device T* inA          [[buffer(0)]],
+                           device T* result             [[buffer(1)]],
+                           const constant size_t* layoutA [[buffer(2)]],
+                           uint index [[thread_position_in_grid]])
+{
+    result[index] = static_cast<T>(metal::cos(static_cast<float>(inA[physicalIndex(index, layoutA)])));
+}
+
+template<typename T>
+[[kernel]] void tanhStrided(const device T* inA         [[buffer(0)]],
+                            device T* result            [[buffer(1)]],
+                            const constant size_t* layoutA [[buffer(2)]],
+                            uint index [[thread_position_in_grid]])
+{
+    result[index] = static_cast<T>(metal::tanh(static_cast<float>(inA[physicalIndex(index, layoutA)])));
+}
+
+template<typename T>
+[[kernel]] void logStrided(const device T* inA          [[buffer(0)]],
+                           device T* result             [[buffer(1)]],
+                           const constant size_t* layoutA [[buffer(2)]],
+                           uint index [[thread_position_in_grid]])
+{
+    result[index] = static_cast<T>(metal::log(static_cast<float>(inA[physicalIndex(index, layoutA)])));
+}
+
+template<typename T>
+[[kernel]] void expStrided(const device T* inA          [[buffer(0)]],
+                           device T* result             [[buffer(1)]],
+                           const constant size_t* layoutA [[buffer(2)]],
+                           uint index [[thread_position_in_grid]])
+{
+    result[index] = static_cast<T>(metal::exp(static_cast<float>(inA[physicalIndex(index, layoutA)])));
+}
+
 
 // Pow - Naive Implementation
 // -----------------------------------------------------------------
@@ -496,6 +872,18 @@ template<typename T>
     #pragma unroll(BATCH_PROCESS_SIZE_PER_THREAD)
     for (size_t i=0; i<BATCH_PROCESS_SIZE_PER_THREAD; ++i)
         result[index + i] = static_cast<T>(pow(static_cast<float4>(inA[index + i]), static_cast<float4>(expA[index + i])));
+}
+
+template<typename T>
+[[kernel]] void powStrided(const device T* inA         [[buffer(0)]],
+                           const device T* inB         [[buffer(1)]],
+                           device T* result            [[buffer(2)]],
+                           const constant size_t* layoutA [[buffer(3)]],
+                           const constant size_t* layoutB [[buffer(4)]],
+                           uint index [[thread_position_in_grid]])
+{
+    result[index] = static_cast<T>(metal::pow(static_cast<float>(inA[physicalIndex(index, layoutA)]),
+                                              static_cast<float>(inB[physicalIndex(index, layoutB)])));
 }
 
 
@@ -595,6 +983,30 @@ template<typename T, uint BM, uint BN, uint BK, uint TM, uint TN>
             }
         }
     }
+}
+
+template<typename T>
+[[kernel]] void matrixMulStrided(const device T* inA,
+                                 const device T* inB,
+                                 device T* result,
+                                 constant MatrixSize& matASize,
+                                 constant MatrixSize& matBSize,
+                                 const constant size_t* layoutA,
+                                 const constant size_t* layoutB,
+                                 uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= matBSize.cols || gid.y >= matASize.rows)
+    {
+        return;
+    }
+
+    T sum = 0;
+    for (size_t k = 0; k < matASize.cols; ++k)
+    {
+        sum += inA[physicalIndex2D(gid.y, k, layoutA)] * inB[physicalIndex2D(k, gid.x, layoutB)];
+    }
+
+    result[gid.y * matBSize.cols + gid.x] = sum;
 }
 
 
@@ -753,18 +1165,37 @@ template<typename T>
                           device T* result                [[buffer(1)]],
                           constant size_t& dim0           [[buffer(2)]],
                           constant size_t& dim1           [[buffer(3)]],
-                          const device size_t* strides    [[buffer(4)]],
-                          constant size_t& stridesSize    [[buffer(5)]],
-                          const device size_t* newStrides [[buffer(6)]],
-                          constant size_t& newStridesSize [[buffer(7)]],
-                          constant size_t& size           [[buffer(8)]],
+                          const constant size_t* srcLayout [[buffer(4)]],
+                          constant size_t& size           [[buffer(5)]],
                           uint index [[thread_position_in_grid]])
 {
-    thread size_t oldIndices[16];
-    unflattenIndex(index, strides, stridesSize, oldIndices);
-    swap(oldIndices[dim0], oldIndices[dim1]);
-    size_t newIndex = flattenIndex(oldIndices, stridesSize, newStrides);
-    result[newIndex] = data[index];
+    thread size_t coords[16];
+    const constant size_t* srcShape = layoutShape(srcLayout);
+    const constant size_t* srcStrides = layoutStrides(srcLayout);
+    size_t rank = layoutRank(srcLayout);
+    size_t remaining = index;
+
+    for (int64_t i = static_cast<int64_t>(rank) - 1; i >= 0; --i)
+    {
+        size_t dimSize = srcShape[i];
+        if (static_cast<size_t>(i) == dim0)
+            dimSize = srcShape[dim1];
+        else if (static_cast<size_t>(i) == dim1)
+            dimSize = srcShape[dim0];
+
+        coords[i] = remaining % dimSize;
+        remaining /= dimSize;
+    }
+
+    swap(coords[dim0], coords[dim1]);
+
+    size_t srcIndex = layoutOffset(srcLayout);
+    for (size_t i = 0; i < rank; ++i)
+    {
+        srcIndex += coords[i] * srcStrides[i];
+    }
+
+    result[index] = data[srcIndex];
 }
 
 
@@ -973,32 +1404,27 @@ template<typename T>
 template<typename T>
 [[kernel]] void argmaxTo(const device T* src            [[buffer(0)]],
                          device int* dst                [[buffer(1)]],
-                         const device size_t* shape     [[buffer(2)]],
-                         const device size_t* strides   [[buffer(3)]],
-                         constant size_t& shapeSize     [[buffer(4)]],
-                         constant size_t& dim           [[buffer(5)]],
+                         const constant size_t* layout  [[buffer(2)]],
+                         constant size_t& dim           [[buffer(3)]],
                          uint dstIndex [[thread_position_in_grid]])
 {
-    size_t srcBaseOffset = 0;
-    size_t index = dstIndex;
-
-    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
-    {
-        size_t dimSize = static_cast<size_t>(i) == dim ? 1 : shape[i];
-        size_t coord = index % dimSize;
-        index /= dimSize;
-        srcBaseOffset += coord * strides[i];
-    }
+    const constant size_t* shape = layoutShape(layout);
+    const constant size_t* strides = layoutStrides(layout);
+    size_t shapeSize = layoutRank(layout);
+    size_t srcBaseOffset = layoutOffset(layout) + reducedSourceBaseOffset(dstIndex, shape, strides, shapeSize, dim);
+    size_t baseLogicalIndex = reducedLogicalBaseIndex(dstIndex, shape, shapeSize, dim);
+    size_t logicalStride = logicalStrideForDimension(shape, shapeSize, dim);
 
     T bestValue = src[srcBaseOffset];
-    int bestIndex = 0;
+    int bestIndex = static_cast<int>((baseLogicalIndex / strides[dim]) % shape[dim]);
     for (size_t i = 1; i < shape[dim]; ++i)
     {
         T candidateValue = src[srcBaseOffset + i * strides[dim]];
         if (argmaxIsBetter(candidateValue, static_cast<int>(i), bestValue, bestIndex))
         {
             bestValue = candidateValue;
-            bestIndex = static_cast<int>(i);
+            size_t candidateLogicalIndex = baseLogicalIndex + i * logicalStride;
+            bestIndex = static_cast<int>((candidateLogicalIndex / strides[dim]) % shape[dim]);
         }
     }
 
@@ -1030,16 +1456,7 @@ template<typename T>
                                    constant size_t& dim            [[buffer(5)]],
                                    uint reducedIndex [[thread_position_in_grid]])
 {
-    size_t baseOffset = 0;
-    size_t index = reducedIndex;
-
-    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
-    {
-        size_t dimSize = static_cast<size_t>(i) == dim ? 1 : shape[i];
-        size_t coord = index % dimSize;
-        index /= dimSize;
-        baseOffset += coord * strides[i];
-    }
+    size_t baseOffset = reducedSourceBaseOffset(reducedIndex, shape, strides, shapeSize, dim);
 
     auto winner = static_cast<size_t>(winningIndices[reducedIndex]);
     if (winner < shape[dim])
@@ -1054,26 +1471,7 @@ template<typename T>
 size_t translationIndex(size_t index, device const size_t* shape, device const size_t* newShape,
                         size_t shapeSize, size_t newShapeSize)
 {
-    size_t originalIndex  = 0;
-    size_t targetStride   = 1;
-    size_t originalStride = 1;
-
-    for (int64_t i = newShapeSize - 1, j = shapeSize - 1; i >= 0; --i)
-    {
-        size_t dimIndex = (index / targetStride) % newShape[i];
-        if (j >= 0 && shape[j] == newShape[i])
-        {
-            originalIndex += dimIndex * originalStride;
-            originalStride *= shape[--j + 1];
-        }
-        else if (j >= 0 && shape[j] == 1)
-        {
-            originalStride *= shape[--j + 1];
-        }
-        targetStride *= newShape[i];
-    }
-
-    return originalIndex;
+    return translateLogicalIndex(index, shape, newShape, shapeSize, newShapeSize);
 }
 
 
@@ -1082,23 +1480,10 @@ size_t translationIndex(size_t index, device const size_t* shape, device const s
 template<typename T, typename T2>
 [[kernel]] void contiguous(const device T* src       [[buffer(0)]],
                            device       T* dst       [[buffer(1)]],
-                           const device T2* shape    [[buffer(2)]],
-                           const device T2* strides  [[buffer(3)]],
-                           constant T2& shapeSize    [[buffer(4)]],
-                           constant T2& offset       [[buffer(5)]],
+                           const constant T2* layout [[buffer(2)]],
                            uint index [[thread_position_in_grid]])
 {
-    size_t idx = index;
-    size_t ofs = offset;
-    for (int64_t dim = static_cast<int64_t>(shapeSize) - 1; dim >= 0; --dim)
-    {
-        uint dimIndex = idx % shape[dim];
-        idx /= shape[dim];
-        ofs += dimIndex * strides[dim];
-    }
-
-    // Copy the element from non-contiguous source to contiguous destination.
-    dst[index] = src[ofs];
+    dst[index] = src[physicalIndex(index, layout)];
 }
 
 
@@ -1107,14 +1492,13 @@ template<typename T, typename T2>
 template<typename T, typename T2>
 [[kernel]] void reduceTo(const device T* src       [[buffer(0)]],
                          device       T* dst       [[buffer(1)]],
-                         const device T2* shape    [[buffer(2)]],
-                         const device T2* newShape [[buffer(3)]],
-                         constant T2& shapeSize    [[buffer(4)]],
-                         constant T2& newShapeSize [[buffer(5)]],
+                         const device T2* newShape [[buffer(2)]],
+                         constant T2& newShapeSize [[buffer(3)]],
+                         const constant T2* layout [[buffer(4)]],
                          uint index [[thread_position_in_grid]])
 {
-    size_t originalIndex = translationIndex(index, newShape, shape, newShapeSize, shapeSize);
-    atomic_fetch_add_explicit((device atomic<T>*)&(dst[originalIndex]), src[index], memory_order_relaxed);
+    size_t originalIndex = translateLogicalIndex(index, newShape, layoutShape(layout), newShapeSize, layoutRank(layout));
+    atomic_fetch_add_explicit((device atomic<T>*)&(dst[originalIndex]), src[physicalIndex(index, layout)], memory_order_relaxed);
 
     // NOTE: Metal Framework supports add and sub operations for only atomic_float, atomic_uint and atomic_int.
 }
@@ -1125,14 +1509,13 @@ template<typename T, typename T2>
 template<typename T, typename T2>
 [[kernel]] void maxTo(const device T* src       [[buffer(0)]],
                       device       T* dst       [[buffer(1)]],
-                      const device T2* shape    [[buffer(2)]],
-                      const device T2* newShape [[buffer(3)]],
-                      constant T2& shapeSize    [[buffer(4)]],
-                      constant T2& newShapeSize [[buffer(5)]],
+                      const device T2* newShape [[buffer(2)]],
+                      constant T2& newShapeSize [[buffer(3)]],
+                      const constant T2* layout [[buffer(4)]],
                       uint index [[thread_position_in_grid]])
 {
-    size_t originalIndex = translationIndex(index, newShape, shape, newShapeSize, shapeSize);
-    aix_atomic_fetch_max_explicit((device aix_atomic<T>*)&(dst[originalIndex]), src[index], memory_order_relaxed);
+    size_t originalIndex = translateLogicalIndex(index, newShape, layoutShape(layout), newShapeSize, layoutRank(layout));
+    aix_atomic_fetch_max_explicit((device aix_atomic<T>*)&(dst[originalIndex]), src[physicalIndex(index, layout)], memory_order_relaxed);
 }
 
 
@@ -1141,33 +1524,34 @@ template<typename T, typename T2>
 template<typename T, typename T2>
 [[kernel]] void sliceSet(const device T* src       [[buffer(0)]],
                          device       T* dst       [[buffer(1)]],
-                         const device T2* shape    [[buffer(2)]],
-                         const device T2* newShape [[buffer(3)]],
-                         const device T2* strides  [[buffer(4)]],
-                         constant T2& shapeSize    [[buffer(5)]],
-                         constant T2& newShapeSize [[buffer(6)]],
-                         constant T2& stridesSize  [[buffer(7)]],
-                         constant T2& dim          [[buffer(8)]],
-                         constant T2& start        [[buffer(9)]],
-                         constant T2& step         [[buffer(10)]],
+                         const constant T2* srcLayout [[buffer(2)]],
+                         const constant T2* dstLayout [[buffer(3)]],
+                         constant T2& dim             [[buffer(4)]],
+                         constant T2& start           [[buffer(5)]],
+                         constant T2& step            [[buffer(6)]],
                          uint index [[thread_position_in_grid]])
 {
-    // Translate the flat index into multi-dimensional indices.
-    size_t dstIndex = index;
-    size_t srcIndex = 0;
+    size_t logicalIndex = index;
+    size_t srcIndex = layoutOffset(srcLayout);
+    size_t dstIndex = layoutOffset(dstLayout);
+    const constant size_t* srcShape = layoutShape(srcLayout);
+    const constant size_t* srcStrides = layoutStrides(srcLayout);
+    const constant size_t* dstStrides = layoutStrides(dstLayout);
+    size_t rank = layoutRank(srcLayout);
 
-    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
+    for (int64_t i = static_cast<int64_t>(rank) - 1; i >= 0; --i)
     {
-        size_t coordinate = dstIndex % newShape[i];
-        dstIndex /= newShape[i];
+        size_t coordinate = logicalIndex % srcShape[i];
+        logicalIndex /= srcShape[i];
+        srcIndex += coordinate * srcStrides[i];
 
-        if (i == static_cast<int64_t>(dim))   // Handle the slicing dimension.
-            srcIndex += (start + coordinate * step) * strides[i];
+        if (i == static_cast<int64_t>(dim))
+            dstIndex += (start + coordinate * step) * dstStrides[i];
         else
-            srcIndex += coordinate * strides[i];
+            dstIndex += coordinate * dstStrides[i];
     }
 
-    dst[srcIndex] = src[index];
+    dst[dstIndex] = src[srcIndex];
 }
 
 
@@ -1240,6 +1624,7 @@ template<typename T, typename T2, typename T3>
                             constant T3& indicesSize  [[buffer(3)]],
                             constant T3& dimSize      [[buffer(4)]],
                             constant T3& sliceSize    [[buffer(5)]],
+                            const constant T3* srcLayout [[buffer(6)]],
                             uint index [[thread_position_in_grid]])
 {
     size_t elementWithinSlice = index % sliceSize;
@@ -1249,7 +1634,7 @@ template<typename T, typename T2, typename T3>
     size_t srcOffset = outer * dimSize + srcIndex;
     size_t dstOffset = outer * indicesSize * sliceSize + idx * sliceSize + elementWithinSlice;
 
-    dst[dstOffset] = src[srcOffset];
+    dst[dstOffset] = src[physicalIndex(srcOffset, srcLayout)];
 }
 
 
@@ -1262,6 +1647,8 @@ template<typename T, typename T2, typename T3>
                          constant T3& indicesSize  [[buffer(3)]],
                          constant T3& dimSize      [[buffer(4)]],
                          constant T3& sliceSize    [[buffer(5)]],
+                         const constant T3* srcLayout [[buffer(6)]],
+                         const constant T3* dstLayout [[buffer(7)]],
                          uint index [[thread_position_in_grid]])
 {
     size_t elementWithinSlice = index % sliceSize;
@@ -1270,7 +1657,9 @@ template<typename T, typename T2, typename T3>
     size_t dstIndex = indices[idx] * sliceSize + elementWithinSlice;
     size_t dstOffset = outer * dimSize + dstIndex;
     size_t srcOffset = outer * indicesSize * sliceSize + idx * sliceSize + elementWithinSlice;
-    atomic_fetch_add_explicit((device atomic<T>*)&(dst[dstOffset]), src[srcOffset], memory_order_relaxed);
+    atomic_fetch_add_explicit((device atomic<T>*)&(dst[physicalIndex(dstOffset, dstLayout)]),
+                              src[physicalIndex(srcOffset, srcLayout)],
+                              memory_order_relaxed);
 }
 
 
@@ -1295,6 +1684,15 @@ template<typename T, typename T2, typename T3>
                         device type* result     [[buffer(2)]], \
                         uint index [[thread_position_in_grid]])
 
+#define SpecializeAddStrided(tname, type)  \
+    template [[ host_name("add_strided_" tname) ]]  \
+    [[kernel]] void addStrided(const device type* inA           [[buffer(0)]], \
+                               const device type* inB           [[buffer(1)]], \
+                               device type* result              [[buffer(2)]], \
+                               const constant size_t* layoutA   [[buffer(3)]], \
+                               const constant size_t* layoutB   [[buffer(4)]], \
+                               uint index [[thread_position_in_grid]])
+
 SpecializeAdd("f32",  float4);
 SpecializeAdd("f16",  half4);
 SpecializeAdd("bf16", bfloat4);
@@ -1303,6 +1701,14 @@ SpecializeAdd("i32",  int4);
 SpecializeAdd("i16",  short4);
 SpecializeAdd("i8",   char4);
 SpecializeAdd("ui8",  uchar4);
+SpecializeAddStrided("f32",  float);
+SpecializeAddStrided("f16",  half);
+SpecializeAddStrided("bf16", bfloat);
+SpecializeAddStrided("i64",  long);
+SpecializeAddStrided("i32",  int);
+SpecializeAddStrided("i16",  short);
+SpecializeAddStrided("i8",   char);
+SpecializeAddStrided("ui8",  uchar);
 
 
 // Sub
@@ -1314,6 +1720,15 @@ SpecializeAdd("ui8",  uchar4);
                         device type* result     [[buffer(2)]], \
                         uint index [[thread_position_in_grid]])
 
+#define SpecializeSubStrided(tname, type)  \
+    template [[ host_name("sub_strided_" tname) ]]  \
+    [[kernel]] void subStrided(const device type* inA           [[buffer(0)]], \
+                               const device type* inB           [[buffer(1)]], \
+                               device type* result              [[buffer(2)]], \
+                               const constant size_t* layoutA   [[buffer(3)]], \
+                               const constant size_t* layoutB   [[buffer(4)]], \
+                               uint index [[thread_position_in_grid]])
+
 SpecializeSub("f32",  float4);
 SpecializeSub("f16",  half4);
 SpecializeSub("bf16", bfloat4);
@@ -1322,6 +1737,14 @@ SpecializeSub("i32",  int4);
 SpecializeSub("i16",  short4);
 SpecializeSub("i8",   char4);
 SpecializeSub("ui8",  uchar4);
+SpecializeSubStrided("f32",  float);
+SpecializeSubStrided("f16",  half);
+SpecializeSubStrided("bf16", bfloat);
+SpecializeSubStrided("i64",  long);
+SpecializeSubStrided("i32",  int);
+SpecializeSubStrided("i16",  short);
+SpecializeSubStrided("i8",   char);
+SpecializeSubStrided("ui8",  uchar);
 
 
 // Mul
@@ -1333,6 +1756,15 @@ SpecializeSub("ui8",  uchar4);
                         device type* result     [[buffer(2)]], \
                         uint index [[thread_position_in_grid]])
 
+#define SpecializeMulStrided(tname, type)  \
+    template [[ host_name("mul_strided_" tname) ]]  \
+    [[kernel]] void mulStrided(const device type* inA           [[buffer(0)]], \
+                               const device type* inB           [[buffer(1)]], \
+                               device type* result              [[buffer(2)]], \
+                               const constant size_t* layoutA   [[buffer(3)]], \
+                               const constant size_t* layoutB   [[buffer(4)]], \
+                               uint index [[thread_position_in_grid]])
+
 SpecializeMul("f32",  float4);
 SpecializeMul("f16",  half4);
 SpecializeMul("bf16", bfloat4);
@@ -1341,6 +1773,14 @@ SpecializeMul("i32",  int4);
 SpecializeMul("i16",  short4);
 SpecializeMul("i8",   char4);
 SpecializeMul("ui8",  uchar4);
+SpecializeMulStrided("f32",  float);
+SpecializeMulStrided("f16",  half);
+SpecializeMulStrided("bf16", bfloat);
+SpecializeMulStrided("i64",  long);
+SpecializeMulStrided("i32",  int);
+SpecializeMulStrided("i16",  short);
+SpecializeMulStrided("i8",   char);
+SpecializeMulStrided("ui8",  uchar);
 
 
 // Div
@@ -1352,6 +1792,15 @@ SpecializeMul("ui8",  uchar4);
                         device type* result     [[buffer(2)]], \
                         uint index [[thread_position_in_grid]])
 
+#define SpecializeDivStrided(tname, type)  \
+    template [[ host_name("div_strided_" tname) ]]  \
+    [[kernel]] void divStrided(const device type* inA           [[buffer(0)]], \
+                               const device type* inB           [[buffer(1)]], \
+                               device type* result              [[buffer(2)]], \
+                               const constant size_t* layoutA   [[buffer(3)]], \
+                               const constant size_t* layoutB   [[buffer(4)]], \
+                               uint index [[thread_position_in_grid]])
+
 SpecializeDiv("f32",  float4);
 SpecializeDiv("f16",  half4);
 SpecializeDiv("bf16", bfloat4);
@@ -1360,6 +1809,14 @@ SpecializeDiv("i32",  int4);
 SpecializeDiv("i16",  short4);
 SpecializeDiv("i8",   char4);
 SpecializeDiv("ui8",  uchar4);
+SpecializeDivStrided("f32",  float);
+SpecializeDivStrided("f16",  half);
+SpecializeDivStrided("bf16", bfloat);
+SpecializeDivStrided("i64",  long);
+SpecializeDivStrided("i32",  int);
+SpecializeDivStrided("i16",  short);
+SpecializeDivStrided("i8",   char);
+SpecializeDivStrided("ui8",  uchar);
 
 
 // Sqrt
@@ -1370,6 +1827,13 @@ SpecializeDiv("ui8",  uchar4);
                          device type* result      [[buffer(1)]],  \
                          uint index [[thread_position_in_grid]])
 
+#define SpecializeSqrtStrided(tname, type)  \
+    template [[ host_name("sqrt_strided_" tname) ]]  \
+    [[kernel]] void sqrtStrided(const device type* inA          [[buffer(0)]], \
+                                device type* result             [[buffer(1)]], \
+                                const constant size_t* layoutA  [[buffer(2)]], \
+                                uint index [[thread_position_in_grid]])
+
 SpecializeSqrt("f32",  float4);
 SpecializeSqrt("f16",  half4);
 SpecializeSqrt("bf16", bfloat4);
@@ -1378,6 +1842,14 @@ SpecializeSqrt("i32",  int4);
 SpecializeSqrt("i16",  short4);
 SpecializeSqrt("i8",   char4);
 SpecializeSqrt("ui8",  uchar4);
+SpecializeSqrtStrided("f32",  float);
+SpecializeSqrtStrided("f16",  half);
+SpecializeSqrtStrided("bf16", bfloat);
+SpecializeSqrtStrided("i64",  long);
+SpecializeSqrtStrided("i32",  int);
+SpecializeSqrtStrided("i16",  short);
+SpecializeSqrtStrided("i8",   char);
+SpecializeSqrtStrided("ui8",  uchar);
 
 
 // Sin
@@ -1388,6 +1860,13 @@ SpecializeSqrt("ui8",  uchar4);
                         device type* result      [[buffer(1)]],  \
                         uint index [[thread_position_in_grid]])
 
+#define SpecializeSinStrided(tname, type)  \
+    template [[ host_name("sin_strided_" tname) ]]  \
+    [[kernel]] void sinStrided(const device type* inA           [[buffer(0)]], \
+                               device type* result              [[buffer(1)]], \
+                               const constant size_t* layoutA   [[buffer(2)]], \
+                               uint index [[thread_position_in_grid]])
+
 SpecializeSin("f32",  float4);
 SpecializeSin("f16",  half4);
 SpecializeSin("bf16", bfloat4);
@@ -1396,6 +1875,14 @@ SpecializeSin("i32",  int4);
 SpecializeSin("i16",  short4);
 SpecializeSin("i8",   char4);
 SpecializeSin("ui8",  uchar4);
+SpecializeSinStrided("f32",  float);
+SpecializeSinStrided("f16",  half);
+SpecializeSinStrided("bf16", bfloat);
+SpecializeSinStrided("i64",  long);
+SpecializeSinStrided("i32",  int);
+SpecializeSinStrided("i16",  short);
+SpecializeSinStrided("i8",   char);
+SpecializeSinStrided("ui8",  uchar);
 
 
 // Cos
@@ -1406,6 +1893,13 @@ SpecializeSin("ui8",  uchar4);
                         device type* result      [[buffer(1)]],  \
                         uint index [[thread_position_in_grid]])
 
+#define SpecializeCosStrided(tname, type)  \
+    template [[ host_name("cos_strided_" tname) ]]  \
+    [[kernel]] void cosStrided(const device type* inA           [[buffer(0)]], \
+                               device type* result              [[buffer(1)]], \
+                               const constant size_t* layoutA   [[buffer(2)]], \
+                               uint index [[thread_position_in_grid]])
+
 SpecializeCos("f32",  float4);
 SpecializeCos("f16",  half4);
 SpecializeCos("bf16", bfloat4);
@@ -1414,6 +1908,14 @@ SpecializeCos("i32",  int4);
 SpecializeCos("i16",  short4);
 SpecializeCos("i8",   char4);
 SpecializeCos("ui8",  uchar4);
+SpecializeCosStrided("f32",  float);
+SpecializeCosStrided("f16",  half);
+SpecializeCosStrided("bf16", bfloat);
+SpecializeCosStrided("i64",  long);
+SpecializeCosStrided("i32",  int);
+SpecializeCosStrided("i16",  short);
+SpecializeCosStrided("i8",   char);
+SpecializeCosStrided("ui8",  uchar);
 
 
 // Tanh
@@ -1424,6 +1926,13 @@ SpecializeCos("ui8",  uchar4);
                          device type* result      [[buffer(1)]],  \
                          uint index [[thread_position_in_grid]])
 
+#define SpecializeTanhStrided(tname, type)  \
+    template [[ host_name("tanh_strided_" tname) ]]  \
+    [[kernel]] void tanhStrided(const device type* inA          [[buffer(0)]], \
+                                device type* result             [[buffer(1)]], \
+                                const constant size_t* layoutA  [[buffer(2)]], \
+                                uint index [[thread_position_in_grid]])
+
 SpecializeTanh("f32",  float4);
 SpecializeTanh("f16",  half4);
 SpecializeTanh("bf16", bfloat4);
@@ -1432,6 +1941,14 @@ SpecializeTanh("i32",  int4);
 SpecializeTanh("i16",  short4);
 SpecializeTanh("i8",   char4);
 SpecializeTanh("ui8",  uchar4);
+SpecializeTanhStrided("f32",  float);
+SpecializeTanhStrided("f16",  half);
+SpecializeTanhStrided("bf16", bfloat);
+SpecializeTanhStrided("i64",  long);
+SpecializeTanhStrided("i32",  int);
+SpecializeTanhStrided("i16",  short);
+SpecializeTanhStrided("i8",   char);
+SpecializeTanhStrided("ui8",  uchar);
 
 
 // Log
@@ -1442,6 +1959,13 @@ SpecializeTanh("ui8",  uchar4);
                         device type* result      [[buffer(1)]],  \
                         uint index [[thread_position_in_grid]])
 
+#define SpecializeLogStrided(tname, type)  \
+    template [[ host_name("log_strided_" tname) ]]  \
+    [[kernel]] void logStrided(const device type* inA           [[buffer(0)]], \
+                               device type* result              [[buffer(1)]], \
+                               const constant size_t* layoutA   [[buffer(2)]], \
+                               uint index [[thread_position_in_grid]])
+
 SpecializeLog("f32",  float4);
 SpecializeLog("f16",  half4);
 SpecializeLog("bf16", bfloat4);
@@ -1450,6 +1974,14 @@ SpecializeLog("i32",  int4);
 SpecializeLog("i16",  short4);
 SpecializeLog("i8",   char4);
 SpecializeLog("ui8",  uchar4);
+SpecializeLogStrided("f32",  float);
+SpecializeLogStrided("f16",  half);
+SpecializeLogStrided("bf16", bfloat);
+SpecializeLogStrided("i64",  long);
+SpecializeLogStrided("i32",  int);
+SpecializeLogStrided("i16",  short);
+SpecializeLogStrided("i8",   char);
+SpecializeLogStrided("ui8",  uchar);
 
 
 // Exp
@@ -1460,6 +1992,13 @@ SpecializeLog("ui8",  uchar4);
                         device type* result      [[buffer(1)]],  \
                         uint index [[thread_position_in_grid]])
 
+#define SpecializeExpStrided(tname, type)  \
+    template [[ host_name("exp_strided_" tname) ]]  \
+    [[kernel]] void expStrided(const device type* inA           [[buffer(0)]], \
+                               device type* result              [[buffer(1)]], \
+                               const constant size_t* layoutA   [[buffer(2)]], \
+                               uint index [[thread_position_in_grid]])
+
 SpecializeExp("f32",  float4);
 SpecializeExp("f16",  half4);
 SpecializeExp("bf16", bfloat4);
@@ -1468,6 +2007,14 @@ SpecializeExp("i32",  int4);
 SpecializeExp("i16",  short4);
 SpecializeExp("i8",   char4);
 SpecializeExp("ui8",  uchar4);
+SpecializeExpStrided("f32",  float);
+SpecializeExpStrided("f16",  half);
+SpecializeExpStrided("bf16", bfloat);
+SpecializeExpStrided("i64",  long);
+SpecializeExpStrided("i32",  int);
+SpecializeExpStrided("i16",  short);
+SpecializeExpStrided("i8",   char);
+SpecializeExpStrided("ui8",  uchar);
 
 
 // Pow
@@ -1479,6 +2026,15 @@ SpecializeExp("ui8",  uchar4);
                         device type* result         [[buffer(2)]],  \
                         uint index [[thread_position_in_grid]])
 
+#define SpecializePowStrided(tname, type)  \
+    template [[ host_name("pow_strided_" tname) ]]  \
+    [[kernel]] void powStrided(const device type* inA           [[buffer(0)]], \
+                               const device type* inB           [[buffer(1)]], \
+                               device type* result              [[buffer(2)]], \
+                               const constant size_t* layoutA   [[buffer(3)]], \
+                               const constant size_t* layoutB   [[buffer(4)]], \
+                               uint index [[thread_position_in_grid]])
+
 SpecializePow("f32",  float4);
 SpecializePow("f16",  half4);
 SpecializePow("bf16", bfloat4);
@@ -1487,6 +2043,14 @@ SpecializePow("i32",  int4);
 SpecializePow("i16",  short4);
 SpecializePow("i8",   char4);
 SpecializePow("ui8",  uchar4);
+SpecializePowStrided("f32",  float);
+SpecializePowStrided("f16",  half);
+SpecializePowStrided("bf16", bfloat);
+SpecializePowStrided("i64",  long);
+SpecializePowStrided("i32",  int);
+SpecializePowStrided("i16",  short);
+SpecializePowStrided("i8",   char);
+SpecializePowStrided("ui8",  uchar);
 
 
 // Sum
@@ -1552,10 +2116,8 @@ SpecializeMax("ui8",  uchar);
     template [[ host_name("argmaxTo_" tname) ]]  \
     [[kernel]] void argmaxTo(const device type* src           [[buffer(0)]], \
                              device int* dst                  [[buffer(1)]], \
-                             const device size_t* shape       [[buffer(2)]], \
-                             const device size_t* strides     [[buffer(3)]], \
-                             constant size_t& shapeSize       [[buffer(4)]], \
-                             constant size_t& dim             [[buffer(5)]], \
+                             const constant size_t* layout    [[buffer(2)]], \
+                             constant size_t& dim             [[buffer(3)]], \
                              uint dstIndex [[thread_position_in_grid]])
 
 SpecializeArgmaxInit("f32",  float);
@@ -1588,6 +2150,26 @@ SpecializeArgmaxTo("ui8",  uchar);
 
 // Matrix_Mul
 // -----------------------------------------------------------------
+#define SpecializeMatrixMulStrided(tname, type) \
+    template [[ host_name("matrixMulStrided_" tname) ]] \
+    [[kernel]] void matrixMulStrided(const device type* inA, \
+                                     const device type* inB, \
+                                     device type* result, \
+                                     constant MatrixSize& matASize, \
+                                     constant MatrixSize& matBSize, \
+                                     const constant size_t* layoutA, \
+                                     const constant size_t* layoutB, \
+                                     uint2 gid [[thread_position_in_grid]])
+
+SpecializeMatrixMulStrided("f32",  float);
+SpecializeMatrixMulStrided("f16",  half);
+SpecializeMatrixMulStrided("bf16", bfloat);
+SpecializeMatrixMulStrided("i64",  long);
+SpecializeMatrixMulStrided("i32",  int);
+SpecializeMatrixMulStrided("i16",  short);
+SpecializeMatrixMulStrided("i8",   char);
+SpecializeMatrixMulStrided("ui8",  uchar);
+
 #define SpecializeMatrixMulTiledBC(tname, bm, bn, bk, tm, tn, type)  \
     template [[ host_name("matrixMulTiledBC_" #bm "_" #bn "_" #bk "_" #tm "_" #tn "_" tname) ]]  \
     [[kernel]] void matrixMulTiledBC<type,bm,bn,bk,tm,tn>(const device type* inA,  \
@@ -1699,15 +2281,12 @@ DeclareConfigTranspose2DTiled(32, 8);
 #define SpecializeTranspose(tname, type)  \
     template [[ host_name("transpose_" tname) ]]  \
     [[kernel]] void transpose(const device type* data         [[buffer(0)]], \
-                              device type* result             [[buffer(1)]], \
-                              constant size_t& dim0           [[buffer(2)]], \
-                              constant size_t& dim1           [[buffer(3)]], \
-                              const device size_t* strides    [[buffer(4)]], \
-                              constant size_t& stridesSize    [[buffer(5)]], \
-                              const device size_t* newStrides [[buffer(6)]], \
-                              constant size_t& newStridesSize [[buffer(7)]], \
-                              constant size_t& size           [[buffer(8)]], \
-                              uint index [[thread_position_in_grid]])
+                               device type* result             [[buffer(1)]], \
+                               constant size_t& dim0           [[buffer(2)]], \
+                               constant size_t& dim1           [[buffer(3)]], \
+                               const constant size_t* srcLayout [[buffer(4)]], \
+                               constant size_t& size           [[buffer(5)]], \
+                               uint index [[thread_position_in_grid]])
 
 SpecializeTranspose("f32",  float);
 SpecializeTranspose("f16",  half);
@@ -1755,6 +2334,13 @@ SpecializeCopySet("ui8",  uchar4 );
                           device type* result       [[buffer(1)]], \
                           uint index [[thread_position_in_grid]])
 
+#define SpecializeUnaryStrided(tname, type)  \
+    template [[ host_name("unary_strided_" tname) ]]  \
+    [[kernel]] void unaryStrided(const device type* inA        [[buffer(0)]], \
+                                 device type* result           [[buffer(1)]], \
+                                 const constant size_t* layoutA [[buffer(2)]], \
+                                 uint index [[thread_position_in_grid]])
+
 SpecializeUnary("f32",  float4);
 SpecializeUnary("f16",  half4);
 SpecializeUnary("bf16", bfloat4);
@@ -1763,6 +2349,14 @@ SpecializeUnary("i32",  int4);
 SpecializeUnary("i16",  short4);
 SpecializeUnary("i8",   char4);
 SpecializeUnary("ui8",  uchar4);
+SpecializeUnaryStrided("f32",  float);
+SpecializeUnaryStrided("f16",  half);
+SpecializeUnaryStrided("bf16", bfloat);
+SpecializeUnaryStrided("i64",  long);
+SpecializeUnaryStrided("i32",  int);
+SpecializeUnaryStrided("i16",  short);
+SpecializeUnaryStrided("i8",   char);
+SpecializeUnaryStrided("ui8",  uchar);
 
 
 // Fill
@@ -1816,10 +2410,7 @@ SpecializeFillMin("ui8",  uchar4);
     template [[ host_name("contiguous_" tname) ]]  \
     [[kernel]] void contiguous(const device type1* src       [[buffer(0)]], \
                                device       type1* dst       [[buffer(1)]], \
-                               const device type2* shape     [[buffer(2)]], \
-                               const device type2* strides   [[buffer(3)]], \
-                               constant type2& shapeSize     [[buffer(4)]], \
-                               constant type2& offset        [[buffer(5)]], \
+                               const constant type2* layout  [[buffer(2)]], \
                                uint index [[thread_position_in_grid]])
 
 SpecializeContiguous("f32",  float , size_t);
@@ -1838,20 +2429,18 @@ SpecializeContiguous("ui8",  uchar , size_t);
     template [[ host_name("reduceTo_" tname) ]]  \
     [[kernel]] void reduceTo(const device type1* src       [[buffer(0)]], \
                              device       type1* dst       [[buffer(1)]], \
-                             const device type2* shape     [[buffer(2)]], \
-                             const device type2* newShape  [[buffer(3)]], \
-                             constant type2& shapeSize     [[buffer(4)]], \
-                             constant type2& newShapeSize  [[buffer(5)]], \
+                             const device type2* newShape  [[buffer(2)]], \
+                             constant type2& newShapeSize  [[buffer(3)]], \
+                             const constant type2* layout  [[buffer(4)]], \
                              uint index [[thread_position_in_grid]])
 
 #define ImplementSpecializedReduceTo(tname, type1, type2)  \
     template <> [[ host_name("reduceTo_" tname) ]]  \
     [[kernel]] void reduceTo<type1,type2>(const device type1* src       [[buffer(0)]], \
                                           device       type1* dst       [[buffer(1)]], \
-                                          const device type2* shape     [[buffer(2)]], \
-                                          const device type2* newShape  [[buffer(3)]], \
-                                          constant type2& shapeSize     [[buffer(4)]], \
-                                          constant type2& newShapeSize  [[buffer(5)]], \
+                                          const device type2* newShape  [[buffer(2)]], \
+                                          constant type2& newShapeSize  [[buffer(3)]], \
+                                          const constant type2* layout  [[buffer(4)]], \
                                           uint index [[thread_position_in_grid]]) { }
 
 SpecializeReduceTo("f32",  float , size_t);
@@ -1870,20 +2459,18 @@ ImplementSpecializedReduceTo("ui8",  uchar , size_t);
     template [[ host_name("maxTo_" tname) ]]  \
     [[kernel]] void maxTo(const device type1* src       [[buffer(0)]], \
                           device       type1* dst       [[buffer(1)]], \
-                          const device type2* shape     [[buffer(2)]], \
-                          const device type2* newShape  [[buffer(3)]], \
-                          constant type2& shapeSize     [[buffer(4)]], \
-                          constant type2& newShapeSize  [[buffer(5)]], \
+                          const device type2* newShape  [[buffer(2)]], \
+                          constant type2& newShapeSize  [[buffer(3)]], \
+                          const constant type2* layout  [[buffer(4)]], \
                           uint index [[thread_position_in_grid]])
 
 #define ImplementSpecializedMaxTo(tname, type1, type2)  \
     template <> [[ host_name("maxTo_" tname) ]]  \
     [[kernel]] void maxTo<type1,type2>(const device type1* src       [[buffer(0)]], \
                                        device       type1* dst       [[buffer(1)]], \
-                                       const device type2* shape     [[buffer(2)]], \
-                                       const device type2* newShape  [[buffer(3)]], \
-                                       constant type2& shapeSize     [[buffer(4)]], \
-                                       constant type2& newShapeSize  [[buffer(5)]], \
+                                       const device type2* newShape  [[buffer(2)]], \
+                                       constant type2& newShapeSize  [[buffer(3)]], \
+                                       const constant type2* layout  [[buffer(4)]], \
                                        uint index [[thread_position_in_grid]]) { }
 
 SpecializeMaxTo("f32",  float , size_t);
@@ -1901,17 +2488,13 @@ ImplementSpecializedMaxTo("i64",  long  , size_t);
 #define SpecializeSliceSet(tname, type1, type2)  \
     template [[ host_name("sliceSet_" tname) ]]  \
     [[kernel]] void sliceSet(const device type1* src      [[buffer(0)]],  \
-                             device       type1* dst      [[buffer(1)]],  \
-                             const device type2* shape    [[buffer(2)]],  \
-                             const device type2* newShape [[buffer(3)]],  \
-                             const device type2* strides  [[buffer(4)]],  \
-                             constant type2& shapeSize    [[buffer(5)]],  \
-                             constant type2& newShapeSize [[buffer(6)]],  \
-                             constant type2& stridesSize  [[buffer(7)]],  \
-                             constant type2& dim          [[buffer(8)]],  \
-                             constant type2& start        [[buffer(9)]],  \
-                             constant type2& step         [[buffer(10)]], \
-                             uint index [[thread_position_in_grid]])
+                              device       type1* dst      [[buffer(1)]],  \
+                              const constant type2* srcLayout [[buffer(2)]],  \
+                              const constant type2* dstLayout [[buffer(3)]],  \
+                              constant type2& dim             [[buffer(4)]],  \
+                              constant type2& start           [[buffer(5)]],  \
+                              constant type2& step            [[buffer(6)]], \
+                              uint index [[thread_position_in_grid]])
 
 SpecializeSliceSet("f32",  float , size_t);
 SpecializeSliceSet("f16",  half  , size_t);
@@ -1974,12 +2557,13 @@ SpecializeTriu("ui8",  uchar , size_t, int64_t);
 #define SpecializeIndexSelect(tname, type1, type2, type3)  \
     template [[ host_name("indexSelect_" tname) ]]  \
     [[kernel]] void indexSelect(const device type1* src      [[buffer(0)]], \
-                                device type1* dst            [[buffer(1)]], \
-                                const device type2* indices  [[buffer(2)]], \
-                                constant type3& indicesSize  [[buffer(3)]], \
-                                constant type3& dimSize      [[buffer(4)]], \
-                                constant type3& sliceSize    [[buffer(5)]], \
-                                uint index [[thread_position_in_grid]])
+                                 device type1* dst            [[buffer(1)]], \
+                                 const device type2* indices  [[buffer(2)]], \
+                                 constant type3& indicesSize  [[buffer(3)]], \
+                                 constant type3& dimSize      [[buffer(4)]], \
+                                 constant type3& sliceSize    [[buffer(5)]], \
+                                 const constant type3* srcLayout [[buffer(6)]], \
+                                 uint index [[thread_position_in_grid]])
 
 SpecializeIndexSelect("f32",  float , int, size_t);
 SpecializeIndexSelect("f16",  half  , int, size_t);
@@ -1996,22 +2580,26 @@ SpecializeIndexSelect("ui8",  uchar , int, size_t);
 #define SpecializeIndexAdd(tname, type1, type2, type3)  \
     template [[ host_name("indexAdd_" tname) ]]  \
     [[kernel]] void indexAdd(const device type1* src      [[buffer(0)]], \
-                             device type1* dst            [[buffer(1)]], \
-                             const device type2* indices  [[buffer(2)]], \
-                             constant type3& indicesSize  [[buffer(3)]], \
-                             constant type3& dimSize      [[buffer(4)]], \
-                             constant type3& sliceSize    [[buffer(5)]], \
-                             uint index [[thread_position_in_grid]])
+                              device type1* dst            [[buffer(1)]], \
+                              const device type2* indices  [[buffer(2)]], \
+                              constant type3& indicesSize  [[buffer(3)]], \
+                              constant type3& dimSize      [[buffer(4)]], \
+                              constant type3& sliceSize    [[buffer(5)]], \
+                              const constant type3* srcLayout [[buffer(6)]], \
+                              const constant type3* dstLayout [[buffer(7)]], \
+                              uint index [[thread_position_in_grid]])
 
 #define ImplementSpecializedIndexAdd(tname, type1, type2, type3)  \
     template <> [[ host_name("indexAdd_" tname) ]]  \
     [[kernel]] void indexAdd<type1,type2,type3>(const device type1* src      [[buffer(0)]], \
-                                                device type1* dst            [[buffer(1)]], \
-                                                const device type2* indices  [[buffer(2)]], \
-                                                constant type3& indicesSize  [[buffer(3)]], \
-                                                constant type3& dimSize      [[buffer(4)]], \
-                                                constant type3& sliceSize    [[buffer(5)]], \
-                                                uint index [[thread_position_in_grid]]) { }
+                                                  device type1* dst            [[buffer(1)]], \
+                                                  const device type2* indices  [[buffer(2)]], \
+                                                  constant type3& indicesSize  [[buffer(3)]], \
+                                                  constant type3& dimSize      [[buffer(4)]], \
+                                                  constant type3& sliceSize    [[buffer(5)]], \
+                                                  const constant type3* srcLayout [[buffer(6)]], \
+                                                  const constant type3* dstLayout [[buffer(7)]], \
+                                                  uint index [[thread_position_in_grid]]) { }
 
 SpecializeIndexAdd("f32",  float , int, size_t);
 SpecializeIndexAdd("i32",  int   , int, size_t);

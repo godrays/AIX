@@ -1581,6 +1581,328 @@ bool testReduceTo(Device* testDevice)
 }
 
 
+TEST_CASE("DeviceMetal stride add parity with transposed source")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuSrc = TensorValue({1.0f, 2.0f, 3.0f,
+                               4.0f, 5.0f, 6.0f}, {2, 3}, &refDevice).transpose(0, 1);
+    auto cpuOther = TensorValue({10.0f, 20.0f,
+                                 30.0f, 40.0f,
+                                 50.0f, 60.0f}, {3, 2}, &refDevice);
+    auto metalSrc = TensorValue({1.0f, 2.0f, 3.0f,
+                                 4.0f, 5.0f, 6.0f}, {2, 3}, device.get()).transpose(0, 1);
+    auto metalOther = TensorValue({10.0f, 20.0f,
+                                   30.0f, 40.0f,
+                                   50.0f, 60.0f}, {3, 2}, device.get());
+
+    CHECK_FALSE(cpuSrc.isContiguous());
+    CHECK_FALSE(metalSrc.isContiguous());
+
+    auto expected = cpuSrc + cpuOther;
+    auto actual = metalSrc + metalOther;
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal stride sqrt parity with sliced source")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuSrc = TensorValue({1.0f, 2.0f, 3.0f, 4.0f,
+                               5.0f, 6.0f, 7.0f, 8.0f,
+                               9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, &refDevice).slice(1, 0, 4, 2);
+    auto metalSrc = TensorValue({1.0f, 2.0f, 3.0f, 4.0f,
+                                 5.0f, 6.0f, 7.0f, 8.0f,
+                                 9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, device.get()).slice(1, 0, 4, 2);
+
+    CHECK_FALSE(cpuSrc.isContiguous());
+    CHECK_FALSE(metalSrc.isContiguous());
+
+    auto expected = cpuSrc.sqrt();
+    auto actual = metalSrc.sqrt();
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal stride reduceTo parity with broadcast source")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuSrc = TensorValue({1.0f, 2.0f, 3.0f}, {1, 3}, &refDevice).broadcastTo({2, 3});
+    auto metalSrc = TensorValue({1.0f, 2.0f, 3.0f}, {1, 3}, device.get()).broadcastTo({2, 3});
+
+    CHECK_FALSE(cpuSrc.isContiguous());
+    CHECK_FALSE(metalSrc.isContiguous());
+
+    auto expected = cpuSrc.reduceTo({1, 3});
+    auto actual = metalSrc.reduceTo({1, 3});
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal stride argmaxTo parity with transposed source")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuSrc = TensorValue({1.0f, 8.0f, 3.0f,
+                               4.0f, 5.0f, 6.0f}, {2, 3}, &refDevice).transpose(0, 1);
+    auto metalSrc = TensorValue({1.0f, 8.0f, 3.0f,
+                                 4.0f, 5.0f, 6.0f}, {2, 3}, device.get()).transpose(0, 1);
+
+    CHECK_FALSE(cpuSrc.isContiguous());
+    CHECK_FALSE(metalSrc.isContiguous());
+
+    auto expected = cpuSrc.argmax(1, true);
+    auto actual = metalSrc.argmax(1, true);
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal stride transpose parity with sliced source")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuSrc = TensorValue({1.0f, 2.0f, 3.0f, 4.0f,
+                               5.0f, 6.0f, 7.0f, 8.0f,
+                               9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, &refDevice).slice(1, 0, 4, 2);
+    auto metalSrc = TensorValue({1.0f, 2.0f, 3.0f, 4.0f,
+                                 5.0f, 6.0f, 7.0f, 8.0f,
+                                 9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, device.get()).slice(1, 0, 4, 2);
+
+    CHECK_FALSE(cpuSrc.isContiguous());
+    CHECK_FALSE(metalSrc.isContiguous());
+
+    auto expected = cpuSrc.transpose(0, 1).contiguous();
+    auto actual = metalSrc.transpose(0, 1).contiguous();
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal stride sliceSet parity with transposed source")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuDst = TensorValue(0.0f, {3, 4}, &refDevice);
+    auto cpuSrc = TensorValue({1.0f, 2.0f, 3.0f,
+                               4.0f, 5.0f, 6.0f}, {2, 3}, &refDevice).transpose(0, 1);
+    auto metalDst = TensorValue(0.0f, {3, 4}, device.get());
+    auto metalSrc = TensorValue({1.0f, 2.0f, 3.0f,
+                                 4.0f, 5.0f, 6.0f}, {2, 3}, device.get()).transpose(0, 1);
+
+    CHECK_FALSE(cpuSrc.isContiguous());
+    CHECK_FALSE(metalSrc.isContiguous());
+
+    auto expected = cpuDst.sliceSet(cpuSrc, 1, 1, 3, 1);
+    auto actual = metalDst.sliceSet(metalSrc, 1, 1, 3, 1);
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal stride sliceSet parity with destination view")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto metalBase = TensorValue(0.0f, {2, 3}, device.get());
+    auto metalDst = metalBase.transpose(0, 1);
+    auto metalSrc = TensorValue({1.0f, 2.0f, 3.0f}, {3, 1}, device.get());
+
+    CHECK_FALSE(metalDst.isContiguous());
+
+    metalDst.sliceSet(metalSrc, 1, 1, 2, 1, true);
+    device->synchronize();
+
+    auto expectedBase = TensorValue({0.0f, 0.0f, 0.0f,
+                                     1.0f, 2.0f, 3.0f}, {2, 3}, &refDevice);
+    auto expectedDst = expectedBase.transpose(0, 1);
+
+    CheckVectorApproxValues(metalBase, expectedBase);
+    CheckVectorApproxValues(metalDst, expectedDst);
+}
+
+
+TEST_CASE("DeviceMetal stride indexSelect parity with transposed source")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuSrc = TensorValue({1.0f, 2.0f, 3.0f, 4.0f,
+                               5.0f, 6.0f, 7.0f, 8.0f,
+                               9.0f, 10.0f, 11.0f, 12.0f,
+                               13.0f, 14.0f, 15.0f, 16.0f,
+                               17.0f, 18.0f, 19.0f, 20.0f,
+                               21.0f, 22.0f, 23.0f, 24.0f}, {2, 3, 4}, &refDevice).transpose(0, 1);
+    auto cpuIndices = TensorValue({1, 0}, {2}, &refDevice, DataType::kInt32);
+    auto metalSrc = TensorValue({1.0f, 2.0f, 3.0f, 4.0f,
+                                 5.0f, 6.0f, 7.0f, 8.0f,
+                                 9.0f, 10.0f, 11.0f, 12.0f,
+                                 13.0f, 14.0f, 15.0f, 16.0f,
+                                 17.0f, 18.0f, 19.0f, 20.0f,
+                                 21.0f, 22.0f, 23.0f, 24.0f}, {2, 3, 4}, device.get()).transpose(0, 1);
+    auto metalIndices = TensorValue({1, 0}, {2}, device.get(), DataType::kInt32);
+
+    CHECK_FALSE(cpuSrc.isContiguous());
+    CHECK_FALSE(metalSrc.isContiguous());
+
+    auto expected = cpuSrc.indexSelect(1, cpuIndices);
+    auto actual = metalSrc.indexSelect(1, metalIndices);
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal stride indexAdd parity with transposed source")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuDst = TensorValue(0.0f, {3, 4}, &refDevice);
+    auto cpuIndices = TensorValue({2, 0}, {2}, &refDevice, DataType::kInt32);
+    auto cpuSrc = TensorValue({1.0f, 2.0f,
+                               3.0f, 4.0f,
+                               5.0f, 6.0f,
+                               7.0f, 8.0f}, {4, 2}, &refDevice).transpose(0, 1);
+    auto metalDst = TensorValue(0.0f, {3, 4}, device.get());
+    auto metalIndices = TensorValue({2, 0}, {2}, device.get(), DataType::kInt32);
+    auto metalSrc = TensorValue({1.0f, 2.0f,
+                                 3.0f, 4.0f,
+                                 5.0f, 6.0f,
+                                 7.0f, 8.0f}, {4, 2}, device.get()).transpose(0, 1);
+
+    CHECK_FALSE(cpuSrc.isContiguous());
+    CHECK_FALSE(metalSrc.isContiguous());
+
+    auto expected = cpuDst.indexAdd(0, cpuIndices, cpuSrc);
+    auto actual = metalDst.indexAdd(0, metalIndices, metalSrc);
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal stride matmul parity with transposed lhs operand")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuLhs = TensorValue({1.0f, 2.0f,
+                               3.0f, 4.0f,
+                               5.0f, 6.0f}, {3, 2}, &refDevice).transpose(0, 1);
+    auto cpuRhs = TensorValue({7.0f, 8.0f,
+                               9.0f, 10.0f,
+                               11.0f, 12.0f}, {3, 2}, &refDevice);
+    auto metalLhs = TensorValue({1.0f, 2.0f,
+                                 3.0f, 4.0f,
+                                 5.0f, 6.0f}, {3, 2}, device.get()).transpose(0, 1);
+    auto metalRhs = TensorValue({7.0f, 8.0f,
+                                 9.0f, 10.0f,
+                                 11.0f, 12.0f}, {3, 2}, device.get());
+
+    CHECK_FALSE(cpuLhs.isContiguous());
+    CHECK_FALSE(metalLhs.isContiguous());
+
+    auto expected = cpuLhs.matmul(cpuRhs);
+    auto actual = metalLhs.matmul(metalRhs);
+    device->synchronize();
+
+    CHECK(verifyResults(expected, actual, EPSILON_MATMUL_F32_METAL));
+}
+
+
+TEST_CASE("DeviceMetal stride matmul parity with transposed rhs operand")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuLhs = TensorValue({1.0f, 2.0f, 3.0f,
+                               4.0f, 5.0f, 6.0f}, {2, 3}, &refDevice);
+    auto cpuRhs = TensorValue({7.0f, 8.0f, 9.0f,
+                               10.0f, 11.0f, 12.0f,
+                               13.0f, 14.0f, 15.0f,
+                               16.0f, 17.0f, 18.0f}, {4, 3}, &refDevice).transpose(0, 1);
+    auto metalLhs = TensorValue({1.0f, 2.0f, 3.0f,
+                                 4.0f, 5.0f, 6.0f}, {2, 3}, device.get());
+    auto metalRhs = TensorValue({7.0f, 8.0f, 9.0f,
+                                 10.0f, 11.0f, 12.0f,
+                                 13.0f, 14.0f, 15.0f,
+                                 16.0f, 17.0f, 18.0f}, {4, 3}, device.get()).transpose(0, 1);
+
+    CHECK_FALSE(cpuRhs.isContiguous());
+    CHECK_FALSE(metalRhs.isContiguous());
+
+    auto expected = cpuLhs.matmul(cpuRhs);
+    auto actual = metalLhs.matmul(metalRhs);
+    device->synchronize();
+
+    CHECK(verifyResults(expected, actual, EPSILON_MATMUL_F32_METAL));
+}
+
+
+TEST_CASE("DeviceMetal stride matmul parity with transposed lhs and rhs operands")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuLhs = TensorValue({1.0f, 2.0f,
+                               3.0f, 4.0f,
+                               5.0f, 6.0f,
+                               7.0f, 8.0f}, {4, 2}, &refDevice).transpose(0, 1);
+    auto cpuRhs = TensorValue({9.0f, 10.0f, 11.0f, 12.0f,
+                               13.0f, 14.0f, 15.0f, 16.0f,
+                               17.0f, 18.0f, 19.0f, 20.0f}, {3, 4}, &refDevice).transpose(0, 1);
+    auto metalLhs = TensorValue({1.0f, 2.0f,
+                                 3.0f, 4.0f,
+                                 5.0f, 6.0f,
+                                 7.0f, 8.0f}, {4, 2}, device.get()).transpose(0, 1);
+    auto metalRhs = TensorValue({9.0f, 10.0f, 11.0f, 12.0f,
+                                 13.0f, 14.0f, 15.0f, 16.0f,
+                                 17.0f, 18.0f, 19.0f, 20.0f}, {3, 4}, device.get()).transpose(0, 1);
+
+    CHECK_FALSE(cpuLhs.isContiguous());
+    CHECK_FALSE(cpuRhs.isContiguous());
+    CHECK_FALSE(metalLhs.isContiguous());
+    CHECK_FALSE(metalRhs.isContiguous());
+
+    auto expected = cpuLhs.matmul(cpuRhs);
+    auto actual = metalLhs.matmul(metalRhs);
+    device->synchronize();
+
+    CHECK(verifyResults(expected, actual, EPSILON_MATMUL_F32_METAL));
+}
+
+
 TEST_CASE("DeviceCPU Tests - createDevice")
 {
     std::vector<aix::DeviceType> deviceTypes

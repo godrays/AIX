@@ -950,6 +950,78 @@ TEST_CASE("TensorValue - broadcastTo")
 }
 
 
+TEST_CASE("TensorValue - broadcastTo view metadata")
+{
+    auto base = TensorValue({1.0, 2.0, 3.0}, {1, 3}, &testDevice);
+    auto view = base.broadcastTo({2, 3});
+
+    CHECK(view.shape() == Shape{2, 3});
+    CHECK(view.strides() == Stride{0, 1});
+    CHECK(view.storageOffset() == 0);
+    CHECK_FALSE(view.isContiguous());
+}
+
+
+TEST_CASE("TensorValue - slice view metadata")
+{
+    auto base = TensorValue({1.0, 2.0, 3.0, 4.0,
+                             5.0, 6.0, 7.0, 8.0,
+                             9.0, 10.0, 11.0, 12.0}, {3, 4}, &testDevice);
+    auto view = base.slice(1, 1, 4, 2);
+
+    CHECK(view.shape() == Shape{3, 2});
+    CHECK(view.strides() == Stride{4, 2});
+    CHECK(view.storageOffset() == 1);
+    CHECK_FALSE(view.isContiguous());
+}
+
+
+TEST_CASE("TensorValue - transpose view metadata")
+{
+    auto base = TensorValue({1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+                             7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+                             13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
+                             19.0, 20.0, 21.0, 22.0, 23.0, 24.0}, {2, 3, 4}, &testDevice);
+    auto view = base.transpose(0, 2);
+
+    CHECK(view.shape() == Shape{4, 3, 2});
+    CHECK(view.strides() == Stride{1, 4, 12});
+    CHECK(view.storageOffset() == 0);
+    CHECK_FALSE(view.isContiguous());
+}
+
+
+TEST_CASE("TensorValue - permute view metadata")
+{
+    auto base = TensorValue({1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
+                             7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+                             13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
+                             19.0, 20.0, 21.0, 22.0, 23.0, 24.0}, {2, 3, 4}, &testDevice);
+    auto view = base.permute({1, 2, 0});
+
+    CHECK(view.shape() == Shape{3, 4, 2});
+    CHECK(view.strides() == Stride{4, 1, 12});
+    CHECK(view.storageOffset() == 0);
+    CHECK_FALSE(view.isContiguous());
+}
+
+
+TEST_CASE("TensorValue - view aliasing through shared storage mirror")
+{
+    auto base = TensorValue({1.0, 2.0, 3.0,
+                             4.0, 5.0, 6.0}, {2, 3}, &testDevice);
+    auto view = base.slice(0, 0, 2, 1);
+    auto mirrored = TensorValue(view.storage(), view.size(), view.storageOffset(), view.shape(), view.strides(),
+                                view.device(), view.dataType());
+
+    mirrored.getValueAt<float>({1, 2}) = 42.0f;
+
+    CHECK(base.getValueAt<float>({1, 2}) == Approx(42.0f));
+    CHECK(view.getValueAt<float>({1, 2}) == Approx(42.0f));
+    CHECK(mirrored.getValueAt<float>({1, 2}) == Approx(42.0f));
+}
+
+
 TEST_CASE("TensorValue - broadcast")
 {
     SUBCASE("([],[1],[1,1],[1,3],[2,3]) op [2x3]")

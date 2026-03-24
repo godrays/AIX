@@ -1726,16 +1726,10 @@ public:
     // Returns a new Tensor with a new shape.
     Tensor reshape(const Shape & newShape) const
     {
-        size_t newSize = std::accumulate(newShape.begin(), newShape.end(), static_cast<size_t>(1), std::multiplies<>());
-        if (value().size() != newSize)
-        {
-            throw std::invalid_argument("Reshape error: element count mismatch (" +
-                                        std::to_string(value().size()) + " vs " + std::to_string(newSize) + ").");
-        }
-
         auto& tv = m_data->m_value;
         TensorOptions opt{ .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() };
-        Tensor result{tv.storage(), tv.size(), tv.storageOffset(), newShape, opt};
+        Tensor result{newShape, opt};
+        result.m_data->m_value = tv.reshape(newShape);
         result.m_data->m_inputs = { m_data };
         result.m_data->m_backwardFunc = reshapeBackwardFunc;
         return result;
@@ -1936,8 +1930,8 @@ public:
     static void matmulBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
-        node->m_inputs[0]->backward(seed.matmul(node->m_inputs[1]->m_value.transpose(0, 1).contiguous()));
-        node->m_inputs[1]->backward(node->m_inputs[0]->m_value.transpose(0, 1).contiguous().matmul(seed));
+        node->m_inputs[0]->backward(seed.matmul(node->m_inputs[1]->m_value.transpose(0, 1)));
+        node->m_inputs[1]->backward(node->m_inputs[0]->m_value.transpose(0, 1).matmul(seed));
     }
 
     static void transposeBackwardFunc(TensorNode * node, const TensorValue & seed)

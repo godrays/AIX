@@ -10,6 +10,7 @@
 // Project includes
 #include "Utils.hpp"
 #include <aix.hpp>
+#include <aixDevices.hpp>
 // External includes
 #include <doctest/doctest.h>
 // System includes
@@ -877,6 +878,112 @@ TEST_CASE("Auto Grad - variance")
         CheckVectorApproxValues(a.grad(), aix::tensor({-0.5, 0.5,
                                                        -0.5, 0.5}, shape).value());
     }
+}
+
+
+TEST_CASE("Auto Grad - Metal view chain permute slice mul backward parity")
+{
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuInput = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f,
+                                 5.0f, 6.0f, 7.0f, 8.0f,
+                                 9.0f, 10.0f, 11.0f, 12.0f,
+                                 13.0f, 14.0f, 15.0f, 16.0f,
+                                 17.0f, 18.0f, 19.0f, 20.0f,
+                                 21.0f, 22.0f, 23.0f, 24.0f}, aix::Shape{2, 3, 4}, { .m_requireGrad=true });
+    auto metalInput = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f,
+                                   5.0f, 6.0f, 7.0f, 8.0f,
+                                   9.0f, 10.0f, 11.0f, 12.0f,
+                                   13.0f, 14.0f, 15.0f, 16.0f,
+                                   17.0f, 18.0f, 19.0f, 20.0f,
+                                   21.0f, 22.0f, 23.0f, 24.0f}, aix::Shape{2, 3, 4},
+                                  { .m_requireGrad=true, .m_device=device.get() });
+
+    auto cpuView = cpuInput.permute({1, 2, 0}).slice(1, 1, 4, 2);
+    auto metalView = metalInput.permute({1, 2, 0}).slice(1, 1, 4, 2);
+
+    CHECK_FALSE(cpuView.value().isContiguous());
+    CHECK_FALSE(metalView.value().isContiguous());
+
+    auto cpuLoss = (cpuView * cpuView).sum();
+    auto metalLoss = (metalView * metalView).sum();
+
+    cpuLoss.backward();
+    metalLoss.backward();
+    device->synchronize();
+
+    CheckVectorApproxValues(metalLoss, cpuLoss);
+    CheckVectorApproxValues(metalInput.grad(), cpuInput.grad());
+}
+
+
+TEST_CASE("Auto Grad - Metal Broadcast view reduceTo backward parity")
+{
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuInput = aix::tensor({1.0f, 2.0f, 3.0f}, aix::Shape{1, 3}, { .m_requireGrad=true });
+    auto cpuOther = aix::tensor({4.0f, 5.0f, 6.0f,
+                                 7.0f, 8.0f, 9.0f}, aix::Shape{2, 3}, { .m_requireGrad=true });
+    auto metalInput = aix::tensor({1.0f, 2.0f, 3.0f}, aix::Shape{1, 3},
+                                  { .m_requireGrad=true, .m_device=device.get() });
+    auto metalOther = aix::tensor({4.0f, 5.0f, 6.0f,
+                                   7.0f, 8.0f, 9.0f}, aix::Shape{2, 3},
+                                  { .m_requireGrad=true, .m_device=device.get() });
+
+    auto cpuView = cpuInput.broadcastTo({2, 3});
+    auto metalView = metalInput.broadcastTo({2, 3});
+
+    CHECK_FALSE(cpuView.value().isContiguous());
+    CHECK_FALSE(metalView.value().isContiguous());
+
+    auto cpuLoss = (cpuView * cpuOther).sum();
+    auto metalLoss = (metalView * metalOther).sum();
+
+    cpuLoss.backward();
+    metalLoss.backward();
+    device->synchronize();
+
+    CheckVectorApproxValues(metalLoss, cpuLoss);
+    CheckVectorApproxValues(metalInput.grad(), cpuInput.grad());
+    CheckVectorApproxValues(metalOther.grad(), cpuOther.grad());
+}
+
+
+TEST_CASE("Auto Grad - transpose matmul backward parity")
+{
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuLhs = aix::tensor({1.0f, 2.0f,
+                               3.0f, 4.0f,
+                               5.0f, 6.0f}, aix::Shape{3, 2}, { .m_requireGrad=true }).transpose(0, 1);
+    auto cpuRhs = aix::tensor({7.0f, 8.0f, 9.0f, 10.0f,
+                               11.0f, 12.0f, 13.0f, 14.0f,
+                               15.0f, 16.0f, 17.0f, 18.0f}, aix::Shape{3, 4}, { .m_requireGrad=true });
+    auto metalLhs = aix::tensor({1.0f, 2.0f,
+                                 3.0f, 4.0f,
+                                 5.0f, 6.0f}, aix::Shape{3, 2},
+                                { .m_requireGrad=true, .m_device=device.get() }).transpose(0, 1);
+    auto metalRhs = aix::tensor({7.0f, 8.0f, 9.0f, 10.0f,
+                                 11.0f, 12.0f, 13.0f, 14.0f,
+                                 15.0f, 16.0f, 17.0f, 18.0f}, aix::Shape{3, 4},
+                                { .m_requireGrad=true, .m_device=device.get() });
+
+    CHECK_FALSE(cpuLhs.value().isContiguous());
+    CHECK_FALSE(metalLhs.value().isContiguous());
+
+    auto cpuLoss = cpuLhs.matmul(cpuRhs).sum();
+    auto metalLoss = metalLhs.matmul(metalRhs).sum();
+
+    cpuLoss.backward();
+    metalLoss.backward();
+    device->synchronize();
+
+    CheckVectorApproxValues(metalLoss, cpuLoss);
+    CheckVectorApproxValues(metalLhs.grad(), cpuLhs.grad());
+    CheckVectorApproxValues(metalRhs.grad(), cpuRhs.grad());
 }
 
 

@@ -10,6 +10,7 @@
 // Project includes
 #include "Utils.hpp"
 #include <aix.hpp>
+#include <aixDevices.hpp>
 // External includes
 #include <doctest/doctest.h>
 // System includes
@@ -641,6 +642,69 @@ TEST_CASE("Tensor - Reshape")
         CHECK(x.shape() == newShape);
         CHECK(x.value().size() == input.value().size());
         CheckVectorApproxValues(x, Tensor(data.begin(), data.size(), DataType::kFloat32, newShape));
+    }
+
+    SUBCASE("Contiguous reshape remains zero-copy")
+    {
+        auto input = tensor({1.0f, 2.0f, 3.0f,
+                             4.0f, 5.0f, 6.0f}, {2, 3});
+        auto reshaped = input.reshape({3, 2});
+
+        CHECK(reshaped.value().storage() == input.value().storage());
+        CHECK(reshaped.value().storageOffset() == input.value().storageOffset());
+        CHECK(reshaped.value().data() == input.value().data());
+        CheckVectorApproxValues(reshaped, tensor({1.0f, 2.0f, 3.0f,
+                                                  4.0f, 5.0f, 6.0f}, {3, 2}));
+    }
+
+    SUBCASE("Non-contiguous view reshape preserves logical order on CPU and Metal")
+    {
+        DeviceCPU cpuDevice;
+        auto expected = tensor({1.0f, 4.0f, 2.0f,
+                                5.0f, 3.0f, 6.0f}, {2, 3}, { .m_device=&cpuDevice });
+
+        Tensor cpuInput = tensor({1.0f, 2.0f, 3.0f,
+                                  4.0f, 5.0f, 6.0f}, {2, 3}, { .m_device=&cpuDevice });
+        auto cpuView = cpuInput.transpose(0, 1);
+        auto cpuReshaped = cpuView.reshape({2, 3});
+
+        CHECK_FALSE(cpuView.value().isContiguous());
+        CHECK(cpuReshaped.shape() == Shape{2, 3});
+        CheckVectorApproxValues(cpuReshaped, expected);
+
+        auto metalDevice = aix::createDevice(aix::DeviceType::kGPU_METAL);
+        if (metalDevice)
+        {
+            Tensor metalInput = tensor({1.0f, 2.0f, 3.0f,
+                                        4.0f, 5.0f, 6.0f}, {2, 3}, { .m_device=metalDevice.get() });
+            auto metalView = metalInput.transpose(0, 1);
+            auto metalReshaped = metalView.reshape({2, 3});
+
+            CHECK_FALSE(metalView.value().isContiguous());
+            CHECK(metalReshaped.shape() == Shape{2, 3});
+
+            auto actual = metalReshaped.value().contiguous();
+            metalDevice->synchronize();
+            auto expectedValue = expected.value().contiguous();
+            for (size_t i = 0; i < expectedValue.size(); ++i)
+            {
+                CHECK(actual.data<float>()[i] == Approx(expectedValue.data<float>()[i]));
+            }
+        }
+    }
+
+    SUBCASE("Non-contiguous reshape does not reinterpret underlying storage order")
+    {
+        auto input = tensor({1.0f, 2.0f, 3.0f,
+                             4.0f, 5.0f, 6.0f}, {2, 3});
+        auto view = input.transpose(0, 1);
+        auto reshaped = view.reshape({2, 3});
+
+        CHECK_FALSE(view.value().isContiguous());
+        CHECK(reshaped.value().storage() != view.value().storage());
+        CheckVectorApproxValues(reshaped, tensor({1.0f, 4.0f, 2.0f,
+                                                  5.0f, 3.0f, 6.0f}, {2, 3}));
+        CHECK(reshaped.value().contiguous().data<float>()[1] == Approx(4.0f));
     }
 
     SUBCASE("Size mismatch")
@@ -3105,4 +3169,41 @@ TEST_CASE("Tensor - permute()")
                                                  4.0, 12.0, 20.0,
                                                  8.0, 16.0, 24.0}, {4,2,3}));
     }
+}
+
+
+TEST_CASE("Tensor - Metal chained views stay metadata-only until elementwise execution")
+{
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuInput = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f,
+                                 5.0f, 6.0f, 7.0f, 8.0f,
+                                 9.0f, 10.0f, 11.0f, 12.0f,
+                                 13.0f, 14.0f, 15.0f, 16.0f,
+                                 17.0f, 18.0f, 19.0f, 20.0f,
+                                 21.0f, 22.0f, 23.0f, 24.0f}, aix::Shape{2, 3, 4});
+    auto input = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f,
+                              5.0f, 6.0f, 7.0f, 8.0f,
+                              9.0f, 10.0f, 11.0f, 12.0f,
+                              13.0f, 14.0f, 15.0f, 16.0f,
+                              17.0f, 18.0f, 19.0f, 20.0f,
+                              21.0f, 22.0f, 23.0f, 24.0f}, aix::Shape{2, 3, 4},
+                             { .m_device=device.get() });
+    auto cpuView = cpuInput.permute({1, 2, 0}).slice(1, 1, 4, 2);
+    auto view = input.permute({1, 2, 0}).slice(1, 1, 4, 2);
+
+    CHECK(cpuView.shape() == Shape{3, 2, 2});
+    CHECK(view.shape() == Shape{3, 2, 2});
+    CHECK(view.value().storage() == input.value().storage());
+    CHECK(view.value().storageOffset() == cpuView.value().storageOffset());
+    CHECK_FALSE(view.value().isContiguous());
+
+    auto expected = cpuView * cpuView;
+    auto result = view * view;
+    device->synchronize();
+
+    CHECK(result.shape() == Shape{3, 2, 2});
+    CHECK(result.value().storage() != view.value().storage());
+    CheckVectorApproxValues(result, expected);
 }
