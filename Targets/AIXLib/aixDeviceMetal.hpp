@@ -203,8 +203,6 @@ protected:
 
     void releaseTensorLayout(const MetalBoundLayout& layout);
 
-    DeviceTensorParams ensureContiguous(const DeviceTensorParams& params);
-
     void clearContiguousTemps();
 
     void executeDoubleArrayCmd(const DeviceTensorParams& a, const DeviceTensorParams& result,

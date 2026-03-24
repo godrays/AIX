@@ -1258,32 +1258,55 @@ template<typename T>
 }
 
 
-// Sum - Naive Implementation
-// -----------------------------------------------------------------
 template<typename T>
-[[kernel]] void sum(const device T* inA     [[buffer(0)]],
-                    device T* result        [[buffer(1)]],
-                    uint li [[thread_position_in_threadgroup]],
-                    uint tgi [[threadgroup_position_in_grid]],
-                    uint threadsPerThreadgroup [[threads_per_threadgroup]])
+struct ReductionSumIdentity
 {
-    const size_t MAX_THREADS = 1024;
-    threadgroup T sharedData[MAX_THREADS];
-    sharedData[li] = inA[tgi * MAX_THREADS + li];
+    T operator()() const { return static_cast<T>(0); }
+};
+
+
+template<typename T>
+struct ReductionMaxIdentity
+{
+    T operator()() const { return numeric_limits<T>::lowest(); }
+};
+
+
+template<typename T, typename IdentityOp, typename ReduceOp>
+METAL_FUNC void stagedScalarReduce(const device T* inA,
+                                   device T* result,
+                                   threadgroup T* sharedData,
+                                   constant size_t& elementCount,
+                                   constant size_t& useLayout,
+                                   const constant size_t* layout,
+                                   IdentityOp identityOp,
+                                   ReduceOp reduceOp,
+                                   uint li,
+                                   uint tgi,
+                                   uint threadsPerThreadgroup)
+{
+    const size_t baseOffset = static_cast<size_t>(tgi) * static_cast<size_t>(threadsPerThreadgroup);
+    const size_t inputIndex = baseOffset + static_cast<size_t>(li);
+    sharedData[li] = inputIndex < elementCount
+        ? inA[useLayout != 0 ? physicalIndex(inputIndex, layout) : inputIndex]
+        : identityOp();
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Perform parallel reduction in shared memory
     size_t size = threadsPerThreadgroup;
     for (uint stride = size / 2; stride > 0; stride >>= 1)
     {
         if (size % 2 == 1 && li == 0)
-            sharedData[0] += sharedData[size-1];
+        {
+            sharedData[0] = reduceOp(sharedData[0], sharedData[size - 1]);
+        }
         size >>= 1;
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         if (li < stride)
-            sharedData[li] += sharedData[li + stride];
+        {
+            sharedData[li] = reduceOp(sharedData[li], sharedData[li + stride]);
+        }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -1295,40 +1318,57 @@ template<typename T>
 }
 
 
+template<typename T>
+struct ReductionSumOp
+{
+    T operator()(T a, T b) const { return a + b; }
+};
+
+
+template<typename T>
+struct ReductionMaxOp
+{
+    T operator()(T a, T b) const { return a > b ? a : b; }
+};
+
+
+// Sum - Naive Implementation
+// -----------------------------------------------------------------
+template<typename T>
+[[kernel]] void sum(const device T* inA     [[buffer(0)]],
+                    device T* result        [[buffer(1)]],
+                    constant size_t& elementCount [[buffer(2)]],
+                    constant size_t& useLayout [[buffer(3)]],
+                    const constant size_t* layout [[buffer(4)]],
+                    uint li [[thread_position_in_threadgroup]],
+                    uint tgi [[threadgroup_position_in_grid]],
+                    uint threadsPerThreadgroup [[threads_per_threadgroup]])
+{
+    const size_t MAX_THREADS = 1024;
+    threadgroup T sharedData[MAX_THREADS];
+    stagedScalarReduce(inA, result, sharedData, elementCount, useLayout, layout,
+                       ReductionSumIdentity<T>{}, ReductionSumOp<T>{},
+                       li, tgi, threadsPerThreadgroup);
+}
+
+
 // Max - Naive Implementation
 // -----------------------------------------------------------------
 template<typename T>
 [[kernel]] void max(const device T* inA     [[buffer(0)]],
                     device T* result        [[buffer(1)]],
+                    constant size_t& elementCount [[buffer(2)]],
+                    constant size_t& useLayout [[buffer(3)]],
+                    const constant size_t* layout [[buffer(4)]],
                     uint li  [[thread_position_in_threadgroup]],
                     uint tgi [[threadgroup_position_in_grid]],
                     uint threadsPerThreadgroup [[threads_per_threadgroup]])
 {
     const size_t MAX_THREADS = 1024;
     threadgroup T sharedData[MAX_THREADS];
-    sharedData[li] = inA[tgi * MAX_THREADS + li];
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Perform parallel reduction in shared memory
-    size_t size = threadsPerThreadgroup;
-    for (uint stride = size / 2; stride > 0; stride >>= 1)
-    {
-        if (size % 2 == 1 && li == 0)
-            sharedData[0] = sharedData[0] > sharedData[size-1] ? sharedData[0] : sharedData[size-1];
-        size >>= 1;
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        if (li < stride)
-            sharedData[li] = sharedData[li] > sharedData[li + stride] ? sharedData[li] : sharedData[li + stride];
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
-
-    if (li == 0)
-    {
-        result[tgi] = sharedData[0];
-    }
+    stagedScalarReduce(inA, result, sharedData, elementCount, useLayout, layout,
+                       ReductionMaxIdentity<T>{}, ReductionMaxOp<T>{},
+                       li, tgi, threadsPerThreadgroup);
 }
 
 
@@ -1345,9 +1385,11 @@ template<typename T>
 [[kernel]] void argmaxInit(const device T* src       [[buffer(0)]],
                            device T* values          [[buffer(1)]],
                            device int* indices       [[buffer(2)]],
+                           constant size_t& useLayout [[buffer(3)]],
+                           const constant size_t* layout [[buffer(4)]],
                            uint index [[thread_position_in_grid]])
 {
-    values[index] = src[index];
+    values[index] = src[useLayout != 0 ? physicalIndex(index, layout) : index];
     indices[index] = static_cast<int>(index);
 }
 
@@ -1625,12 +1667,14 @@ template<typename T, typename T2, typename T3>
                             constant T3& dimSize      [[buffer(4)]],
                             constant T3& sliceSize    [[buffer(5)]],
                             const constant T3* srcLayout [[buffer(6)]],
+                            const constant T3* indicesLayout [[buffer(7)]],
                             uint index [[thread_position_in_grid]])
 {
     size_t elementWithinSlice = index % sliceSize;
     size_t idx = (index / sliceSize) % indicesSize;
     size_t outer = index / (indicesSize * sliceSize);
-    size_t srcIndex  = indices[idx] * sliceSize + elementWithinSlice;
+    size_t selectedIndex = static_cast<size_t>(indices[physicalIndex(idx, indicesLayout)]);
+    size_t srcIndex  = selectedIndex * sliceSize + elementWithinSlice;
     size_t srcOffset = outer * dimSize + srcIndex;
     size_t dstOffset = outer * indicesSize * sliceSize + idx * sliceSize + elementWithinSlice;
 
@@ -1649,12 +1693,14 @@ template<typename T, typename T2, typename T3>
                          constant T3& sliceSize    [[buffer(5)]],
                          const constant T3* srcLayout [[buffer(6)]],
                          const constant T3* dstLayout [[buffer(7)]],
+                         const constant T3* indicesLayout [[buffer(8)]],
                          uint index [[thread_position_in_grid]])
 {
     size_t elementWithinSlice = index % sliceSize;
     size_t idx = (index / sliceSize) % indicesSize;
     size_t outer = index / (indicesSize * sliceSize);
-    size_t dstIndex = indices[idx] * sliceSize + elementWithinSlice;
+    size_t selectedIndex = static_cast<size_t>(indices[physicalIndex(idx, indicesLayout)]);
+    size_t dstIndex = selectedIndex * sliceSize + elementWithinSlice;
     size_t dstOffset = outer * dimSize + dstIndex;
     size_t srcOffset = outer * indicesSize * sliceSize + idx * sliceSize + elementWithinSlice;
     atomic_fetch_add_explicit((device atomic<T>*)&(dst[physicalIndex(dstOffset, dstLayout)]),
@@ -2058,10 +2104,13 @@ SpecializePowStrided("ui8",  uchar);
 #define SpecializeSum(tname, type)  \
     template [[ host_name("sum_" tname) ]]  \
     [[kernel]] void sum(const device type* inA      [[buffer(0)]],   \
-                        device type* result         [[buffer(1)]],   \
-                        uint li  [[thread_position_in_threadgroup]], \
-                        uint tgi [[threadgroup_position_in_grid]],   \
-                        uint threadsPerThreadgroup [[threads_per_threadgroup]])
+                         device type* result         [[buffer(1)]],   \
+                         constant size_t& elementCount [[buffer(2)]], \
+                         constant size_t& useLayout [[buffer(3)]], \
+                         const constant size_t* layout [[buffer(4)]], \
+                         uint li  [[thread_position_in_threadgroup]], \
+                         uint tgi [[threadgroup_position_in_grid]],   \
+                         uint threadsPerThreadgroup [[threads_per_threadgroup]])
 
 SpecializeSum("f32",  float);
 SpecializeSum("f16",  half);
@@ -2078,10 +2127,13 @@ SpecializeSum("ui8",  uchar);
 #define SpecializeMax(tname, type)  \
     template [[ host_name("max_" tname) ]]  \
     [[kernel]] void max(const device type* inA      [[buffer(0)]],   \
-                        device type* result         [[buffer(1)]],   \
-                        uint li  [[thread_position_in_threadgroup]], \
-                        uint tgi [[threadgroup_position_in_grid]],   \
-                        uint threadsPerThreadgroup [[threads_per_threadgroup]])
+                         device type* result         [[buffer(1)]],   \
+                         constant size_t& elementCount [[buffer(2)]], \
+                         constant size_t& useLayout [[buffer(3)]], \
+                         const constant size_t* layout [[buffer(4)]], \
+                         uint li  [[thread_position_in_threadgroup]], \
+                         uint tgi [[threadgroup_position_in_grid]],   \
+                         uint threadsPerThreadgroup [[threads_per_threadgroup]])
 
 SpecializeMax("f32",  float);
 SpecializeMax("f16",  half);
@@ -2098,9 +2150,11 @@ SpecializeMax("ui8",  uchar);
 #define SpecializeArgmaxInit(tname, type)  \
     template [[ host_name("argmaxInit_" tname) ]]  \
     [[kernel]] void argmaxInit(const device type* src   [[buffer(0)]], \
-                               device type* values      [[buffer(1)]], \
-                               device int* indices      [[buffer(2)]], \
-                               uint index [[thread_position_in_grid]])
+                                device type* values      [[buffer(1)]], \
+                                device int* indices      [[buffer(2)]], \
+                                constant size_t& useLayout [[buffer(3)]], \
+                                const constant size_t* layout [[buffer(4)]], \
+                                uint index [[thread_position_in_grid]])
 
 #define SpecializeArgmaxReduce(tname, type)  \
     template [[ host_name("argmaxReduce_" tname) ]]  \
@@ -2557,13 +2611,14 @@ SpecializeTriu("ui8",  uchar , size_t, int64_t);
 #define SpecializeIndexSelect(tname, type1, type2, type3)  \
     template [[ host_name("indexSelect_" tname) ]]  \
     [[kernel]] void indexSelect(const device type1* src      [[buffer(0)]], \
-                                 device type1* dst            [[buffer(1)]], \
-                                 const device type2* indices  [[buffer(2)]], \
-                                 constant type3& indicesSize  [[buffer(3)]], \
-                                 constant type3& dimSize      [[buffer(4)]], \
-                                 constant type3& sliceSize    [[buffer(5)]], \
-                                 const constant type3* srcLayout [[buffer(6)]], \
-                                 uint index [[thread_position_in_grid]])
+                                  device type1* dst            [[buffer(1)]], \
+                                  const device type2* indices  [[buffer(2)]], \
+                                  constant type3& indicesSize  [[buffer(3)]], \
+                                  constant type3& dimSize      [[buffer(4)]], \
+                                  constant type3& sliceSize    [[buffer(5)]], \
+                                  const constant type3* srcLayout [[buffer(6)]], \
+                                  const constant type3* indicesLayout [[buffer(7)]], \
+                                  uint index [[thread_position_in_grid]])
 
 SpecializeIndexSelect("f32",  float , int, size_t);
 SpecializeIndexSelect("f16",  half  , int, size_t);
@@ -2580,26 +2635,28 @@ SpecializeIndexSelect("ui8",  uchar , int, size_t);
 #define SpecializeIndexAdd(tname, type1, type2, type3)  \
     template [[ host_name("indexAdd_" tname) ]]  \
     [[kernel]] void indexAdd(const device type1* src      [[buffer(0)]], \
-                              device type1* dst            [[buffer(1)]], \
-                              const device type2* indices  [[buffer(2)]], \
-                              constant type3& indicesSize  [[buffer(3)]], \
-                              constant type3& dimSize      [[buffer(4)]], \
-                              constant type3& sliceSize    [[buffer(5)]], \
-                              const constant type3* srcLayout [[buffer(6)]], \
-                              const constant type3* dstLayout [[buffer(7)]], \
-                              uint index [[thread_position_in_grid]])
+                               device type1* dst            [[buffer(1)]], \
+                               const device type2* indices  [[buffer(2)]], \
+                               constant type3& indicesSize  [[buffer(3)]], \
+                               constant type3& dimSize      [[buffer(4)]], \
+                               constant type3& sliceSize    [[buffer(5)]], \
+                               const constant type3* srcLayout [[buffer(6)]], \
+                               const constant type3* dstLayout [[buffer(7)]], \
+                               const constant type3* indicesLayout [[buffer(8)]], \
+                               uint index [[thread_position_in_grid]])
 
 #define ImplementSpecializedIndexAdd(tname, type1, type2, type3)  \
     template <> [[ host_name("indexAdd_" tname) ]]  \
     [[kernel]] void indexAdd<type1,type2,type3>(const device type1* src      [[buffer(0)]], \
-                                                  device type1* dst            [[buffer(1)]], \
-                                                  const device type2* indices  [[buffer(2)]], \
-                                                  constant type3& indicesSize  [[buffer(3)]], \
-                                                  constant type3& dimSize      [[buffer(4)]], \
-                                                  constant type3& sliceSize    [[buffer(5)]], \
-                                                  const constant type3* srcLayout [[buffer(6)]], \
-                                                  const constant type3* dstLayout [[buffer(7)]], \
-                                                  uint index [[thread_position_in_grid]]) { }
+                                                   device type1* dst            [[buffer(1)]], \
+                                                   const device type2* indices  [[buffer(2)]], \
+                                                   constant type3& indicesSize  [[buffer(3)]], \
+                                                   constant type3& dimSize      [[buffer(4)]], \
+                                                   constant type3& sliceSize    [[buffer(5)]], \
+                                                   const constant type3* srcLayout [[buffer(6)]], \
+                                                   const constant type3* dstLayout [[buffer(7)]], \
+                                                   const constant type3* indicesLayout [[buffer(8)]], \
+                                                   uint index [[thread_position_in_grid]]) { }
 
 SpecializeIndexAdd("f32",  float , int, size_t);
 SpecializeIndexAdd("i32",  int   , int, size_t);

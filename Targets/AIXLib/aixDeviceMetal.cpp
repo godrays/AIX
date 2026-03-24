@@ -302,7 +302,6 @@ void DeviceMetal::fillMin(const DeviceTensorParams& result)
 void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     assert(result.isContiguous == true);
-    auto ca = ensureContiguous(a);
     auto iDType = static_cast<size_t>(result.dtype);
     auto compFuncPSO = m_compFuncPSOSum[iDType];
 
@@ -312,31 +311,41 @@ void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& res
 
     size_t maxThreadsPerTG = std::min<size_t>(MAX_THREADS_PER_THREADGROUP, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
-    auto buf1    = getReadOnlyMTLBuffer(ca.data, ca.size, dataTypeSize(ca.dtype));
-    auto bufTemp = m_allocMap[allocate(buf1->allocatedSize())];
+    auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
+    auto bufTemp = m_allocMap[allocate(a.size, a.dtype)];
+    auto boundLayout = bindTensorLayout(a, {.bufferIndex=4});
 
-    // TODO: Avoid the following copy if possible when changing the algorithm.
-    copy(buf1->contents(), ca.dtype, bufTemp->contents(), result.dtype, ca.size);
-
-    // Apply Parallel Reduction Sum.
-    size_t length = ca.size - 1;
-    while (length > 0)
+    auto encodeReduction = [&](const MTL::Buffer* srcBuffer, MTL::Buffer* dstBuffer, size_t elementCount, size_t useLayout)
     {
-        // Calculate maximum thread group dimensions.
-        NS::UInteger w = std::min<size_t>(length+1, maxThreadsPerTG);
-        // Serialize resource and states to be called by GPU.
-        encodeComputeCommandDoubleBuffer(bufTemp, bufTemp, compFuncPSO, {length + 1, 1, 1}, {w, 1, 1});
+        m_compEncoder->setComputePipelineState(compFuncPSO);
+        m_compEncoder->setBuffer(srcBuffer, 0, 0);
+        m_compEncoder->setBuffer(dstBuffer, 0, 1);
+        m_compEncoder->setBytes(&elementCount, sizeof(elementCount), 2);
+        m_compEncoder->setBytes(&useLayout, sizeof(useLayout), 3);
+        m_compEncoder->setBytes(boundLayout.data.data(), boundLayout.data.size() * sizeof(size_t), 4);
+
+        NS::UInteger w = std::min(elementCount, maxThreadsPerTG);
+        m_compEncoder->dispatchThreads({elementCount, 1, 1}, {w, 1, 1});
         commitBatchQueue();
-        length = (length - 1) / maxThreadsPerTG;
+    };
+
+    size_t elementCount = a.size;
+    size_t useLayout = (a.isContiguous && a.offset == 0) ? 0 : 1;
+    encodeReduction(bufSrc, bufTemp, elementCount, useLayout);
+    while (elementCount > 1)
+    {
+        elementCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+        if (elementCount == 1) break;
+        encodeReduction(bufTemp, bufTemp, elementCount, 0);
     }
 
     // Copy result from temp buf to result buffer.
     copy(bufTemp->contents(), result.dtype, result.data, result.dtype, 1);
 
     // Free operation is delayed until the commit is done.
-    freeTemporaryBuffer(buf1);
+    freeTemporaryBuffer(bufSrc);
+    releaseTensorLayout(boundLayout);
     deallocate(bufTemp->contents());
-    clearContiguousTemps();
 }
 
 void DeviceMetal::sqrt(const DeviceTensorParams& a, const DeviceTensorParams& result)
@@ -391,7 +400,6 @@ void DeviceMetal::pow(const DeviceTensorParams& a, const DeviceTensorParams& exp
 void DeviceMetal::max(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     assert(result.isContiguous == true);
-    auto ca = ensureContiguous(a);
     auto iDType = static_cast<size_t>(result.dtype);
     auto compFuncPSO = m_compFuncPSOMax[iDType];
 
@@ -401,31 +409,41 @@ void DeviceMetal::max(const DeviceTensorParams& a, const DeviceTensorParams& res
 
     size_t maxThreadsPerTG = std::min<size_t>(MAX_THREADS_PER_THREADGROUP, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
-    auto buf1    = getReadOnlyMTLBuffer(ca.data, ca.size, dataTypeSize(ca.dtype));
-    auto bufTemp = m_allocMap[allocate(buf1->allocatedSize())];
+    auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
+    auto bufTemp = m_allocMap[allocate(a.size, a.dtype)];
+    auto boundLayout = bindTensorLayout(a, {.bufferIndex=4});
 
-    // TODO: Avoid the following copy if possible when changing the algorithm.
-    copy(buf1->contents(), ca.dtype, bufTemp->contents(), ca.dtype, ca.size);
-
-    // Apply Parallel Reduction Max.
-    size_t length = ca.size - 1;
-    while (length > 0)
+    auto encodeReduction = [&](const MTL::Buffer* srcBuffer, MTL::Buffer* dstBuffer, size_t elementCount, size_t useLayout)
     {
-        // Calculate maximum thread group dimensions.
-        NS::UInteger w = std::min<size_t>(length+1, maxThreadsPerTG);
-        // Serialize resource and states to be called by GPU.
-        encodeComputeCommandDoubleBuffer(bufTemp, bufTemp, compFuncPSO, {length + 1, 1, 1}, {w, 1, 1});
+        m_compEncoder->setComputePipelineState(compFuncPSO);
+        m_compEncoder->setBuffer(srcBuffer, 0, 0);
+        m_compEncoder->setBuffer(dstBuffer, 0, 1);
+        m_compEncoder->setBytes(&elementCount, sizeof(elementCount), 2);
+        m_compEncoder->setBytes(&useLayout, sizeof(useLayout), 3);
+        m_compEncoder->setBytes(boundLayout.data.data(), boundLayout.data.size() * sizeof(size_t), 4);
+
+        NS::UInteger w = std::min(elementCount, maxThreadsPerTG);
+        m_compEncoder->dispatchThreads({elementCount, 1, 1}, {w, 1, 1});
         commitBatchQueue();
-        length = (length - 1) / maxThreadsPerTG;
+    };
+
+    size_t elementCount = a.size;
+    size_t useLayout = (a.isContiguous && a.offset == 0) ? 0 : 1;
+    encodeReduction(bufSrc, bufTemp, elementCount, useLayout);
+    while (elementCount > 1)
+    {
+        elementCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+        if (elementCount == 1) break;
+        encodeReduction(bufTemp, bufTemp, elementCount, 0);
     }
 
     // Copy result from temp buf to result buffer.
-    copy(bufTemp->contents(), ca.dtype, result.data, result.dtype, 1);
+    copy(bufTemp->contents(), a.dtype, result.data, result.dtype, 1);
 
     // Free operation is delayed until the commit is done.
-    freeTemporaryBuffer(buf1);
+    freeTemporaryBuffer(bufSrc);
+    releaseTensorLayout(boundLayout);
     deallocate(bufTemp->contents());
-    clearContiguousTemps();
 }
 
 void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& result)
@@ -444,26 +462,29 @@ void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& 
     }
 
     assert(a.size > 0);
-    auto ca = ensureContiguous(a);
-    auto iDType = static_cast<size_t>(ca.dtype);
+    auto iDType = static_cast<size_t>(a.dtype);
     auto argmaxInitPSO = m_compFuncPSOArgmaxInit[iDType];
     auto argmaxReducePSO = m_compFuncPSOArgmaxReduce[iDType];
     size_t maxThreadsPerTG = std::min<size_t>(MAX_THREADS_PER_THREADGROUP,
                                               argmaxReducePSO->maxTotalThreadsPerThreadgroup());
 
-    auto bufSrc = getReadOnlyMTLBuffer(ca.data, ca.size, dataTypeSize(ca.dtype));
-    auto bufTempValues = m_allocMap[allocate(ca.size, ca.dtype)];
-    auto bufTempIndices = m_allocMap[allocate(ca.size, DataType::kInt32)];
+    auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
+    auto bufTempValues = m_allocMap[allocate(a.size, a.dtype)];
+    auto bufTempIndices = m_allocMap[allocate(a.size, DataType::kInt32)];
+    auto boundLayout = bindTensorLayout(a, {.bufferIndex=4});
 
     auto encodeArgmaxInit = [&]()
     {
+        size_t useLayout = (a.isContiguous && a.offset == 0) ? 0 : 1;
         m_compEncoder->setComputePipelineState(argmaxInitPSO);
         m_compEncoder->setBuffer(bufSrc, 0, 0);
         m_compEncoder->setBuffer(bufTempValues, 0, 1);
         m_compEncoder->setBuffer(bufTempIndices, 0, 2);
+        m_compEncoder->setBytes(&useLayout, sizeof(useLayout), 3);
+        m_compEncoder->setBytes(boundLayout.data.data(), boundLayout.data.size() * sizeof(size_t), 4);
 
-        NS::UInteger w = std::min(ca.size, static_cast<size_t>(argmaxInitPSO->maxTotalThreadsPerThreadgroup()));
-        m_compEncoder->dispatchThreads({ca.size, 1, 1}, {w, 1, 1});
+        NS::UInteger w = std::min(a.size, static_cast<size_t>(argmaxInitPSO->maxTotalThreadsPerThreadgroup()));
+        m_compEncoder->dispatchThreads({a.size, 1, 1}, {w, 1, 1});
         commitBatchQueue();
     };
 
@@ -482,7 +503,7 @@ void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& 
 
     encodeArgmaxInit();
 
-    size_t elementCount = ca.size;
+    size_t elementCount = a.size;
     while (elementCount > 1)
     {
         encodeArgmaxReduce(elementCount);
@@ -492,9 +513,9 @@ void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& 
     copy(bufTempIndices->contents(), DataType::kInt32, result.data, result.dtype, 1);
 
     freeTemporaryBuffer(bufSrc);
+    releaseTensorLayout(boundLayout);
     deallocate(bufTempValues->contents());
     deallocate(bufTempIndices->contents());
-    clearContiguousTemps();
 }
 
 void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorParams& result)
@@ -1034,10 +1055,8 @@ void DeviceMetal::indexSelect(const DeviceTensorParams& src, const DeviceTensorP
     }
     size_t dimSize = !src.shape.empty() ? src.shape[dim] * sliceSize : 0;   // Size of one entire slice for the dimension.
 
-    auto ci = ensureContiguous(indices);
-
     auto bufSrc      = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
-    auto bufIndices  = getReadOnlyMTLBuffer(ci.data, ci.size, dataTypeSize(aix::DataType::kInt32));
+    auto bufIndices  = getReadOnlyMTLBuffer(indices.data, indices.size, dataTypeSize(aix::DataType::kInt32));
     auto bufDst      = m_allocMap[dst.data];
     auto compFuncPSO = m_compFuncPSOIndexSelect[static_cast<size_t>(src.dtype)];
 
@@ -1050,6 +1069,7 @@ void DeviceMetal::indexSelect(const DeviceTensorParams& src, const DeviceTensorP
     m_compEncoder->setBytes(&dimSize,      sizeof(size_t), 4);
     m_compEncoder->setBytes(&sliceSize,    sizeof(size_t), 5);
     auto boundSrcLayout = bindTensorLayout(src, {.bufferIndex=6});
+    auto boundIndicesLayout = bindTensorLayout(indices, {.bufferIndex=7});
 
     NS::UInteger w = std::min(dst.size, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
@@ -1058,7 +1078,7 @@ void DeviceMetal::indexSelect(const DeviceTensorParams& src, const DeviceTensorP
     freeTemporaryBuffer(bufSrc);
     freeTemporaryBuffer(bufIndices);
     releaseTensorLayout(boundSrcLayout);
-    clearContiguousTemps();
+    releaseTensorLayout(boundIndicesLayout);
     commitBatchQueue();
 }
 
@@ -1085,11 +1105,8 @@ void DeviceMetal::indexAdd(const DeviceTensorParams& src, const DeviceTensorPara
         sliceSize *= dst.shape[i];
     }
     size_t dimSize = !dst.shape.empty() ? dst.shape[dim] * sliceSize : 0;   // Size of one entire slice for the dimension.
-    size_t srcBufSize = src.size;
-    auto ci = ensureContiguous(indices);
-
-    auto bufSrc      = getReadOnlyMTLBuffer(src.data, srcBufSize, dataTypeSize(src.dtype));
-    auto bufIndices  = getReadOnlyMTLBuffer(ci.data, ci.size, dataTypeSize(aix::DataType::kInt32));
+    auto bufSrc      = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
+    auto bufIndices  = getReadOnlyMTLBuffer(indices.data, indices.size, dataTypeSize(aix::DataType::kInt32));
     auto bufDst      = m_allocMap[dst.data];
     auto compFuncPSO = m_compFuncPSOIndexAdd[static_cast<size_t>(src.dtype)];
 
@@ -1103,6 +1120,7 @@ void DeviceMetal::indexAdd(const DeviceTensorParams& src, const DeviceTensorPara
     m_compEncoder->setBytes(&sliceSize,    sizeof(size_t), 5);
     auto boundSrcLayout = bindTensorLayout(src, {.bufferIndex=6});
     auto boundDstLayout = bindTensorLayout(dst, {.bufferIndex=7});
+    auto boundIndicesLayout = bindTensorLayout(indices, {.bufferIndex=8});
 
     NS::UInteger w = std::min(src.size, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
@@ -1112,7 +1130,7 @@ void DeviceMetal::indexAdd(const DeviceTensorParams& src, const DeviceTensorPara
     freeTemporaryBuffer(bufIndices);
     releaseTensorLayout(boundSrcLayout);
     releaseTensorLayout(boundDstLayout);
-    clearContiguousTemps();
+    releaseTensorLayout(boundIndicesLayout);
     commitBatchQueue();
 }
 
@@ -1251,39 +1269,6 @@ void DeviceMetal::freeTemporaryBuffer(MTL::Buffer * buffer)
         // Until then, the buffer could be in use, especially when a batch command is used.
         m_tempBuffers.emplace_back(buffer, buffer->contents());
     }
-}
-
-
-DeviceTensorParams DeviceMetal::ensureContiguous(const DeviceTensorParams& params)
-{
-    if (params.isContiguous) return params;
-
-    void* tempData = allocate(params.size, params.dtype);
-    m_contiguousTempAllocations.push_back(tempData);
-
-    Stride contiguousStrides(params.shape.size());
-    if (!params.shape.empty())
-    {
-        contiguousStrides.back() = 1;
-        for (int64_t i = static_cast<int64_t>(params.shape.size()) - 2; i >= 0; --i)
-        {
-            contiguousStrides[i] = contiguousStrides[i + 1] * params.shape[i + 1];
-        }
-    }
-
-    DeviceTensorParams dst
-    {
-        .data = tempData,
-        .dtype = params.dtype,
-        .isContiguous = true,
-        .offset = 0,
-        .shape = params.shape,
-        .size = params.size,
-        .strides = contiguousStrides
-    };
-
-    contiguous(params, dst);
-    return dst;
 }
 
 
