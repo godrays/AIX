@@ -987,6 +987,55 @@ TEST_CASE("Auto Grad - transpose matmul backward parity")
 }
 
 
+TEST_CASE("Auto Grad - self matmul backward")
+{
+    SUBCASE("2x2")
+    {
+        auto a = aix::tensor({1.0f, 2.0f,
+                              3.0f, 4.0f}, aix::Shape{2, 2}, { .m_requireGrad=true });
+
+        auto loss = a.matmul(a).sum();
+        loss.backward();
+
+        // x.matmul(x) -> grad = (seed @ x^T + x^T @ seed), seed is all ones
+        // x = [[1,2],[3,4]], x^T = [[1,3],[2,4]]
+        // seed @ x^T = [[1,1],[1,1]] @ [[1,3],[2,4]] = [[3,7],[3,7]]
+        // x^T @ seed = [[1,3],[2,4]] @ [[1,1],[1,1]] = [[4,4],[6,6]]
+        // grad = [[7,11],[9,13]]
+        CHECK(a.grad().shape() == a.shape());
+        auto grad = a.grad().data<float>();
+        CHECK(grad[0] == Approx(7.0f));
+        CHECK(grad[1] == Approx(11.0f));
+        CHECK(grad[2] == Approx(9.0f));
+        CHECK(grad[3] == Approx(13.0f));
+    }
+
+    SUBCASE("3x3 Metal parity")
+    {
+        auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+        if (!device) return;
+
+        auto cpuA = aix::tensor({1.0f, 2.0f, 3.0f,
+                                 4.0f, 5.0f, 6.0f,
+                                 7.0f, 8.0f, 9.0f}, aix::Shape{3, 3}, { .m_requireGrad=true });
+        auto metalA = aix::tensor({1.0f, 2.0f, 3.0f,
+                                   4.0f, 5.0f, 6.0f,
+                                   7.0f, 8.0f, 9.0f}, aix::Shape{3, 3},
+                                  { .m_requireGrad=true, .m_device=device.get() });
+
+        auto cpuLoss = cpuA.matmul(cpuA).sum();
+        auto metalLoss = metalA.matmul(metalA).sum();
+
+        cpuLoss.backward();
+        metalLoss.backward();
+        device->synchronize();
+
+        CheckVectorApproxValues(metalLoss, cpuLoss);
+        CheckVectorApproxValues(metalA.grad(), cpuA.grad());
+    }
+}
+
+
 TEST_CASE("Auto Grad - max")
 {
     SUBCASE("scalar")

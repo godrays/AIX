@@ -2103,10 +2103,18 @@ public:
     static void matmulBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
-        if (node->m_inputs[0]->m_requireGrad || node->m_inputs[0]->m_retainGrad)
-            node->m_inputs[0]->backward(seed.matmul(node->m_inputs[1]->m_value.transpose(0, 1)));
-        if (node->m_inputs[1]->m_requireGrad || node->m_inputs[1]->m_retainGrad)
-            node->m_inputs[1]->backward(node->m_inputs[0]->m_value.transpose(0, 1).matmul(seed));
+        if (node->m_inputs[0] == node->m_inputs[1])
+        {
+            auto xT = node->m_inputs[0]->m_value.transpose(0, 1);
+            node->m_inputs[0]->backward(seed.matmul(xT) + xT.matmul(seed));
+        }
+        else
+        {
+            if (node->m_inputs[0]->m_requireGrad || node->m_inputs[0]->m_retainGrad)
+                node->m_inputs[0]->backward(seed.matmul(node->m_inputs[1]->m_value.transpose(0, 1)));
+            if (node->m_inputs[1]->m_requireGrad || node->m_inputs[1]->m_retainGrad)
+                node->m_inputs[1]->backward(node->m_inputs[0]->m_value.transpose(0, 1).matmul(seed));
+        }
     }
 
     static void transposeBackwardFunc(TensorNode * node, const TensorValue & seed)
