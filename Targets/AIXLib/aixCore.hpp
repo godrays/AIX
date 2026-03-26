@@ -1742,7 +1742,10 @@ public:
         {
             grad() += seed;
         }
-        m_backwardFunc(this, seed);
+        if (m_requireGrad || m_retainGrad)
+        {
+            m_backwardFunc(this, seed);
+        }
     }
 
     TensorValue& grad()
