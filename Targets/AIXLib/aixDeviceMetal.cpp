@@ -104,7 +104,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     m_compFuncPSOArgmaxIndicesToSet = createComputeFuncPSO(defaultLibrary, "argmaxIndicesToSet");
 
     m_cmdQueue = createCommandQueue();
-    m_cmdBuffer = m_cmdQueue->commandBuffer();
+    m_cmdBuffer = m_cmdQueue->commandBufferWithUnretainedReferences();
     m_compEncoder = m_cmdBuffer->computeCommandEncoder();
 }
 
@@ -1178,7 +1178,7 @@ void DeviceMetal::commit()
 
     m_committedCmdBuffer = m_cmdBuffer;
     // Create a new command buffer for the next batch.
-    m_cmdBuffer = m_cmdQueue->commandBuffer();
+    m_cmdBuffer = m_cmdQueue->commandBufferWithUnretainedReferences();
     m_compEncoder = m_cmdBuffer->computeCommandEncoder();
 
     // Update batch size metrics.
