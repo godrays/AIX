@@ -313,7 +313,7 @@ private:
         heapDesc->setSize(heapSize);
         heapDesc->setType(MTL::HeapType::HeapTypeAutomatic);
         heapDesc->setStorageMode(MTL::StorageModeShared);
-        heapDesc->setHazardTrackingMode(MTL::HazardTrackingModeTracked);
+        heapDesc->setHazardTrackingMode(MTL::HazardTrackingModeUntracked);
         heapDesc->setCpuCacheMode(MTL::CPUCacheModeDefaultCache);
         auto heap = m_device->newHeap(heapDesc);    // Create a heap.
         heapDesc->release();                        // Release the heap descriptor.
