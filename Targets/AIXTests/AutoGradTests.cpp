@@ -1074,6 +1074,44 @@ TEST_CASE("Auto Grad - self matmul backward")
 }
 
 
+TEST_CASE("Auto Grad - self sub backward")
+{
+    SUBCASE("scalar")
+    {
+        auto a = aix::tensor(5.0, {}).requireGrad(true);
+        auto loss = (a - a).sum();
+        loss.backward();
+
+        CHECK(a.grad().item<float>() == Approx(0.0f));
+    }
+
+    SUBCASE("2x2 Metal parity")
+    {
+        auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+        if (!device) return;
+
+        auto cpuA = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f}, aix::Shape{2, 2}, { .m_requireGrad=true });
+        auto metalA = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f}, aix::Shape{2, 2},
+                                  { .m_requireGrad=true, .m_device=device.get() });
+
+        auto cpuLoss = (cpuA - cpuA).sum();
+        auto metalLoss = (metalA - metalA).sum();
+
+        cpuLoss.backward();
+        metalLoss.backward();
+        device->synchronize();
+
+        CheckVectorApproxValues(metalA.grad(), cpuA.grad());
+
+        auto grad = cpuA.grad().data<float>();
+        for (size_t i = 0; i < cpuA.grad().size(); ++i)
+        {
+            CHECK(grad[i] == Approx(0.0f));
+        }
+    }
+}
+
+
 TEST_CASE("Auto Grad - max")
 {
     SUBCASE("scalar")

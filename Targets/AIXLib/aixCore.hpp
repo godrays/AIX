@@ -2011,6 +2011,7 @@ public:
     static void subBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
+        if (node->m_inputs[0] == node->m_inputs[1]) return;
         if (node->m_inputs[0]->m_requireGrad || node->m_inputs[0]->m_retainGrad)
             node->m_inputs[0]->backward(seed);
         if (node->m_inputs[1]->m_requireGrad || node->m_inputs[1]->m_retainGrad)
