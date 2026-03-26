@@ -1979,17 +1979,20 @@ public:
         }
         else
         {
-            node->m_inputs[0]->backward(seed);
-            node->m_inputs[1]->backward(seed);
+            if (node->m_inputs[0]->m_requireGrad || node->m_inputs[0]->m_retainGrad)
+                node->m_inputs[0]->backward(seed);
+            if (node->m_inputs[1]->m_requireGrad || node->m_inputs[1]->m_retainGrad)
+                node->m_inputs[1]->backward(seed);
         }
     }
 
     static void subBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
-        // Calculate gradients.
-        node->m_inputs[0]->backward(seed);
-        node->m_inputs[1]->backward(-seed);
+        if (node->m_inputs[0]->m_requireGrad || node->m_inputs[0]->m_retainGrad)
+            node->m_inputs[0]->backward(seed);
+        if (node->m_inputs[1]->m_requireGrad || node->m_inputs[1]->m_retainGrad)
+            node->m_inputs[1]->backward(-seed);
     }
 
     static void mulBackwardFunc(TensorNode * node, const TensorValue & seed)
@@ -2002,17 +2005,20 @@ public:
         }
         else
         {
-            node->m_inputs[0]->backward(node->m_inputs[1]->m_value * seed);
-            node->m_inputs[1]->backward(node->m_inputs[0]->m_value * seed);
+            if (node->m_inputs[0]->m_requireGrad || node->m_inputs[0]->m_retainGrad)
+                node->m_inputs[0]->backward(node->m_inputs[1]->m_value * seed);
+            if (node->m_inputs[1]->m_requireGrad || node->m_inputs[1]->m_retainGrad)
+                node->m_inputs[1]->backward(node->m_inputs[0]->m_value * seed);
         }
     }
 
     static void divBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
-        // Calculate gradients.
-        node->m_inputs[0]->backward(seed / node->m_inputs[1]->m_value);                                               // ∂f/∂a = 1 / b
-        node->m_inputs[1]->backward(-node->m_inputs[0]->m_value * seed / (node->m_inputs[1]->m_value * node->m_inputs[1]->m_value));  // ∂f/∂b = -a / b^2
+        if (node->m_inputs[0]->m_requireGrad || node->m_inputs[0]->m_retainGrad)
+            node->m_inputs[0]->backward(seed / node->m_inputs[1]->m_value);                                               // ∂f/∂a = 1 / b
+        if (node->m_inputs[1]->m_requireGrad || node->m_inputs[1]->m_retainGrad)
+            node->m_inputs[1]->backward(-node->m_inputs[0]->m_value * seed / (node->m_inputs[1]->m_value * node->m_inputs[1]->m_value));  // ∂f/∂b = -a / b^2
     }
 
     static void unaryBackwardFunc(TensorNode * node, const TensorValue & seed)
@@ -2087,16 +2093,20 @@ public:
     static void powBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
-        // The derivative of pow(a, b) with respect to 'a' is b * a^(b-1).
-        // ∂f/∂a = b * pow(a, b-1)
-        node->m_inputs[0]->backward(seed * node->m_inputs[1]->m_value * node->m_inputs[0]->m_value.pow(node->m_inputs[1]->m_value - float(1)));
+        if (node->m_inputs[0]->m_requireGrad || node->m_inputs[0]->m_retainGrad)
+        {
+            // ∂f/∂a = b * pow(a, b-1)
+            node->m_inputs[0]->backward(seed * node->m_inputs[1]->m_value * node->m_inputs[0]->m_value.pow(node->m_inputs[1]->m_value - float(1)));
+        }
     }
 
     static void matmulBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
-        node->m_inputs[0]->backward(seed.matmul(node->m_inputs[1]->m_value.transpose(0, 1)));
-        node->m_inputs[1]->backward(node->m_inputs[0]->m_value.transpose(0, 1).matmul(seed));
+        if (node->m_inputs[0]->m_requireGrad || node->m_inputs[0]->m_retainGrad)
+            node->m_inputs[0]->backward(seed.matmul(node->m_inputs[1]->m_value.transpose(0, 1)));
+        if (node->m_inputs[1]->m_requireGrad || node->m_inputs[1]->m_retainGrad)
+            node->m_inputs[1]->backward(node->m_inputs[0]->m_value.transpose(0, 1).matmul(seed));
     }
 
     static void transposeBackwardFunc(TensorNode * node, const TensorValue & seed)
@@ -2198,8 +2208,8 @@ public:
         // Iterate over each original tensor and propagate the gradient.
         for (size_t i=0; i<numTensors; ++i)
         {
-            // Propagate this sliced gradient to the corresponding original tensor.
-            node->m_inputs[i]->backward(seed.slice(dim, i * dimSize, (i + 1) * dimSize, 1));
+            if (node->m_inputs[i]->m_requireGrad || node->m_inputs[i]->m_retainGrad)
+                node->m_inputs[i]->backward(seed.slice(dim, i * dimSize, (i + 1) * dimSize, 1));
         }
     }
 
