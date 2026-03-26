@@ -3414,3 +3414,43 @@ TEST_CASE("Auto Grad - permute()")
                                                   6.0, 12.0, 18.0, 24.0}, a.shape()).value());
     }
 }
+
+
+TEST_CASE("Auto Grad - inference mode (no grad graph built)")
+{
+    SUBCASE("forward correctness without requires_grad")
+    {
+        aix::Shape shape{2, 2};
+        auto a = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f}, shape);
+        auto b = aix::tensor({5.0f, 6.0f, 7.0f, 8.0f}, shape);
+
+        auto c = a + b;
+        auto d = c * a;
+        auto e = d.sum();
+        auto f = e / aix::tensor(4.0f);
+
+        CHECK(f.value().item<float>() == doctest::Approx(25.0f));
+    }
+
+    SUBCASE("backward on inference tensor is safe no-op")
+    {
+        aix::Shape shape{2, 2};
+        auto a = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f}, shape);
+        auto b = aix::tensor({5.0f, 6.0f, 7.0f, 8.0f}, shape);
+
+        auto c = (a + b).sum();
+        c.backward();
+
+        CHECK(c.value().item<float>() == doctest::Approx(36.0f));
+    }
+
+    SUBCASE("inference tensor has no backward graph")
+    {
+        aix::Shape shape{2, 2};
+        auto a = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f}, shape);
+        auto b = aix::tensor({5.0f, 6.0f, 7.0f, 8.0f}, shape);
+
+        auto c = a.matmul(b);
+        CHECK(c.isRequireGrad() == false);
+    }
+}

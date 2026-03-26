@@ -1758,7 +1758,17 @@ public:
         return m_grad;
     }
 
-    Device * device() const          { return m_value.device(); }
+    Device * device() const  { return m_value.device(); }
+
+    void setBackward(std::vector<std::shared_ptr<TensorNode>> inputs,
+                     std::function<void(TensorNode *, const TensorValue &)> func)
+    {
+        if (m_requireGrad || m_retainGrad)
+        {
+            m_inputs = std::move(inputs);
+            m_backwardFunc = std::move(func);
+        }
+    }
 
     std::string  m_name;
     TensorValue  m_value;
@@ -1839,8 +1849,24 @@ public:
     }
 
     // Perform backpropagation to calculate gradients recursively.
-    void backward(float value=1)  { m_data->backward(TensorValue{value, m_data->m_inputs[0]->m_value.shape(), device(), dataType()}); }
-    void backward(float value, const Shape & gradShape)  { m_data->backward(TensorValue{value, gradShape, device(), dataType()}); }
+    void backward(float value=1)
+    {
+        if (m_data->m_inputs.empty())
+        {
+            if (m_data->m_requireGrad) m_data->grad() += TensorValue{value, shape(), device(), dataType()};
+            return;
+        }
+        m_data->backward(TensorValue{value, m_data->m_inputs[0]->m_value.shape(), device(), dataType()});
+    }
+    void backward(float value, const Shape & gradShape)
+    {
+        if (m_data->m_inputs.empty())
+        {
+            if (m_data->m_requireGrad) m_data->grad() += TensorValue{value, gradShape, device(), dataType()};
+            return;
+        }
+        m_data->backward(TensorValue{value, gradShape, device(), dataType()});
+    }
 
     // Getters and setters for the tensor's value.
     inline const TensorValue & value() const    { return m_data->m_value; }
@@ -1882,8 +1908,7 @@ public:
         TensorOptions opt{ .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() };
         Tensor result{newShape, opt};
         result.m_data->m_value = tv.reshape(newShape);
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = reshapeBackwardFunc;
+        result.m_data->setBackward({ m_data }, reshapeBackwardFunc);
         return result;
     }
 
@@ -1898,8 +1923,7 @@ public:
         if (shape() == newShape) return *this;
         Tensor result(newShape, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device()});
         result.m_data->m_value = m_data->m_value.broadcastTo(newShape);
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = broadcastBackwardFunc;
+        result.m_data->setBackward({ m_data }, broadcastBackwardFunc);
         return result;
     }
 
@@ -1912,8 +1936,7 @@ public:
         if (&newDevice == m_data->device()) return *this;
         Tensor result{shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=&newDevice }};
         result.m_data->m_value = m_data->m_value.to(&newDevice);
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = toDeviceBackwardFunc;
+        result.m_data->setBackward({ m_data }, toDeviceBackwardFunc);
         return result;
     }
 
@@ -1923,8 +1946,7 @@ public:
         TensorOptions opt{ .m_requireGrad=isRequireGrad(), .m_dtype=newDataType, .m_device=device() };
         Tensor result{shape(), opt};
         result.m_data->m_value = m_data->m_value.to(newDataType);
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = toDataTypeBackwardFunc;
+        result.m_data->setBackward({ m_data }, toDataTypeBackwardFunc);
         return result;
     }
 
@@ -2238,8 +2260,7 @@ public:
         Tensor result(shape(), { .m_requireGrad=isRequireGrad() || other.isRequireGrad(), .m_dtype=dataType(),
                                  .m_device=device()});
         result.m_data->m_value = lhs.m_data->m_value + rhs.m_data->m_value;
-        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
-        result.m_data->m_backwardFunc = addBackwardFunc;
+        result.m_data->setBackward({ lhs.m_data, rhs.m_data }, addBackwardFunc);
         return result;
     }
 
@@ -2254,8 +2275,7 @@ public:
         Tensor result(shape(), { .m_requireGrad=isRequireGrad() || other.isRequireGrad(), .m_dtype=dataType(),
                                  .m_device=device()});
         result.m_data->m_value = lhs.m_data->m_value - rhs.m_data->m_value;
-        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
-        result.m_data->m_backwardFunc = subBackwardFunc;
+        result.m_data->setBackward({ lhs.m_data, rhs.m_data }, subBackwardFunc);
         return result;
     }
 
@@ -2270,8 +2290,7 @@ public:
         Tensor result(shape(), { .m_requireGrad=isRequireGrad() || other.isRequireGrad(), .m_dtype=dataType(),
                                  .m_device=device()});
         result.m_data->m_value = lhs.m_data->m_value * rhs.m_data->m_value;
-        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
-        result.m_data->m_backwardFunc = mulBackwardFunc;
+        result.m_data->setBackward({ lhs.m_data, rhs.m_data }, mulBackwardFunc);
         return result;
     }
 
@@ -2286,8 +2305,7 @@ public:
         Tensor result(bcShape, { .m_requireGrad=isRequireGrad() || other.isRequireGrad(), .m_dtype=dataType(),
                                  .m_device=device() });
         result.m_data->m_value = lhs.m_data->m_value / rhs.m_data->m_value;
-        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
-        result.m_data->m_backwardFunc = divBackwardFunc;
+        result.m_data->setBackward({ lhs.m_data, rhs.m_data }, divBackwardFunc);
         return result;
     }
 
@@ -2295,8 +2313,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = -m_data->m_value;
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = unaryBackwardFunc;
+        result.m_data->setBackward({ m_data }, unaryBackwardFunc);
         return result;
     }
 
@@ -2360,8 +2377,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.sqrt();
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = sqrtBackwardFunc;
+        result.m_data->setBackward({ m_data }, sqrtBackwardFunc);
         return result;
     };
 
@@ -2369,8 +2385,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.sin();
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = sinBackwardFunc;
+        result.m_data->setBackward({ m_data }, sinBackwardFunc);
         return result;
     };
 
@@ -2378,8 +2393,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.cos();
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = cosBackwardFunc;
+        result.m_data->setBackward({ m_data }, cosBackwardFunc);
         return result;
     };
 
@@ -2387,8 +2401,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.tanh();
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = tanhBackwardFunc;
+        result.m_data->setBackward({ m_data }, tanhBackwardFunc);
         return result;
     };
 
@@ -2396,8 +2409,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.log();
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = logBackwardFunc;
+        result.m_data->setBackward({ m_data }, logBackwardFunc);
         return result;
     };
 
@@ -2405,8 +2417,7 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.exp();
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = expBackwardFunc;
+        result.m_data->setBackward({ m_data }, expBackwardFunc);
         return result;
     };
 
@@ -2414,8 +2425,7 @@ public:
     {
         Tensor result({}, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.sum();
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = sumBackwardFunc;
+        result.m_data->setBackward({ m_data }, sumBackwardFunc);
         return result;
     }
 
@@ -2423,10 +2433,9 @@ public:
     {
         Tensor result({}, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.sum(dim, keepDim);
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, sumBackwardFunc2);
         result.m_data->m_dim0 = dim >= 0 ? dim : dim + m_data->m_value.shape().size();
         result.m_data->m_keepDim = keepDim;
-        result.m_data->m_backwardFunc = sumBackwardFunc2;
         return result;
     }
 
@@ -2445,8 +2454,7 @@ public:
     {
         Tensor result({}, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.max();
-        result.m_data->m_inputs = { m_data };
-        result.m_data->m_backwardFunc = maxBackwardFunc;
+        result.m_data->setBackward({ m_data }, maxBackwardFunc);
         return result;
     }
 
@@ -2454,9 +2462,8 @@ public:
     {
         Tensor result({}, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.max(dim, keepDim);
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, maxBackwardFunc2);
         result.m_data->m_dim0 = dim >= 0 ? dim : dim + m_data->m_value.shape().size();
-        result.m_data->m_backwardFunc = maxBackwardFunc2;
         return result;
     }
 
@@ -2482,8 +2489,7 @@ public:
         Tensor expTensor(exp, shape(), opt);
         Tensor result(shape(), opt);
         result.m_data->m_value = m_data->m_value.pow(expTensor.m_data->m_value);
-        result.m_data->m_inputs = { m_data, expTensor.m_data };
-        result.m_data->m_backwardFunc = powBackwardFunc;
+        result.m_data->setBackward({ m_data, expTensor.m_data }, powBackwardFunc);
         return result;
     }
 
@@ -2492,12 +2498,11 @@ public:
         auto promotedDType = promoteDataType(dataType(), other.dataType());
         Shape bcShape = broadcastShape(other.shape());
         auto lhs = broadcastTo(bcShape).to(promotedDType);
-        auto rhs = other.broadcastTo(bcShape).to(promotedDType);        // Exponent tensor.
+        auto rhs = other.broadcastTo(bcShape).to(promotedDType);
 
         Tensor result(bcShape, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = lhs.m_data->m_value.pow(rhs.m_data->m_value);
-        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
-        result.m_data->m_backwardFunc = powBackwardFunc;
+        result.m_data->setBackward({ lhs.m_data, rhs.m_data }, powBackwardFunc);
         return result;
     }
 
@@ -2510,8 +2515,7 @@ public:
         Tensor result({shape()[0], rhs.shape()[1]}, { .m_requireGrad=isRequireGrad() || rhs.isRequireGrad(),
                                                       .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = lhs.m_data->m_value.matmul(rhs.m_data->m_value);
-        result.m_data->m_inputs = { lhs.m_data, rhs.m_data };
-        result.m_data->m_backwardFunc = matmulBackwardFunc;
+        result.m_data->setBackward({ lhs.m_data, rhs.m_data }, matmulBackwardFunc);
         return result;
     }
 
@@ -2519,10 +2523,9 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.transpose(dim0, dim1);
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, transposeBackwardFunc);
         result.m_data->m_dim0 = dim0;
         result.m_data->m_dim1 = dim1;
-        result.m_data->m_backwardFunc = transposeBackwardFunc;
         return result;
     }
 
@@ -2530,9 +2533,8 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.permute(dims);
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, permuteBackwardFunc);
         result.m_data->m_dims = dims;
-        result.m_data->m_backwardFunc = permuteBackwardFunc;
         return result;
     }
 
@@ -2541,12 +2543,11 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.slice(dim, startOpt, endOpt, step);
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, sliceBackwardFunc);
         result.m_data->m_dim0 = dim;
         result.m_data->m_dim1 = step;
         result.m_data->m_start = startOpt;
         result.m_data->m_end = endOpt;
-        result.m_data->m_backwardFunc = sliceBackwardFunc;
         return result;
     }
 
@@ -2554,9 +2555,8 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.squeeze(dim);
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, squeezeBackwardFunc);
         result.m_data->m_dim0 = dim;
-        result.m_data->m_backwardFunc = squeezeBackwardFunc;
         return result;
     }
 
@@ -2564,9 +2564,8 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.unsqueeze(dim);
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, unsqueezeBackwardFunc);
         result.m_data->m_dim0 = dim;
-        result.m_data->m_backwardFunc = unsqueezeBackwardFunc;
         return result;
     }
 
@@ -2628,9 +2627,8 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.tril(diagonal);
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, trillBackwardFunc);
         result.m_data->m_dim0 = diagonal;
-        result.m_data->m_backwardFunc = trillBackwardFunc;
         return result;
     }
 
@@ -2638,9 +2636,8 @@ public:
     {
         Tensor result(shape(), { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.triu(diagonal);
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, triuBackwardFunc);
         result.m_data->m_dim0 = diagonal;
-        result.m_data->m_backwardFunc = triuBackwardFunc;
         return result;
     }
 
@@ -2667,10 +2664,9 @@ public:
 
         Tensor result(newShape, { .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() });
         result.m_data->m_value = m_data->m_value.indexSelect(dim, indices.value());
-        result.m_data->m_inputs = { m_data };
+        result.m_data->setBackward({ m_data }, indexSelectBackwardFunc);
         result.m_data->m_dim0 = dim;
         result.m_data->m_indices = indices.value();
-        result.m_data->m_backwardFunc = indexSelectBackwardFunc;
         return result;
     }
 
@@ -2727,12 +2723,17 @@ public:
         for (size_t i=0; i<tensors.size(); ++i)
         {
             result.value().sliceSet(tensors[i].to(promotedDType).value(), dim, dimSize, dimSize + tensors[i].shape()[dim], 1, true);
-            // Store original tensors for the back prop.
-            result.m_data->m_inputs.emplace_back(tensors[i].m_data);
+            if (requireGrad)
+            {
+                result.m_data->m_inputs.emplace_back(tensors[i].m_data);
+            }
             dimSize += tensors[i].shape()[dim];
         }
         result.m_data->m_dim0 = dim;
-        result.m_data->m_backwardFunc = catBackwardFunc;
+        if (requireGrad)
+        {
+            result.m_data->m_backwardFunc = catBackwardFunc;
+        }
         return result;
     }
 
