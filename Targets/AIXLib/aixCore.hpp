@@ -2056,7 +2056,7 @@ public:
         if (node->m_inputs.empty()) return;
         // The derivative of sqrt(a) with respect to 'a' is 0.5/sqrt(a).
         // Therefore, the gradient of the input is multiplied by 0.5/sqrt(a).
-        node->m_inputs[0]->backward(0.5 / node->m_inputs[0]->m_value.sqrt() * seed);   // ∂f/∂a = 0.5/sqrt(a)
+        node->m_inputs[0]->backward(0.5 / node->m_value * seed);   // ∂f/∂a = 0.5/sqrt(a)
     }
 
     static void sinBackwardFunc(TensorNode * node, const TensorValue & seed)
@@ -2096,7 +2096,7 @@ public:
     {
         if (node->m_inputs.empty()) return;
         // The derivative of exp(a) with respect to 'a' is exp(a), itself.
-        node->m_inputs[0]->backward(seed * node->m_inputs[0]->m_value.exp());  // ∂f/∂a = exp(a)
+        node->m_inputs[0]->backward(seed * node->m_value);  // ∂f/∂a = exp(a)
     }
 
     static void maxBackwardFunc(TensorNode * node, const TensorValue & seed)
