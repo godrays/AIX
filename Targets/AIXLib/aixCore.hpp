@@ -1973,9 +1973,15 @@ public:
     static void addBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
-        // Calculate gradients.
-        node->m_inputs[0]->backward(seed);
-        node->m_inputs[1]->backward(seed);
+        if (node->m_inputs[0] == node->m_inputs[1])
+        {
+            node->m_inputs[0]->backward(seed + seed);
+        }
+        else
+        {
+            node->m_inputs[0]->backward(seed);
+            node->m_inputs[1]->backward(seed);
+        }
     }
 
     static void subBackwardFunc(TensorNode * node, const TensorValue & seed)
@@ -1989,9 +1995,16 @@ public:
     static void mulBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.size() < 2) return;
-        // Calculate gradients.
-        node->m_inputs[0]->backward(node->m_inputs[1]->m_value * seed);
-        node->m_inputs[1]->backward(node->m_inputs[0]->m_value * seed);
+        if (node->m_inputs[0] == node->m_inputs[1])
+        {
+            auto grad = node->m_inputs[0]->m_value * seed;
+            node->m_inputs[0]->backward(grad + grad);
+        }
+        else
+        {
+            node->m_inputs[0]->backward(node->m_inputs[1]->m_value * seed);
+            node->m_inputs[1]->backward(node->m_inputs[0]->m_value * seed);
+        }
     }
 
     static void divBackwardFunc(TensorNode * node, const TensorValue & seed)
