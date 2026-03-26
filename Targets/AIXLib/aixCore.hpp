@@ -2057,7 +2057,7 @@ public:
         if (node->m_inputs.empty()) return;
         // The derivative of tanh(a) with respect to 'a' is 1 - tanh^2(a).
         // Therefore, the gradient of the input is multiplied by (1 - tanh^2(a)).
-        const auto & tanhValue = node->m_inputs[0]->m_value.tanh();
+        const auto & tanhValue = node->m_value;
         node->m_inputs[0]->backward((float(1) - tanhValue * tanhValue) * seed);  // ∂f/∂a = (1 - tanh^2(a))
     }
 

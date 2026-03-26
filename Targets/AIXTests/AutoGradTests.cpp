@@ -216,6 +216,44 @@ TEST_CASE("Auto Grad - exp Test - 2x2")
 }
 
 
+TEST_CASE("Auto Grad - tanh Test - 2x2")
+{
+    aix::Shape shape{2,2};
+
+    auto x = aix::tensor({0.1, 0.2, 0.3, 0.4}, shape, { .m_requireGrad=true });
+    auto z = tanh(x);
+    z.backward();
+
+    // ∂tanh/∂x = 1 - tanh^2(x)
+    // tanh(0.1)=0.099668, tanh(0.2)=0.197375, tanh(0.3)=0.291313, tanh(0.4)=0.379949
+    // grad = 1 - tanh^2(x) = {0.990066, 0.961043, 0.915136, 0.855638}
+    CHECK(x.grad().shape() == shape);
+    CheckVectorApproxValues(x.grad(), tensor({0.990066, 0.961043, 0.915136, 0.855638}, shape).value());
+}
+
+
+TEST_CASE("Auto Grad - tanh Test - Metal parity")
+{
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    aix::Shape shape{2,2};
+
+    auto cpuX = aix::tensor({0.1f, 0.2f, 0.3f, 0.4f}, shape, { .m_requireGrad=true });
+    auto metalX = aix::tensor({0.1f, 0.2f, 0.3f, 0.4f}, shape, { .m_requireGrad=true, .m_device=device.get() });
+
+    auto cpuZ = tanh(cpuX);
+    auto metalZ = tanh(metalX);
+
+    cpuZ.backward();
+    metalZ.backward();
+    device->synchronize();
+
+    CheckVectorApproxValues(metalZ, cpuZ);
+    CheckVectorApproxValues(metalX.grad(), cpuX.grad());
+}
+
+
 TEST_CASE("Auto Grad - pow Test - 2x2")
 {
     aix::Shape shape{2,2};
