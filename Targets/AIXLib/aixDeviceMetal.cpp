@@ -106,6 +106,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     m_cmdQueue = createCommandQueue();
     m_cmdBuffer = m_cmdQueue->commandBufferWithUnretainedReferences();
     m_compEncoder = m_cmdBuffer->computeCommandEncoder();
+    m_event = m_mtlDevice->newEvent();
 }
 
 // Destructor
@@ -114,6 +115,11 @@ DeviceMetal::~DeviceMetal()
     if (m_currentBatchSize > 0)
     {
         std::cerr << "WARNING: Queued tensor operations detected. Did you forget to call synchronize()?" << std::endl;
+    }
+
+    if (m_committedCmdBuffer)
+    {
+        m_committedCmdBuffer->waitUntilCompleted();
     }
 
     m_bufferCache->clear();
@@ -177,6 +183,7 @@ DeviceMetal::~DeviceMetal()
     m_compFuncPSOArgmaxIndicesSet->release();
     m_compFuncPSOArgmaxIndicesToSet->release();
 
+    m_event->release();
     m_cmdQueue->release();
     m_mtlDevice->release();
     m_pool->release();
@@ -1144,11 +1151,10 @@ void DeviceMetal::commit()
 {
     if (m_currentBatchSize == 0) return;
 
-    if (m_committedCmdBuffer)
-    {
-        m_committedCmdBuffer->waitUntilCompleted();
-    }
     m_compEncoder->endEncoding();
+    ++m_eventValue;
+    m_cmdBuffer->encodeSignalEvent(m_event, m_eventValue);
+
     m_cmdBuffer->addCompletedHandler([&,tempBuffers=m_tempBuffers](MTL::CommandBuffer* commandBuffer)
     {
         CheckCommandBufferStatus(commandBuffer);
@@ -1179,6 +1185,7 @@ void DeviceMetal::commit()
     m_committedCmdBuffer = m_cmdBuffer;
     // Create a new command buffer for the next batch.
     m_cmdBuffer = m_cmdQueue->commandBufferWithUnretainedReferences();
+    m_cmdBuffer->encodeWait(m_event, m_eventValue);
     m_compEncoder = m_cmdBuffer->computeCommandEncoder();
 
     // Update batch size metrics.

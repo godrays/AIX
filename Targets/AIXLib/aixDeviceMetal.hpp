@@ -35,6 +35,7 @@ namespace MTL
     class CommandBuffer;
     class ComputeCommandEncoder;
     class Device;
+    class Event;
     class Library;
     struct Size;
 }
@@ -289,6 +290,8 @@ protected:
     size_t   m_maxBatchSize{0};
     size_t   m_maxWorkingSetSize{0};
     size_t   m_currentWorkingSetSize{0};
+    MTL::Event*  m_event{nullptr};
+    uint64_t     m_eventValue{0};
 };
 
 }   // namespace
