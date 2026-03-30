@@ -14,6 +14,7 @@ add_executable(${TARGET_NAME}
         Device.cpp
         Model.cpp
         Tensor.cpp
+        Fuse.cpp
 )
 
 add_dependencies(${TARGET_NAME} docopt_cpp yaml_cpp)
