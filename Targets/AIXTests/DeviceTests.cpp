@@ -10,6 +10,7 @@
 // Project includes
 #include "Utils.hpp"
 #include <aix.hpp>
+#include <aixDeviceMetal.hpp>
 #include <aixDevices.hpp>
 // External includes
 #include <doctest/doctest.h>
@@ -1650,6 +1651,42 @@ TEST_CASE("DeviceMetal stride reduceTo parity with broadcast source")
     device->synchronize();
 
     CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal fused kernels reuse runtime scalar bindings")
+{
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto* metal = dynamic_cast<aix::metal::DeviceMetal*>(device.get());
+    REQUIRE(metal != nullptr);
+
+    auto runExpression = [&](float mulScalar, float addScalar) {
+        auto input = aix::tensor({1.0f, 2.0f,
+                                  3.0f, 4.0f}, aix::Shape{2, 2}, { .m_device=device.get() });
+        auto output = input * mulScalar + addScalar;
+        device->synchronize();
+        return output;
+    };
+
+    auto [hits0, misses0] = metal->fuseKernelCacheStats();
+
+    auto first = runExpression(2.0f, 1.0f);
+    auto [hits1, misses1] = metal->fuseKernelCacheStats();
+
+    auto second = runExpression(3.0f, 5.0f);
+    auto [hits2, misses2] = metal->fuseKernelCacheStats();
+
+    CheckVectorApproxValues(first, aix::tensor({3.0f, 5.0f,
+                                                7.0f, 9.0f}, aix::Shape{2, 2}));
+    CheckVectorApproxValues(second, aix::tensor({8.0f, 11.0f,
+                                                 14.0f, 17.0f}, aix::Shape{2, 2}));
+
+    CHECK(misses1 > misses0);
+    CHECK(misses2 == misses1);
+    CHECK(hits2 > hits1);
+    CHECK(hits1 >= hits0);
 }
 
 

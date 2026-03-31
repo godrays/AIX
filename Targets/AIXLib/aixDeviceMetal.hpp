@@ -13,6 +13,8 @@
 // Project includes
 #include "aixCore.hpp"
 #include "aixDeviceType.hpp"
+#include "aixFuse.hpp"
+#include "aixDeviceMetalKernelGen.hpp"
 // External includes
 // System includes
 #include <cstdint>
@@ -53,10 +55,14 @@ namespace aix::metal
 
 class MetalAllocator;
 class MTLBufferCache;
+class MetalFuseEmitter;
+class aixDeviceMetalKernelGen;
 
 class DeviceMetal : public aix::Device
 {
 public:
+    friend class MetalFuseEmitter;
+
     // Constructor
     explicit DeviceMetal(size_t deviceIndex = 0);
 
@@ -144,6 +150,8 @@ public:
     void emptyCache() override;
 
     void synchronize() override;
+
+    std::pair<size_t, size_t> fuseKernelCacheStats() const;
 
 protected:
     struct MetalLayoutBindingSlots
@@ -286,12 +294,30 @@ protected:
     std::unordered_map<const void*, MTL::Buffer*>  m_allocMap;
     std::unique_ptr<MetalAllocator>  m_allocator;
     std::unique_ptr<MTLBufferCache>  m_bufferCache;
+    std::unique_ptr<MetalFuseEmitter>  m_fuseEmitter;
+    std::unique_ptr<aix::fuse::FuseEngine>  m_fuseEngine;
+    std::unique_ptr<aixDeviceMetalKernelGen>  m_kernelGen;
     size_t   m_currentBatchSize{0};
     size_t   m_maxBatchSize{0};
     size_t   m_maxWorkingSetSize{0};
     size_t   m_currentWorkingSetSize{0};
     MTL::Event*  m_event{nullptr};
     uint64_t     m_eventValue{0};
+    MTL::Buffer* m_sentinelBuffer{nullptr};
+};
+
+class MetalFuseEmitter : public aix::fuse::FuseEmitter
+{
+public:
+    explicit MetalFuseEmitter(DeviceMetal* device) : m_device(device) {}
+
+    void emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph) override;
+    void emitSingle(const aix::fuse::OpRecord& op) override;
+    void commitCommandBuffer() override;
+    std::pair<size_t, size_t> getKernelCacheStats() const override;
+
+private:
+    DeviceMetal* m_device;
 };
 
 }   // namespace

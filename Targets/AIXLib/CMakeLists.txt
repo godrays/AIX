@@ -17,12 +17,14 @@ endif()
 set(SOURCE_FILES
        aixDevices.cpp
        aixDeviceCPU.cpp
+       aixFuse.cpp
 )
 
 # Add metal device support for Apple Silicon
 if (APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     set(SOURCE_FILES ${SOURCE_FILES}
             aixDeviceMetal.cpp
+            aixDeviceMetalKernelGen.cpp
     )
 endif()
 

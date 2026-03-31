@@ -107,6 +107,17 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     m_cmdBuffer = m_cmdQueue->commandBufferWithUnretainedReferences();
     m_compEncoder = m_cmdBuffer->computeCommandEncoder();
     m_event = m_mtlDevice->newEvent();
+
+    m_fuseEmitter = std::make_unique<MetalFuseEmitter>(this);
+    aix::fuse::FuseConfig config;
+    config.elementwiseFusion = true;
+    config.multiOutputKernels = true;
+    config.deadResultElimination = false;
+    config.absorbFills = true;
+    m_fuseEngine = std::make_unique<aix::fuse::FuseEngine>(config, *m_fuseEmitter);
+    m_kernelGen = std::make_unique<aixDeviceMetalKernelGen>(m_mtlDevice);
+
+    m_sentinelBuffer = m_allocator->alloc(4);
 }
 
 // Destructor
@@ -121,6 +132,12 @@ DeviceMetal::~DeviceMetal()
     {
         m_committedCmdBuffer->waitUntilCompleted();
     }
+
+    m_fuseEngine.reset();
+    m_fuseEmitter.reset();
+    m_kernelGen.reset();
+
+    if (m_sentinelBuffer) { m_sentinelBuffer->release(); m_sentinelBuffer = nullptr; }
 
     m_bufferCache->clear();
 
@@ -195,6 +212,7 @@ void* DeviceMetal::allocate(size_t size)
     auto mtlBuf = newBuffer(size);
     auto contentPtr = mtlBuf->contents();
     m_allocMap[contentPtr] = mtlBuf;
+    m_fuseEngine->invalidateBuffer(contentPtr);
     return contentPtr;
 }
 
@@ -215,99 +233,42 @@ void DeviceMetal::deallocate(void * memory)
 
 void DeviceMetal::add(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a1, a2, result, m_compFuncPSOAdd[iDType], m_compFuncPSOAddStrided[iDType],
-                          "add_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Add, a1, a2, result);
 }
 
 void DeviceMetal::sub(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a1, a2, result, m_compFuncPSOSub[iDType], m_compFuncPSOSubStrided[iDType],
-                          "sub_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Sub, a1, a2, result);
 }
 
 void DeviceMetal::mul(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a1, a2, result, m_compFuncPSOMul[iDType], m_compFuncPSOMulStrided[iDType],
-                          "mul_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Mul, a1, a2, result);
 }
 
 void DeviceMetal::div(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a1, a2, result, m_compFuncPSODiv[iDType], m_compFuncPSODivStrided[iDType],
-                          "div_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Div, a1, a2, result);
 }
 
 void DeviceMetal::unary(const DeviceTensorParams& a1, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a1, result, m_compFuncPSOUnary[iDType], m_compFuncPSOUnaryStrided[iDType],
-                          "unary_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Negate, a1, result);
 }
 
 void DeviceMetal::fill(const void* scalar, DataType scalarDType, const DeviceTensorParams& result)
 {
-    assert(result.isContiguous == true);
-    validateDataType(scalarDType);
-    validateDataType(result.dtype);
-    auto iSrcDType = static_cast<size_t>(scalarDType);
-    auto iDstDType = static_cast<size_t>(result.dtype);
-
-    // Result buffer has to be allocated in advance and has to be a GPU memory.
-    if (!isDeviceBuffer(result.data))
-        throw std::invalid_argument("DeviceMetal::fill() result must have GPU memory.");
-
-    if (isDeviceBuffer(scalar))
-        throw std::invalid_argument("DeviceMetal::fill() scalar address cannot be a device-allocated address.");
-
-    // bufScalar is a temporary size aligned buffer to be used as vector of 4.
-    auto bufScalar = getReadOnlyMTLBuffer(scalar, 1, dataTypeSize(scalarDType), 1);
-    auto bufResult = m_allocMap[result.data];
-    auto compFuncPSO = m_compFuncPSOFill[iSrcDType][iDstDType];
-
-    // Calculate maximum thread group dimensions
-    auto asize = align(result.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
-    NS::UInteger w = std::min(asize, compFuncPSO->maxTotalThreadsPerThreadgroup());
-
-    // Serialize resource and states to be called by GPU.
-    encodeComputeCommandDoubleBuffer(bufScalar, bufResult, compFuncPSO, {asize, 1, 1}, {w, 1, 1});
-    // Free operation is delayed until the commit is done.
-    freeTemporaryBuffer(bufScalar);
-    commitBatchQueue();
+    m_fuseEngine->recordFill(scalar, scalarDType, result);
 }
 
 void DeviceMetal::fillMin(const DeviceTensorParams& result)
 {
-    assert(result.isContiguous == true);
-    validateDataType(result.dtype);
-    auto iDType = static_cast<size_t>(result.dtype);
-    auto compFuncPSO = m_compFuncPSOFillMin[iDType];
-
-    // Result buffer has to be allocated in advance and has to be a GPU memory.
-    if (!isDeviceBuffer(result.data))
-        throw std::invalid_argument("DeviceMetal::fillMin() result must have GPU memory.");
-
-    // Memory could be a GPU allocated memory or system memory.
-    auto bufResult = m_allocMap[result.data];
-
-    // Calculate maximum thread group dimensions
-    auto asize = align(result.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
-    NS::UInteger w = std::min(asize, compFuncPSO->maxTotalThreadsPerThreadgroup());
-
-    // Encode the pipeline state object and its parameters.
-    m_compEncoder->setComputePipelineState(compFuncPSO);
-    m_compEncoder->setBuffer(bufResult, 0, 0);
-    m_compEncoder->dispatchThreads({asize, 1, 1}, {w, 1, 1});
-
-    // Free operation is delayed until the commit is done.
-    commitBatchQueue();
+    m_fuseEngine->recordFillMin(result);
 }
 
 void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
+    m_fuseEngine->flush();
     assert(result.isContiguous == true);
     auto iDType = static_cast<size_t>(result.dtype);
     auto compFuncPSO = m_compFuncPSOSum[iDType];
@@ -357,55 +318,42 @@ void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& res
 
 void DeviceMetal::sqrt(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOSqrt[iDType], m_compFuncPSOSqrtStrided[iDType],
-                          "sqrt_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Sqrt, a, result);
 }
 
 void DeviceMetal::sin(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOSin[iDType], m_compFuncPSOSinStrided[iDType],
-                          "sin_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Sin, a, result);
 }
 
 void DeviceMetal::cos(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOCos[iDType], m_compFuncPSOCosStrided[iDType],
-                          "cos_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Cos, a, result);
 }
 
 void DeviceMetal::tanh(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOTanh[iDType], m_compFuncPSOTanhStrided[iDType],
-                          "tanh_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Tanh, a, result);
 }
 
 void DeviceMetal::log(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOLog[iDType], m_compFuncPSOLogStrided[iDType],
-                          "log_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Log, a, result);
 }
 
 void DeviceMetal::exp(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeDoubleArrayCmd(a, result, m_compFuncPSOExp[iDType], m_compFuncPSOExpStrided[iDType],
-                          "exp_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Exp, a, result);
 }
 
 void DeviceMetal::pow(const DeviceTensorParams& a, const DeviceTensorParams& exp, const DeviceTensorParams& result)
 {
-    auto iDType = static_cast<size_t>(result.dtype);
-    executeTripleArrayCmd(a, exp, result, m_compFuncPSOPow[iDType], m_compFuncPSOPowStrided[iDType],
-                          "pow_" + toString(result.dtype));
+    m_fuseEngine->record(aix::fuse::OpType::Pow, a, exp, result);
 }
 
 void DeviceMetal::max(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
+    m_fuseEngine->flush();
     assert(result.isContiguous == true);
     auto iDType = static_cast<size_t>(result.dtype);
     auto compFuncPSO = m_compFuncPSOMax[iDType];
@@ -455,6 +403,7 @@ void DeviceMetal::max(const DeviceTensorParams& a, const DeviceTensorParams& res
 
 void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
+    m_fuseEngine->flush();
     assert(result.isContiguous == true);
     if (result.dtype != DataType::kInt32)
     {
@@ -527,6 +476,7 @@ void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& 
 
 void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
+    m_fuseEngine->flush();
     assert(result.isContiguous == true);
     if (result.dtype != DataType::kInt32)
     {
@@ -555,6 +505,7 @@ void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorP
 
     int32_t zero = 0;
     fill(&zero, DataType::kInt32, result);
+    m_fuseEngine->flush();
 
     auto bufWinningIndex = m_allocMap[winningIndex.data];
     auto bufResult = m_allocMap[result.data];
@@ -571,6 +522,7 @@ void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorP
 
 void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result)
 {
+    m_fuseEngine->flush();
     assert(result.isContiguous == true);
     validateDataType(result.dtype);
     auto iDType = static_cast<size_t>(result.dtype);
@@ -667,6 +619,7 @@ void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& 
 
 void DeviceMetal::transpose(const DeviceTensorParams& a, const DeviceTensorParams& result, size_t dim0, size_t dim1)
 {
+    m_fuseEngine->flush();
     assert(result.isContiguous == true);
     auto iDType = static_cast<size_t>(result.dtype);
     // Use fast and simplified version of the general transpose for matrix transpose operations.
@@ -711,6 +664,7 @@ void DeviceMetal::transpose(const DeviceTensorParams& a, const DeviceTensorParam
 
 void DeviceMetal::copy(const void* src, DataType srcDType, void* dst, DataType dstDType, size_t size)
 {
+    m_fuseEngine->flush();
     validateDataType(srcDType);
     validateDataType(dstDType);
     auto iSrcDType = static_cast<size_t>(srcDType);
@@ -737,12 +691,14 @@ void DeviceMetal::copy(const void* src, DataType srcDType, void* dst, DataType d
 
 void DeviceMetal::copyImmediate(const void* src, DataType srcDType, void* dst, DataType dstDType, size_t size)
 {
+    m_fuseEngine->flush();
     copy(src, srcDType, dst, dstDType, size);
     synchronize();
 }
 
 void DeviceMetal::contiguous(const DeviceTensorParams& src, const DeviceTensorParams& dst)
 {
+    m_fuseEngine->flush();
     assert(src.isContiguous == false && dst.isContiguous == true);
     validateDataType(src.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
@@ -776,6 +732,7 @@ void DeviceMetal::contiguous(const DeviceTensorParams& src, const DeviceTensorPa
 
 void DeviceMetal::reduceTo(const DeviceTensorParams& src, const DeviceTensorParams& dst)
 {
+    m_fuseEngine->flush();
     assert(dst.isContiguous == true);
     validateDataType(src.dtype);
     // NOTE: Metal Framework supports add and sub operations for only atomic_float, atomic_uint and atomic_int.
@@ -795,6 +752,7 @@ void DeviceMetal::reduceTo(const DeviceTensorParams& src, const DeviceTensorPara
 
 void DeviceMetal::maxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst)
 {
+    m_fuseEngine->flush();
     assert(dst.isContiguous == true);
     validateDataType(src.dtype);
     // NOTE: Only certain data types are supported due to limitation of Metal Framework atomics.
@@ -811,6 +769,7 @@ void DeviceMetal::maxTo(const DeviceTensorParams& src, const DeviceTensorParams&
 
 void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
 {
+    m_fuseEngine->flush();
     assert(dst.isContiguous == true);
     if (dst.dtype != DataType::kInt32)
     {
@@ -849,6 +808,7 @@ void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorPara
 
 void DeviceMetal::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
 {
+    m_fuseEngine->flush();
     assert(dst.isContiguous == true);
     if (dst.dtype != DataType::kInt32)
     {
@@ -893,6 +853,7 @@ void DeviceMetal::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTen
 
     int32_t zero = 0;
     fill(&zero, DataType::kInt32, dst);
+    m_fuseEngine->flush();
 
     auto shapeSize = src.shape.size();
     auto bufWinningCoords = m_allocMap[winningCoords.data];
@@ -921,6 +882,7 @@ void DeviceMetal::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTen
 void DeviceMetal::sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,
                            size_t dim, size_t start, size_t end, size_t step)
 {
+    m_fuseEngine->flush();
     validateDataType(src.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
     if (!isDeviceBuffer(dst.data))
@@ -967,6 +929,7 @@ void DeviceMetal::sliceSet(const DeviceTensorParams& src, const DeviceTensorPara
 
 void DeviceMetal::tril(const DeviceTensorParams& dst, ssize_t diagonal)
 {
+    m_fuseEngine->flush();
     assert(dst.isContiguous == true);
     validateDataType(dst.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
@@ -1007,6 +970,7 @@ void DeviceMetal::tril(const DeviceTensorParams& dst, ssize_t diagonal)
 
 void DeviceMetal::triu(const DeviceTensorParams& dst, ssize_t diagonal)
 {
+    m_fuseEngine->flush();
     assert(dst.isContiguous == true);
     validateDataType(dst.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
@@ -1048,6 +1012,7 @@ void DeviceMetal::triu(const DeviceTensorParams& dst, ssize_t diagonal)
 void DeviceMetal::indexSelect(const DeviceTensorParams& src, const DeviceTensorParams& dst,
                               const DeviceTensorParams& indices, size_t dim)
 {
+    m_fuseEngine->flush();
     assert(dst.isContiguous == true);
     validateDataType(src.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
@@ -1092,6 +1057,7 @@ void DeviceMetal::indexSelect(const DeviceTensorParams& src, const DeviceTensorP
 void DeviceMetal::indexAdd(const DeviceTensorParams& src, const DeviceTensorParams& dst, const DeviceTensorParams& indices,
                            size_t dim)
 {
+    m_fuseEngine->flush();
     validateDataType(src.dtype);
     // NOTE: Only certain data types are supported due to limitation of Metal Framework atomics.
     if (!(src.dtype == DataType::kFloat32 || src.dtype == DataType::kInt32))
@@ -1196,7 +1162,7 @@ void DeviceMetal::commit()
 
 void DeviceMetal::synchronize()
 {
-    commit();
+    m_fuseEngine->flush();
     m_committedCmdBuffer->waitUntilCompleted();
 }
 
@@ -1217,6 +1183,7 @@ MTL::Buffer* DeviceMetal::newBuffer(size_t size)
     // Reduce memory footprint if the current working set size exceeds the limit.
     if (m_currentWorkingSetSize * 2 >= m_maxWorkingSetSize)
     {
+        m_fuseEngine->flush();
         commit();
     }
 
@@ -1443,7 +1410,6 @@ void DeviceMetal::executeDoubleArrayCmd(const DeviceTensorParams& a, const Devic
 
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(buf);
-    commitBatchQueue();
 }
 
 void DeviceMetal::executeTripleArrayCmd(const DeviceTensorParams& a1, const DeviceTensorParams& a2,
@@ -1484,7 +1450,6 @@ void DeviceMetal::executeTripleArrayCmd(const DeviceTensorParams& a1, const Devi
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(buf1);
     freeTemporaryBuffer(buf2);
-    commitBatchQueue();
 }
 
 void DeviceMetal::translation(const DeviceTensorParams& src, const DeviceTensorParams& dst,
@@ -1651,6 +1616,167 @@ void DeviceMetal::CheckCommandBufferStatus(const MTL::CommandBuffer *commandBuff
             std::cerr << errorMsg << std::endl;
         }
     }
+}
+
+void MetalFuseEmitter::emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph)
+{
+    auto* dm = m_device;
+
+    if (subgraph.outputBuffers.empty() && subgraph.ops.size() > 1)
+    {
+        return;
+    }
+
+    auto* pso = dm->m_kernelGen->getOrCreatePSO(subgraph);
+    if (!pso)
+    {
+        return;
+    }
+    auto allocMapCopy = dm->m_allocMap;
+    std::vector<std::pair<MTL::Buffer*, const void*>> uploadTemps;
+
+    auto ensureDeviceBuffer = [&](const void* ptr, size_t size, size_t dtypeSize) -> MTL::Buffer* {
+        auto it = allocMapCopy.find(ptr);
+        if (it != allocMapCopy.end()) return it->second;
+        auto buf = dm->getReadOnlyMTLBuffer(ptr, size, dtypeSize);
+        allocMapCopy[buf->contents()] = buf;
+        allocMapCopy[ptr] = buf;
+        uploadTemps.emplace_back(buf, ptr);
+        return buf;
+    };
+
+    for (const auto& buf : subgraph.inputBuffers)
+    {
+        ensureDeviceBuffer(buf.data, buf.size, aix::Device::dataTypeSize(buf.dtype));
+    }
+    for (const auto& buf : subgraph.outputBuffers)
+    {
+        ensureDeviceBuffer(buf.data, buf.size, aix::Device::dataTypeSize(buf.dtype));
+    }
+
+    dm->m_kernelGen->encodeFusedDispatch(dm->m_compEncoder, pso, subgraph, allocMapCopy);
+
+    for (auto& [buf, ptr] : uploadTemps)
+    {
+        if (!dm->isDeviceBuffer(ptr))
+        {
+            dm->freeTemporaryBuffer(buf);
+        }
+    }
+}
+
+void MetalFuseEmitter::emitSingle(const aix::fuse::OpRecord& op)
+{
+    auto* dm = m_device;
+    auto iDType = static_cast<size_t>(op.output.dtype);
+
+    switch (op.type)
+    {
+        case aix::fuse::OpType::Add:
+            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
+                dm->m_compFuncPSOAdd[iDType], dm->m_compFuncPSOAddStrided[iDType], "add");
+            break;
+        case aix::fuse::OpType::Sub:
+            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
+                dm->m_compFuncPSOSub[iDType], dm->m_compFuncPSOSubStrided[iDType], "sub");
+            break;
+        case aix::fuse::OpType::Mul:
+            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
+                dm->m_compFuncPSOMul[iDType], dm->m_compFuncPSOMulStrided[iDType], "mul");
+            break;
+        case aix::fuse::OpType::Div:
+            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
+                dm->m_compFuncPSODiv[iDType], dm->m_compFuncPSODivStrided[iDType], "div");
+            break;
+        case aix::fuse::OpType::Pow:
+            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
+                dm->m_compFuncPSOPow[iDType], dm->m_compFuncPSOPowStrided[iDType], "pow");
+            break;
+        case aix::fuse::OpType::Negate:
+            dm->executeDoubleArrayCmd(op.input0, op.output,
+                dm->m_compFuncPSOUnary[iDType], dm->m_compFuncPSOUnaryStrided[iDType], "unary");
+            break;
+        case aix::fuse::OpType::Sqrt:
+            dm->executeDoubleArrayCmd(op.input0, op.output,
+                dm->m_compFuncPSOSqrt[iDType], dm->m_compFuncPSOSqrtStrided[iDType], "sqrt");
+            break;
+        case aix::fuse::OpType::Sin:
+            dm->executeDoubleArrayCmd(op.input0, op.output,
+                dm->m_compFuncPSOSin[iDType], dm->m_compFuncPSOSinStrided[iDType], "sin");
+            break;
+        case aix::fuse::OpType::Cos:
+            dm->executeDoubleArrayCmd(op.input0, op.output,
+                dm->m_compFuncPSOCos[iDType], dm->m_compFuncPSOCosStrided[iDType], "cos");
+            break;
+        case aix::fuse::OpType::Tanh:
+            dm->executeDoubleArrayCmd(op.input0, op.output,
+                dm->m_compFuncPSOTanh[iDType], dm->m_compFuncPSOTanhStrided[iDType], "tanh");
+            break;
+        case aix::fuse::OpType::Log:
+            dm->executeDoubleArrayCmd(op.input0, op.output,
+                dm->m_compFuncPSOLog[iDType], dm->m_compFuncPSOLogStrided[iDType], "log");
+            break;
+        case aix::fuse::OpType::Exp:
+            dm->executeDoubleArrayCmd(op.input0, op.output,
+                dm->m_compFuncPSOExp[iDType], dm->m_compFuncPSOExpStrided[iDType], "exp");
+            break;
+        case aix::fuse::OpType::Fill:
+        {
+            assert(op.output.isContiguous);
+            dm->validateDataType(op.scalarDType);
+            dm->validateDataType(op.output.dtype);
+
+            if (!dm->isDeviceBuffer(op.output.data))
+                throw std::invalid_argument("DeviceMetal::fill() result must have GPU memory.");
+
+            auto scalarBuf = dm->getReadOnlyMTLBuffer(op.scalarData.data(), 1,
+                aix::Device::dataTypeSize(op.scalarDType), 1);
+            auto resultBuf = dm->m_allocMap[op.output.data];
+            auto iSrcDType = static_cast<size_t>(op.scalarDType);
+            auto compFuncPSO = dm->m_compFuncPSOFill[iSrcDType][iDType];
+            auto asize = dm->align(op.output.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
+            auto w = std::min(asize, static_cast<size_t>(compFuncPSO->maxTotalThreadsPerThreadgroup()));
+            dm->encodeComputeCommandDoubleBuffer(scalarBuf, resultBuf, compFuncPSO, {asize, 1, 1}, {w, 1, 1});
+            dm->freeTemporaryBuffer(scalarBuf);
+            break;
+        }
+        case aix::fuse::OpType::FillMin:
+        {
+            assert(op.output.isContiguous);
+            dm->validateDataType(op.output.dtype);
+
+            if (!dm->isDeviceBuffer(op.output.data))
+                throw std::invalid_argument("DeviceMetal::fillMin() result must have GPU memory.");
+
+            auto compFuncPSO = dm->m_compFuncPSOFillMin[iDType];
+            auto resultBuf = dm->m_allocMap[op.output.data];
+            auto asize = dm->align(op.output.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
+            auto w = std::min(asize, static_cast<size_t>(compFuncPSO->maxTotalThreadsPerThreadgroup()));
+            dm->m_compEncoder->setComputePipelineState(compFuncPSO);
+            dm->m_compEncoder->setBuffer(resultBuf, 0, 0);
+            dm->m_compEncoder->dispatchThreads({asize, 1, 1}, {w, 1, 1});
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void MetalFuseEmitter::commitCommandBuffer()
+{
+    m_device->m_currentBatchSize = 1;
+    m_device->commit();
+}
+
+std::pair<size_t, size_t> MetalFuseEmitter::getKernelCacheStats() const
+{
+    return m_device->fuseKernelCacheStats();
+}
+
+std::pair<size_t, size_t> DeviceMetal::fuseKernelCacheStats() const
+{
+    if (m_kernelGen) return {m_kernelGen->cacheHits(), m_kernelGen->cacheMisses()};
+    return {0, 0};
 }
 
 }   // namespace

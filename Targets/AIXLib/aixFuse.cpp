@@ -1,0 +1,1092 @@
+//
+//  Copyright © 2024-Present, Arkin Terli. All rights reserved.
+//
+//  NOTICE:  All information contained herein is, and remains the property of Arkin Terli.
+//  The intellectual and technical concepts contained herein are proprietary to Arkin Terli
+//  and may be covered by U.S. and Foreign Patents, patents in process, and are protected by
+//  trade secret or copyright law. Dissemination of this information or reproduction of this
+//  material is strictly forbidden unless prior written permission is obtained from Arkin Terli.
+
+// Project includes
+#include "aixFuse.hpp"
+// External includes
+// System includes
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <queue>
+#include <set>
+#include <sstream>
+#include <type_traits>
+#include <unordered_map>
+#include <vector>
+
+
+namespace aix::fuse
+{
+
+namespace
+{
+
+struct BufferBindingKey
+{
+    const void*         data{nullptr};
+    aix::DataType       dtype{aix::DataType::kFloat32};
+    bool                isContiguous{false};
+    size_t              offset{0};
+    size_t              size{0};
+    aix::Shape          shape;
+    aix::Stride         strides;
+
+    bool operator==(const BufferBindingKey& other) const
+    {
+        return data == other.data && dtype == other.dtype && isContiguous == other.isContiguous &&
+               offset == other.offset && size == other.size && shape == other.shape && strides == other.strides;
+    }
+};
+
+struct BufferBindingKeyHash
+{
+    size_t operator()(const BufferBindingKey& key) const
+    {
+        size_t hash = std::hash<const void*>{}(key.data);
+        auto combine = [&](size_t value) {
+            hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+        };
+
+        combine(static_cast<size_t>(key.dtype));
+        combine(key.isContiguous ? 1ULL : 0ULL);
+        combine(key.offset);
+        combine(key.size);
+        for (size_t dim : key.shape) combine(dim);
+        combine(key.shape.size());
+        for (size_t stride : key.strides) combine(stride);
+        combine(key.strides.size());
+        return hash;
+    }
+};
+
+BufferBindingKey makeBufferBindingKey(const DeviceTensorParams& params)
+{
+    return {
+        .data = params.data,
+        .dtype = params.dtype,
+        .isContiguous = params.isContiguous,
+        .offset = params.offset,
+        .size = params.size,
+        .shape = params.shape,
+        .strides = params.strides,
+    };
+}
+
+struct DagNode
+{
+    size_t              opIndex{0};
+    std::vector<size_t> deps;
+    std::vector<size_t> consumers;
+};
+
+struct Dag
+{
+    std::vector<DagNode>                        nodes;
+    std::unordered_map<BufferBindingKey, size_t, BufferBindingKeyHash> producerMap;
+    std::unordered_map<BufferBindingKey, size_t, BufferBindingKeyHash> previousWriterMap;
+    std::unordered_map<BufferBindingKey, std::vector<size_t>, BufferBindingKeyHash> consumerMap;
+    std::unordered_map<BufferBindingKey, size_t, BufferBindingKeyHash> bufferConsumerCount;
+};
+
+Dag buildDag(const std::vector<OpRecord>& ops)
+{
+    Dag dag;
+    dag.nodes.resize(ops.size());
+
+    for (size_t i = 0; i < ops.size(); ++i)
+    {
+        dag.nodes[i].opIndex = i;
+
+        const auto& op = ops[i];
+
+        if (op.output.data != nullptr)
+        {
+            auto outputKey = makeBufferBindingKey(op.output);
+            auto prevIt = dag.producerMap.find(outputKey);
+            if (prevIt != dag.producerMap.end())
+            {
+                dag.previousWriterMap[outputKey] = prevIt->second;
+            }
+            dag.producerMap[outputKey] = i;
+        }
+
+        if (op.input0.data != nullptr)
+        {
+            dag.consumerMap[makeBufferBindingKey(op.input0)].push_back(i);
+        }
+
+        if (op.hasInput1 && op.input1.data != nullptr)
+        {
+            dag.consumerMap[makeBufferBindingKey(op.input1)].push_back(i);
+        }
+    }
+
+    for (const auto& [ptr, consumers] : dag.consumerMap)
+    {
+        dag.bufferConsumerCount[ptr] = consumers.size();
+    }
+
+    for (size_t i = 0; i < ops.size(); ++i)
+    {
+        const auto& op = ops[i];
+
+        if (op.input0.data != nullptr)
+        {
+            auto input0Key = makeBufferBindingKey(op.input0);
+            auto it = dag.producerMap.find(input0Key);
+            if (it != dag.producerMap.end() && it->second != i)
+            {
+                dag.nodes[i].deps.push_back(it->second);
+            }
+            else if (it != dag.producerMap.end() && it->second == i)
+            {
+                auto prevIt = dag.previousWriterMap.find(input0Key);
+                if (prevIt != dag.previousWriterMap.end())
+                {
+                    dag.nodes[i].deps.push_back(prevIt->second);
+                }
+            }
+        }
+
+        if (op.hasInput1 && op.input1.data != nullptr)
+        {
+            auto input1Key = makeBufferBindingKey(op.input1);
+            auto it = dag.producerMap.find(input1Key);
+            if (it != dag.producerMap.end() && it->second != i)
+            {
+                dag.nodes[i].deps.push_back(it->second);
+            }
+            else if (it != dag.producerMap.end() && it->second == i)
+            {
+                auto prevIt = dag.previousWriterMap.find(input1Key);
+                if (prevIt != dag.previousWriterMap.end())
+                {
+                    dag.nodes[i].deps.push_back(prevIt->second);
+                }
+            }
+        }
+
+        for (size_t dep : dag.nodes[i].deps)
+        {
+            dag.nodes[dep].consumers.push_back(i);
+        }
+    }
+
+    return dag;
+}
+
+struct FusionResult
+{
+    std::vector<FusedSubgraphDescriptor> subgraphs;
+    std::vector<size_t>                  fallbackIndices;
+    std::vector<OpRecord>                nonInPlaceAbsorbedFills;
+};
+
+enum class ScalarKind
+{
+    kFloat,
+    kSigned,
+    kUnsigned,
+};
+
+struct DecodedScalar
+{
+    ScalarKind  kind{ScalarKind::kFloat};
+    long double floatValue{0.0L};
+    int64_t     signedValue{0};
+    uint64_t    unsignedValue{0};
+};
+
+DecodedScalar decodeScalar(const std::vector<uint8_t>& scalarData, aix::DataType dtype)
+{
+    DecodedScalar decoded;
+    if (scalarData.empty()) return decoded;
+
+    switch (dtype)
+    {
+        case aix::DataType::kFloat64:
+        {
+            double value = 0.0;
+            std::memcpy(&value, scalarData.data(), std::min(sizeof(double), scalarData.size()));
+            decoded.floatValue = value;
+            decoded.kind = ScalarKind::kFloat;
+            break;
+        }
+        case aix::DataType::kFloat32:
+        {
+            float value = 0.0f;
+            std::memcpy(&value, scalarData.data(), std::min(sizeof(float), scalarData.size()));
+            decoded.floatValue = value;
+            decoded.kind = ScalarKind::kFloat;
+            break;
+        }
+        case aix::DataType::kFloat16:
+        {
+            aix::float16_t value = 0.0f;
+            std::memcpy(&value, scalarData.data(), std::min(sizeof(aix::float16_t), scalarData.size()));
+            decoded.floatValue = static_cast<float>(value);
+            decoded.kind = ScalarKind::kFloat;
+            break;
+        }
+        case aix::DataType::kBFloat16:
+        {
+            aix::bfloat16_t value = 0.0f;
+            std::memcpy(&value, scalarData.data(), std::min(sizeof(aix::bfloat16_t), scalarData.size()));
+            decoded.floatValue = static_cast<float>(value);
+            decoded.kind = ScalarKind::kFloat;
+            break;
+        }
+        case aix::DataType::kInt64:
+            std::memcpy(&decoded.signedValue, scalarData.data(), std::min(sizeof(int64_t), scalarData.size()));
+            decoded.kind = ScalarKind::kSigned;
+            break;
+        case aix::DataType::kInt32:
+        {
+            int32_t value = 0;
+            std::memcpy(&value, scalarData.data(), std::min(sizeof(int32_t), scalarData.size()));
+            decoded.signedValue = value;
+            decoded.kind = ScalarKind::kSigned;
+            break;
+        }
+        case aix::DataType::kInt16:
+        {
+            int16_t value = 0;
+            std::memcpy(&value, scalarData.data(), std::min(sizeof(int16_t), scalarData.size()));
+            decoded.signedValue = value;
+            decoded.kind = ScalarKind::kSigned;
+            break;
+        }
+        case aix::DataType::kInt8:
+        {
+            int8_t value = 0;
+            std::memcpy(&value, scalarData.data(), std::min(sizeof(int8_t), scalarData.size()));
+            decoded.signedValue = value;
+            decoded.kind = ScalarKind::kSigned;
+            break;
+        }
+        case aix::DataType::kUInt8:
+        {
+            uint8_t value = 0;
+            std::memcpy(&value, scalarData.data(), std::min(sizeof(uint8_t), scalarData.size()));
+            decoded.unsignedValue = value;
+            decoded.kind = ScalarKind::kUnsigned;
+            break;
+        }
+        default:
+            break;
+    }
+
+    return decoded;
+}
+
+template <typename T>
+static T clampFloatToIntegral(long double value)
+{
+    if (std::isnan(value)) return 0;
+
+    value = std::clamp(value, static_cast<long double>(std::numeric_limits<T>::lowest()),
+                              static_cast<long double>(std::numeric_limits<T>::max()));
+    return static_cast<T>(value);
+}
+
+template <typename DstType>
+DstType convertDecodedScalar(const DecodedScalar& decoded)
+{
+    constexpr bool isFloatLikeDst = std::is_floating_point_v<DstType> ||
+                                    std::is_same_v<DstType, aix::float16_t> ||
+                                    std::is_same_v<DstType, aix::bfloat16_t>;
+
+    if constexpr (isFloatLikeDst)
+    {
+        switch (decoded.kind)
+        {
+            case ScalarKind::kFloat:    return static_cast<DstType>(decoded.floatValue);
+            case ScalarKind::kSigned:   return static_cast<DstType>(decoded.signedValue);
+            case ScalarKind::kUnsigned: return static_cast<DstType>(decoded.unsignedValue);
+        }
+    }
+    else if constexpr (std::is_signed_v<DstType>)
+    {
+        switch (decoded.kind)
+        {
+            case ScalarKind::kFloat:
+                return clampFloatToIntegral<DstType>(decoded.floatValue);
+            case ScalarKind::kSigned:
+                return static_cast<DstType>(std::clamp(decoded.signedValue,
+                                                       static_cast<int64_t>(std::numeric_limits<DstType>::lowest()),
+                                                       static_cast<int64_t>(std::numeric_limits<DstType>::max())));
+            case ScalarKind::kUnsigned:
+                return decoded.unsignedValue > static_cast<uint64_t>(std::numeric_limits<DstType>::max())
+                       ? std::numeric_limits<DstType>::max()
+                       : static_cast<DstType>(decoded.unsignedValue);
+        }
+    }
+    else
+    {
+        switch (decoded.kind)
+        {
+            case ScalarKind::kFloat:
+                return clampFloatToIntegral<DstType>(decoded.floatValue);
+            case ScalarKind::kSigned:
+                return decoded.signedValue < 0
+                       ? 0
+                       : static_cast<DstType>(std::min<uint64_t>(static_cast<uint64_t>(decoded.signedValue),
+                                                                 std::numeric_limits<DstType>::max()));
+            case ScalarKind::kUnsigned:
+                return static_cast<DstType>(std::min<uint64_t>(decoded.unsignedValue,
+                                                               std::numeric_limits<DstType>::max()));
+        }
+    }
+
+    return DstType{};
+}
+
+std::vector<uint8_t> convertScalarData(const std::vector<uint8_t>& scalarData,
+                                       aix::DataType scalarDType,
+                                       aix::DataType targetDType)
+{
+    if (scalarData.empty()) return {};
+
+    const auto decoded = decodeScalar(scalarData, scalarDType);
+    std::vector<uint8_t> converted(aix::Device::dataTypeSize(targetDType));
+
+    auto store = [&](const auto& value)
+    {
+        std::memcpy(converted.data(), &value, sizeof(value));
+    };
+
+    switch (targetDType)
+    {
+        case aix::DataType::kFloat64:  store(convertDecodedScalar<double>(decoded)); break;
+        case aix::DataType::kFloat32:  store(convertDecodedScalar<float>(decoded)); break;
+        case aix::DataType::kFloat16:  store(convertDecodedScalar<aix::float16_t>(decoded)); break;
+        case aix::DataType::kBFloat16: store(convertDecodedScalar<aix::bfloat16_t>(decoded)); break;
+        case aix::DataType::kInt64:    store(convertDecodedScalar<int64_t>(decoded)); break;
+        case aix::DataType::kInt32:    store(convertDecodedScalar<int32_t>(decoded)); break;
+        case aix::DataType::kInt16:    store(convertDecodedScalar<int16_t>(decoded)); break;
+        case aix::DataType::kInt8:     store(convertDecodedScalar<int8_t>(decoded)); break;
+        case aix::DataType::kUInt8:    store(convertDecodedScalar<uint8_t>(decoded)); break;
+        default:                       break;
+    }
+
+    return converted;
+}
+
+FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, const FuseConfig& config)
+{
+    FusionResult result;
+    std::vector<bool> visited(ops.size(), false);
+
+    for (size_t i = 0; i < ops.size(); ++i)
+    {
+        if (visited[i]) continue;
+        if (!isElementwiseOp(ops[i].type))
+        {
+            result.fallbackIndices.push_back(i);
+            visited[i] = true;
+            continue;
+        }
+
+        std::vector<size_t> subgraphOps;
+        std::queue<size_t> worklist;
+        worklist.push(i);
+        bool valid = true;
+        size_t elementCount = ops[i].output.size;
+        DataType subgraphDtype = ops[i].output.dtype;
+        bool allContiguous = (ops[i].output.isContiguous && ops[i].output.offset == 0);
+
+        if (ops[i].input0.data && !ops[i].input0.isContiguous) allContiguous = false;
+        if (ops[i].hasInput1 && ops[i].input1.data && !ops[i].input1.isContiguous) allContiguous = false;
+
+        while (!worklist.empty() && valid)
+        {
+            size_t opIdx = worklist.front();
+            worklist.pop();
+
+            if (visited[opIdx]) continue;
+
+            const auto& op = ops[opIdx];
+
+            if (!isElementwiseOp(op.type)) { valid = false; break; }
+            if (op.output.size != elementCount) { valid = false; break; }
+
+            if (op.type != OpType::Cast && op.output.dtype != subgraphDtype) { valid = false; break; }
+
+            if (!op.output.isContiguous || op.output.offset != 0) allContiguous = false;
+            if (op.input0.data && (!op.input0.isContiguous || op.input0.offset != 0)) allContiguous = false;
+            if (op.hasInput1 && op.input1.data && (!op.input1.isContiguous || op.input1.offset != 0)) allContiguous = false;
+
+            subgraphOps.push_back(opIdx);
+            visited[opIdx] = true;
+
+            for (size_t dep : dag.nodes[opIdx].deps)
+            {
+                if (!visited[dep]) worklist.push(dep);
+            }
+
+            if (config.multiOutputKernels)
+            {
+                for (size_t consumer : dag.nodes[opIdx].consumers)
+                {
+                    if (!visited[consumer]) worklist.push(consumer);
+                }
+            }
+            else
+            {
+                auto it = dag.consumerMap.find(makeBufferBindingKey(op.output));
+                if (it != dag.consumerMap.end() && it->second.size() == 1)
+                {
+                    size_t consumer = it->second[0];
+                    if (!visited[consumer]) worklist.push(consumer);
+                }
+            }
+        }
+
+        if (!valid || subgraphOps.empty())
+        {
+            for (size_t idx : subgraphOps)
+            {
+                if (idx != i) result.fallbackIndices.push_back(idx);
+            }
+            result.fallbackIndices.push_back(i);
+            continue;
+        }
+
+        std::vector<size_t> sortedOps;
+        std::set<size_t> subgraphSet(subgraphOps.begin(), subgraphOps.end());
+        {
+            std::queue<size_t> q;
+            std::unordered_map<size_t, int> inDegree;
+            for (size_t idx : subgraphOps)
+            {
+                inDegree[idx] = 0;
+                for (size_t dep : dag.nodes[idx].deps)
+                {
+                    if (subgraphSet.contains(dep)) inDegree[idx]++;
+                }
+                if (inDegree[idx] == 0) q.push(idx);
+            }
+            while (!q.empty())
+            {
+                size_t idx = q.front(); q.pop();
+                sortedOps.push_back(idx);
+                for (size_t consumer : dag.nodes[idx].consumers)
+                {
+                    if (subgraphSet.contains(consumer))
+                    {
+                        inDegree[consumer]--;
+                        if (inDegree[consumer] == 0) q.push(consumer);
+                    }
+                }
+            }
+        }
+
+        if (sortedOps.size() != subgraphOps.size())
+        {
+            for (size_t idx : subgraphOps) result.fallbackIndices.push_back(idx);
+            continue;
+        }
+
+        std::unordered_set<BufferBindingKey, BufferBindingKeyHash> uniqueBuffers;
+        for (size_t idx : sortedOps)
+        {
+            const auto& op = ops[idx];
+            if (op.input0.data) uniqueBuffers.insert(makeBufferBindingKey(op.input0));
+            if (op.hasInput1 && op.input1.data) uniqueBuffers.insert(makeBufferBindingKey(op.input1));
+            if (op.output.data) uniqueBuffers.insert(makeBufferBindingKey(op.output));
+        }
+        if (uniqueBuffers.size() > 31)
+        {
+            for (size_t idx : sortedOps) result.fallbackIndices.push_back(idx);
+            continue;
+        }
+
+        FusedSubgraphDescriptor desc;
+        desc.elementCount = elementCount;
+        desc.dtype = subgraphDtype;
+        desc.allContiguous = allContiguous;
+
+        std::unordered_map<BufferBindingKey, size_t, BufferBindingKeyHash> inputBufferIndex;
+        std::unordered_map<BufferBindingKey, size_t, BufferBindingKeyHash> outputBufferIndex;
+        std::unordered_map<size_t, size_t> opToDescriptorIndex;
+
+        auto appendScalar = [&](const std::vector<uint8_t>& scalarData, DataType scalarDType) -> size_t {
+            assert(!scalarData.empty());
+            auto converted = convertScalarData(scalarData, scalarDType, desc.dtype);
+            auto scalarSize = aix::Device::dataTypeSize(desc.dtype);
+            assert(converted.size() == scalarSize);
+            size_t scalarIndex = desc.scalarData.size() / scalarSize;
+            desc.scalarData.insert(desc.scalarData.end(), converted.begin(), converted.end());
+            return scalarIndex;
+        };
+
+        auto getOrCreateInputBuffer = [&](const DeviceTensorParams& params) -> size_t {
+            if (params.data == nullptr) return SIZE_MAX;
+            auto key = makeBufferBindingKey(params);
+            auto it = inputBufferIndex.find(key);
+            if (it != inputBufferIndex.end()) return it->second;
+            size_t idx = desc.inputBuffers.size();
+            desc.inputBuffers.push_back(params);
+            inputBufferIndex[key] = idx;
+            return idx;
+        };
+
+        auto getOrCreateOutputBuffer = [&](const DeviceTensorParams& params) -> size_t {
+            auto key = makeBufferBindingKey(params);
+            auto it = outputBufferIndex.find(key);
+            if (it != outputBufferIndex.end()) return it->second;
+            size_t idx = desc.outputBuffers.size();
+            desc.outputBuffers.push_back(params);
+            outputBufferIndex[key] = idx;
+            return idx;
+        };
+
+        auto needsExternalInput = [&](size_t consumerIdx, const DeviceTensorParams& input) -> bool {
+            if (input.data == nullptr) return false;
+            auto inputKey = makeBufferBindingKey(input);
+            auto prodIt = dag.producerMap.find(inputKey);
+            if (prodIt == dag.producerMap.end()) return true;
+            if (!subgraphSet.contains(prodIt->second)) return true;
+            if (prodIt->second != consumerIdx) return false;
+            auto prevIt = dag.previousWriterMap.find(inputKey);
+            if (prevIt != dag.previousWriterMap.end() && subgraphSet.contains(prevIt->second)) return false;
+            return true;
+        };
+
+        auto getExistingInputBuffer = [&](const DeviceTensorParams& params) -> size_t {
+            assert(params.data != nullptr);
+            auto key = makeBufferBindingKey(params);
+            auto it = inputBufferIndex.find(key);
+            assert(it != inputBufferIndex.end());
+            return it->second;
+        };
+
+        std::unordered_set<size_t> absorbedFills;
+        std::unordered_map<size_t, size_t> fillConsumer;
+        if (config.absorbFills)
+        {
+            for (size_t idx : sortedOps)
+            {
+                if (ops[idx].type == OpType::Fill || ops[idx].type == OpType::FillMin)
+                {
+                    auto it = dag.consumerMap.find(makeBufferBindingKey(ops[idx].output));
+                    if (it != dag.consumerMap.end() && it->second.size() == 1)
+                    {
+                        size_t consumer = it->second[0];
+                        if (subgraphSet.contains(consumer))
+                        {
+                            absorbedFills.insert(idx);
+                            fillConsumer[idx] = consumer;
+                            if (ops[idx].output.data != ops[consumer].output.data)
+                            {
+                                result.nonInPlaceAbsorbedFills.push_back(ops[idx]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (size_t idx : sortedOps)
+        {
+            const auto& op = ops[idx];
+            if (needsExternalInput(idx, op.input0))
+            {
+                getOrCreateInputBuffer(op.input0);
+            }
+            if (op.hasInput1 && needsExternalInput(idx, op.input1))
+            {
+                getOrCreateInputBuffer(op.input1);
+            }
+        }
+
+        size_t inputBufCount = desc.inputBuffers.size();
+
+        for (size_t idx : sortedOps)
+        {
+            FusedSubgraphDescriptor::Op descOp;
+            descOp.type = ops[idx].type;
+            opToDescriptorIndex[idx] = desc.ops.size();
+
+            const auto& op = ops[idx];
+
+            if (op.type == OpType::Fill || op.type == OpType::FillMin)
+            {
+                descOp.inputIndex0 = SIZE_MAX;
+                if (op.type == OpType::Fill)
+                {
+                    descOp.scalarIndex0 = appendScalar(op.scalarData, op.scalarDType);
+                }
+            }
+            else
+            {
+                auto input0Key = makeBufferBindingKey(op.input0);
+                auto producerIt = dag.producerMap.find(input0Key);
+                if (producerIt != dag.producerMap.end() && subgraphSet.contains(producerIt->second))
+                {
+                    if (producerIt->second == idx)
+                    {
+                        auto prevIt = dag.previousWriterMap.find(input0Key);
+                        if (prevIt != dag.previousWriterMap.end() && subgraphSet.contains(prevIt->second))
+                        {
+                            descOp.inputIndex0 = inputBufCount + opToDescriptorIndex[prevIt->second];
+                        }
+                        else
+                        {
+                            descOp.inputIndex0 = getExistingInputBuffer(op.input0);
+                        }
+                    }
+                    else
+                    {
+                        descOp.inputIndex0 = inputBufCount + opToDescriptorIndex[producerIt->second];
+                    }
+                }
+                else if (op.input0.data)
+                {
+                    descOp.inputIndex0 = getExistingInputBuffer(op.input0);
+                }
+                else
+                {
+                    descOp.inputIndex0 = SIZE_MAX;
+                }
+            }
+
+            if (op.hasInput1 && op.input1.data)
+            {
+                auto input1Key = makeBufferBindingKey(op.input1);
+                auto producerIt = dag.producerMap.find(input1Key);
+                if (producerIt != dag.producerMap.end() && subgraphSet.contains(producerIt->second))
+                {
+                    if (producerIt->second == idx)
+                    {
+                        auto prevIt = dag.previousWriterMap.find(input1Key);
+                        if (prevIt != dag.previousWriterMap.end() && subgraphSet.contains(prevIt->second))
+                        {
+                            descOp.inputIndex1 = inputBufCount + opToDescriptorIndex[prevIt->second];
+                        }
+                        else
+                        {
+                            descOp.inputIndex1 = getExistingInputBuffer(op.input1);
+                        }
+                    }
+                    else
+                    {
+                        descOp.inputIndex1 = inputBufCount + opToDescriptorIndex[producerIt->second];
+                    }
+                }
+                else
+                {
+                    descOp.inputIndex1 = getExistingInputBuffer(op.input1);
+                }
+            }
+            else if (op.hasInput1)
+            {
+                descOp.inputIndex1 = SIZE_MAX;
+            }
+
+            if (absorbedFills.contains(idx))
+            {
+                descOp.outputIndex = SIZE_MAX;
+            }
+            else
+            {
+                descOp.outputIndex = getOrCreateOutputBuffer(op.output);
+            }
+
+            desc.ops.push_back(descOp);
+        }
+
+        for (auto& [fillIdx, consumerIdx] : fillConsumer)
+        {
+            auto descIdx = opToDescriptorIndex[consumerIdx];
+            auto& consumerOp = desc.ops[descIdx];
+            const auto& fillOp = ops[fillIdx];
+            auto fillKey = makeBufferBindingKey(fillOp.output);
+
+            if (consumerOp.inputIndex0 != SIZE_MAX && makeBufferBindingKey(ops[consumerIdx].input0) == fillKey)
+            {
+                consumerOp.inputIndex0 = SIZE_MAX;
+                consumerOp.scalarIndex0 = appendScalar(fillOp.scalarData, fillOp.scalarDType);
+            }
+            if (consumerOp.inputIndex1 != SIZE_MAX && makeBufferBindingKey(ops[consumerIdx].input1) == fillKey)
+            {
+                consumerOp.inputIndex1 = SIZE_MAX;
+                consumerOp.scalarIndex1 = appendScalar(fillOp.scalarData, fillOp.scalarDType);
+            }
+        }
+
+        if (!absorbedFills.empty())
+        {
+            std::vector<FusedSubgraphDescriptor::Op> finalOps;
+            std::unordered_map<size_t, size_t> oldToNew;
+            size_t newIdx = 0;
+            for (size_t j = 0; j < sortedOps.size(); ++j)
+            {
+                if (!absorbedFills.contains(sortedOps[j]))
+                {
+                    oldToNew[j] = newIdx++;
+                    finalOps.push_back(desc.ops[j]);
+                }
+            }
+
+            size_t inputBufCount = desc.inputBuffers.size();
+            for (auto& op : finalOps)
+            {
+                if (op.inputIndex0 != SIZE_MAX && op.inputIndex0 >= inputBufCount)
+                {
+                    size_t oldOpPos = op.inputIndex0 - inputBufCount;
+                    auto remapIt = oldToNew.find(oldOpPos);
+                    if (remapIt != oldToNew.end())
+                    {
+                        op.inputIndex0 = inputBufCount + remapIt->second;
+                    }
+                    else
+                    {
+                        op.inputIndex0 = SIZE_MAX;
+                    }
+                }
+                if (op.inputIndex1 != SIZE_MAX && op.inputIndex1 >= inputBufCount)
+                {
+                    size_t oldOpPos = op.inputIndex1 - inputBufCount;
+                    auto remapIt = oldToNew.find(oldOpPos);
+                    if (remapIt != oldToNew.end())
+                    {
+                        op.inputIndex1 = inputBufCount + remapIt->second;
+                    }
+                    else
+                    {
+                        op.inputIndex1 = SIZE_MAX;
+                    }
+                }
+            }
+
+            desc.ops = std::move(finalOps);
+        }
+
+        if (!desc.scalarData.empty())
+        {
+            auto scalarSize = aix::Device::dataTypeSize(desc.dtype);
+            std::vector<uint8_t> compactScalarData;
+            std::unordered_map<size_t, size_t> scalarRemap;
+
+            auto remapScalarIndex = [&](size_t& scalarIndex) {
+                if (scalarIndex == SIZE_MAX) return;
+
+                auto remapIt = scalarRemap.find(scalarIndex);
+                if (remapIt != scalarRemap.end())
+                {
+                    scalarIndex = remapIt->second;
+                    return;
+                }
+
+                size_t byteOffset = scalarIndex * scalarSize;
+                assert(byteOffset + scalarSize <= desc.scalarData.size());
+                size_t newIndex = compactScalarData.size() / scalarSize;
+                compactScalarData.insert(compactScalarData.end(),
+                                         desc.scalarData.begin() + static_cast<std::ptrdiff_t>(byteOffset),
+                                         desc.scalarData.begin() + static_cast<std::ptrdiff_t>(byteOffset + scalarSize));
+                scalarRemap[scalarIndex] = newIndex;
+                scalarIndex = newIndex;
+            };
+
+            for (auto& op : desc.ops)
+            {
+                remapScalarIndex(op.scalarIndex0);
+                remapScalarIndex(op.scalarIndex1);
+            }
+
+            desc.scalarData = std::move(compactScalarData);
+        }
+
+        if (!desc.ops.empty())
+        {
+            size_t totalBufferCount = desc.inputBuffers.size() + desc.outputBuffers.size();
+            size_t requiredBufferSlots = totalBufferCount;
+            if (!desc.allContiguous) requiredBufferSlots += totalBufferCount;
+            if (!desc.scalarData.empty()) requiredBufferSlots += 1;
+            if (requiredBufferSlots > 31)
+            {
+                for (size_t idx : sortedOps) result.fallbackIndices.push_back(idx);
+                continue;
+            }
+
+            result.subgraphs.push_back(std::move(desc));
+        }
+    }
+
+    for (size_t i = 0; i < ops.size(); ++i)
+    {
+        if (!visited[i]) result.fallbackIndices.push_back(i);
+    }
+
+    return result;
+}
+
+}  // anonymous namespace
+
+void FuseEngine::record(OpType type, const DeviceTensorParams& input0, const DeviceTensorParams& output)
+{
+    m_pendingOps.emplace_back(type, input0, output);
+    if (m_pendingOps.size() >= m_config.flushThreshold)
+    {
+        flush();
+    }
+}
+
+void FuseEngine::record(OpType type, const DeviceTensorParams& input0, const DeviceTensorParams& input1,
+                        const DeviceTensorParams& output)
+{
+    m_pendingOps.emplace_back(type, input0, input1, output);
+    if (m_pendingOps.size() >= m_config.flushThreshold)
+    {
+        flush();
+    }
+}
+
+void FuseEngine::recordFill(const void* scalar, DataType scalarDType, const DeviceTensorParams& output)
+{
+    auto scalarSize = aix::Device::dataTypeSize(scalarDType);
+    std::vector<uint8_t> scalarBytes(scalarSize);
+    std::memcpy(scalarBytes.data(), scalar, scalarSize);
+
+    DeviceTensorParams dummyInput;
+    m_pendingOps.emplace_back(OpType::Fill, dummyInput, output);
+    m_pendingOps.back().scalarData = std::move(scalarBytes);
+    m_pendingOps.back().scalarDType = scalarDType;
+    if (output.data) m_absorbedFillOutputs.insert(output.data);
+    if (m_pendingOps.size() >= m_config.flushThreshold)
+    {
+        flush();
+    }
+}
+
+void FuseEngine::recordFillMin(const DeviceTensorParams& output)
+{
+    DeviceTensorParams dummyInput;
+    m_pendingOps.emplace_back(OpType::FillMin, dummyInput, output);
+    if (output.data) m_absorbedFillOutputs.insert(output.data);
+    if (m_pendingOps.size() >= m_config.flushThreshold)
+    {
+        flush();
+    }
+}
+
+void FuseEngine::flush()
+{
+    thread_local bool flushing = false;
+    if (flushing) return;
+    flushing = true;
+
+    auto dag = buildDag(m_pendingOps);
+
+    std::vector<bool> isDead(m_pendingOps.size(), false);
+    size_t deadCount = 0;
+    if (m_config.deadResultElimination && !m_pendingOps.empty())
+    {
+        std::unordered_set<void*> consumedBuffers;
+        for (const auto& op : m_pendingOps)
+        {
+            if (op.input0.data) consumedBuffers.insert(op.input0.data);
+            if (op.hasInput1 && op.input1.data) consumedBuffers.insert(op.input1.data);
+        }
+        for (void* buf : m_externalLiveBuffers)
+        {
+            consumedBuffers.insert(buf);
+        }
+
+        for (size_t i = 0; i < m_pendingOps.size(); ++i)
+        {
+            if (m_pendingOps[i].output.data && !consumedBuffers.contains(m_pendingOps[i].output.data))
+            {
+                isDead[i] = true;
+                ++deadCount;
+            }
+        }
+
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (size_t i = 0; i < m_pendingOps.size(); ++i)
+            {
+                if (isDead[i]) continue;
+                void* outPtr = m_pendingOps[i].output.data;
+                if (!outPtr) continue;
+                auto it = dag.consumerMap.find(makeBufferBindingKey(m_pendingOps[i].output));
+                if (it != dag.consumerMap.end())
+                {
+                    bool allConsumersDead = true;
+                    for (size_t c : it->second)
+                    {
+                        if (!isDead[c]) { allConsumersDead = false; break; }
+                    }
+                    if (allConsumersDead)
+                    {
+                        isDead[i] = true;
+                        ++deadCount;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if (m_config.diagnostics)
+    {
+        m_diagnostics.emplace();
+        m_diagnostics->opsRecorded = m_pendingOps.size();
+        m_diagnostics->opsAfterDeadElim = m_pendingOps.size() - deadCount;
+        m_diagnostics->deadResultsEliminated = deadCount;
+    }
+
+    if (m_config.elementwiseFusion && !m_pendingOps.empty())
+    {
+        std::vector<OpRecord> liveOps;
+        for (size_t i = 0; i < m_pendingOps.size(); ++i)
+        {
+            if (!isDead[i]) liveOps.push_back(m_pendingOps[i]);
+        }
+
+        if (!liveOps.empty())
+        {
+            if (!m_deferredFills.empty())
+            {
+                for (const auto& op : liveOps)
+                {
+                    if (op.input0.data)
+                    {
+                        auto it = m_deferredFills.find(op.input0.data);
+                        if (it != m_deferredFills.end())
+                        {
+                            m_emitter.emitSingle(it->second);
+                            m_emittedFillBuffers.insert(it->first);
+                            m_deferredFills.erase(it);
+                        }
+                    }
+                    if (op.hasInput1 && op.input1.data)
+                    {
+                        auto it = m_deferredFills.find(op.input1.data);
+                        if (it != m_deferredFills.end())
+                        {
+                            m_emitter.emitSingle(it->second);
+                            m_emittedFillBuffers.insert(it->first);
+                            m_deferredFills.erase(it);
+                        }
+                    }
+                }
+            }
+
+            auto liveDag = buildDag(liveOps);
+            auto result = analyzeFusion(liveOps, liveDag, m_config);
+
+            size_t totalFusedOps = 0;
+            size_t fillsAbsorbed = 0;
+            for (auto& subgraph : result.subgraphs)
+            {
+                m_emitter.emitFused(subgraph);
+                totalFusedOps += subgraph.ops.size();
+                for (const auto& op : subgraph.ops)
+                {
+                    if ((op.type != OpType::Fill && op.scalarIndex0 != SIZE_MAX) || op.scalarIndex1 != SIZE_MAX)
+                    {
+                        ++fillsAbsorbed;
+                    }
+                }
+            }
+            std::sort(result.fallbackIndices.begin(), result.fallbackIndices.end());
+            for (size_t idx : result.fallbackIndices)
+            {
+                m_emitter.emitSingle(liveOps[idx]);
+            }
+
+            for (const auto& fill : result.nonInPlaceAbsorbedFills)
+            {
+                if (fill.output.data && !m_emittedFillBuffers.contains(fill.output.data))
+                {
+                    m_deferredFills[fill.output.data] = fill;
+                }
+            }
+
+            if (m_config.diagnostics)
+            {
+                m_diagnostics->fusibleSubgraphs = result.subgraphs.size();
+                m_diagnostics->fusedOps = totalFusedOps;
+                m_diagnostics->fallbackOps = result.fallbackIndices.size();
+                m_diagnostics->dispatchesSaved = (totalFusedOps + result.fallbackIndices.size())
+                                                  - (result.subgraphs.size() + result.fallbackIndices.size());
+                m_diagnostics->fillsAbsorbed = fillsAbsorbed;
+
+                std::ostringstream subgraphSummary;
+                subgraphSummary << result.subgraphs.size() << " subgraphs";
+                if (!result.subgraphs.empty())
+                {
+                    subgraphSummary << " (";
+                    for (size_t i = 0; i < result.subgraphs.size(); ++i)
+                    {
+                        if (i > 0) subgraphSummary << ", ";
+                        subgraphSummary << result.subgraphs[i].ops.size() << " ops";
+                    }
+                    subgraphSummary << ")";
+                }
+                m_diagnostics->subgraphSummary = subgraphSummary.str();
+
+                std::ostringstream fallbackSummary;
+                fallbackSummary << result.fallbackIndices.size() << " individual ops";
+                m_diagnostics->fallbackSummary = fallbackSummary.str();
+            }
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < m_pendingOps.size(); ++i)
+        {
+            if (!isDead[i]) m_emitter.emitSingle(m_pendingOps[i]);
+        }
+
+        if (m_config.diagnostics)
+        {
+            size_t liveCount = 0;
+            for (size_t i = 0; i < m_pendingOps.size(); ++i)
+            {
+                if (!isDead[i]) ++liveCount;
+            }
+            m_diagnostics->fusibleSubgraphs = 0;
+            m_diagnostics->fusedOps = 0;
+            m_diagnostics->fallbackOps = liveCount;
+            m_diagnostics->dispatchesSaved = 0;
+            m_diagnostics->fillsAbsorbed = 0;
+            m_diagnostics->subgraphSummary = "0 subgraphs (fusion disabled)";
+            m_diagnostics->fallbackSummary = std::to_string(liveCount) + " individual ops";
+        }
+    }
+
+    m_emitter.commitCommandBuffer();
+
+    if (m_config.diagnostics)
+    {
+        auto [hits, misses] = m_emitter.getKernelCacheStats();
+        m_diagnostics->kernelCacheHits = hits;
+        m_diagnostics->kernelCacheMisses = misses;
+    }
+
+    m_pendingOps.clear();
+    m_externalLiveBuffers.clear();
+    m_absorbedFillOutputs.clear();
+
+    flushing = false;
+}
+
+void FuseEngine::invalidateBuffer(void* buffer)
+{
+    m_deferredFills.erase(buffer);
+    m_emittedFillBuffers.erase(buffer);
+}
+
+}  // namespace aix::fuse
