@@ -1690,6 +1690,47 @@ TEST_CASE("DeviceMetal fused kernels reuse runtime scalar bindings")
 }
 
 
+TEST_CASE("DeviceMetal in place fusion respects prior writer order")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto* metal = dynamic_cast<aix::metal::DeviceMetal*>(device.get());
+    REQUIRE(metal != nullptr);
+
+    auto refMoment = TensorValue({1.0f, -2.0f,
+                                  3.0f, -4.0f}, {2, 2}, &refDevice);
+    auto refGrad = TensorValue({0.5f, 1.0f,
+                                -1.5f, 2.0f}, {2, 2}, &refDevice);
+    refMoment *= 0.9f;
+    refMoment += 0.1f * refGrad;
+    auto refOutput = refMoment / 0.5f;
+
+    auto metalMoment = TensorValue({1.0f, -2.0f,
+                                    3.0f, -4.0f}, {2, 2}, device.get());
+    auto metalGrad = TensorValue({0.5f, 1.0f,
+                                  -1.5f, 2.0f}, {2, 2}, device.get());
+
+    device->synchronize();
+    metal->resetDiagnostics();
+
+    metalMoment *= 0.9f;
+    metalMoment += 0.1f * metalGrad;
+    auto metalOutput = metalMoment / 0.5f;
+    device->synchronize();
+
+    CheckVectorApproxValues(metalMoment, refMoment);
+    CheckVectorApproxValues(metalOutput, refOutput);
+
+    auto diag = metal->diagnostics();
+    CHECK(diag.fuseRejectedTopological == 0);
+    CHECK(diag.fuseSubgraphs >= 1);
+    CHECK(diag.fuseFusedOps >= 3);
+    CHECK(diag.fuseFallbackOps == 0);
+}
+
+
 TEST_CASE("DeviceMetal stride argmaxTo parity with transposed source")
 {
     aix::DeviceCPU refDevice;

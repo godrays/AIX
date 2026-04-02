@@ -82,100 +82,61 @@ BufferBindingKey makeBufferBindingKey(const DeviceTensorParams& params)
 struct DagNode
 {
     size_t              opIndex{0};
+    size_t              input0Producer{SIZE_MAX};
+    size_t              input1Producer{SIZE_MAX};
     std::vector<size_t> deps;
     std::vector<size_t> consumers;
 };
 
 struct Dag
 {
-    std::vector<DagNode>                        nodes;
-    std::unordered_map<BufferBindingKey, size_t, BufferBindingKeyHash> producerMap;
-    std::unordered_map<BufferBindingKey, size_t, BufferBindingKeyHash> previousWriterMap;
-    std::unordered_map<BufferBindingKey, std::vector<size_t>, BufferBindingKeyHash> consumerMap;
-    std::unordered_map<BufferBindingKey, size_t, BufferBindingKeyHash> bufferConsumerCount;
+    std::vector<DagNode> nodes;
 };
 
 Dag buildDag(const std::vector<OpRecord>& ops)
 {
     Dag dag;
     dag.nodes.resize(ops.size());
-
-    for (size_t i = 0; i < ops.size(); ++i)
-    {
-        dag.nodes[i].opIndex = i;
-
-        const auto& op = ops[i];
-
-        if (op.output.data != nullptr)
-        {
-            auto outputKey = makeBufferBindingKey(op.output);
-            auto prevIt = dag.producerMap.find(outputKey);
-            if (prevIt != dag.producerMap.end())
-            {
-                dag.previousWriterMap[outputKey] = prevIt->second;
-            }
-            dag.producerMap[outputKey] = i;
-        }
-
-        if (op.input0.data != nullptr)
-        {
-            dag.consumerMap[makeBufferBindingKey(op.input0)].push_back(i);
-        }
-
-        if (op.hasInput1 && op.input1.data != nullptr)
-        {
-            dag.consumerMap[makeBufferBindingKey(op.input1)].push_back(i);
-        }
-    }
-
-    for (const auto& [ptr, consumers] : dag.consumerMap)
-    {
-        dag.bufferConsumerCount[ptr] = consumers.size();
-    }
+    std::unordered_map<BufferBindingKey, size_t, BufferBindingKeyHash> latestWriter;
 
     for (size_t i = 0; i < ops.size(); ++i)
     {
         const auto& op = ops[i];
+        auto& node = dag.nodes[i];
+        node.opIndex = i;
+
+        auto addDependency = [&](size_t dep) {
+            if (dep == SIZE_MAX) return;
+            if (std::find(node.deps.begin(), node.deps.end(), dep) != node.deps.end()) return;
+            node.deps.push_back(dep);
+            dag.nodes[dep].consumers.push_back(i);
+        };
 
         if (op.input0.data != nullptr)
         {
             auto input0Key = makeBufferBindingKey(op.input0);
-            auto it = dag.producerMap.find(input0Key);
-            if (it != dag.producerMap.end() && it->second != i)
+            auto it = latestWriter.find(input0Key);
+            if (it != latestWriter.end())
             {
-                dag.nodes[i].deps.push_back(it->second);
-            }
-            else if (it != dag.producerMap.end() && it->second == i)
-            {
-                auto prevIt = dag.previousWriterMap.find(input0Key);
-                if (prevIt != dag.previousWriterMap.end())
-                {
-                    dag.nodes[i].deps.push_back(prevIt->second);
-                }
+                node.input0Producer = it->second;
+                addDependency(it->second);
             }
         }
 
         if (op.hasInput1 && op.input1.data != nullptr)
         {
             auto input1Key = makeBufferBindingKey(op.input1);
-            auto it = dag.producerMap.find(input1Key);
-            if (it != dag.producerMap.end() && it->second != i)
+            auto it = latestWriter.find(input1Key);
+            if (it != latestWriter.end())
             {
-                dag.nodes[i].deps.push_back(it->second);
-            }
-            else if (it != dag.producerMap.end() && it->second == i)
-            {
-                auto prevIt = dag.previousWriterMap.find(input1Key);
-                if (prevIt != dag.previousWriterMap.end())
-                {
-                    dag.nodes[i].deps.push_back(prevIt->second);
-                }
+                node.input1Producer = it->second;
+                addDependency(it->second);
             }
         }
 
-        for (size_t dep : dag.nodes[i].deps)
+        if (op.output.data != nullptr)
         {
-            dag.nodes[dep].consumers.push_back(i);
+            latestWriter[makeBufferBindingKey(op.output)] = i;
         }
     }
 
@@ -440,10 +401,9 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
             }
             else
             {
-                auto it = dag.consumerMap.find(makeBufferBindingKey(op.output));
-                if (it != dag.consumerMap.end() && it->second.size() == 1)
+                if (dag.nodes[opIdx].consumers.size() == 1)
                 {
-                    size_t consumer = it->second[0];
+                    size_t consumer = dag.nodes[opIdx].consumers[0];
                     if (!visited[consumer]) worklist.push(consumer);
                 }
             }
@@ -548,16 +508,12 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
             return idx;
         };
 
-        auto needsExternalInput = [&](size_t consumerIdx, const DeviceTensorParams& input) -> bool {
+        auto needsExternalInput = [&](size_t consumerIdx, bool useInput1) -> bool {
+            const auto& input = useInput1 ? ops[consumerIdx].input1 : ops[consumerIdx].input0;
             if (input.data == nullptr) return false;
-            auto inputKey = makeBufferBindingKey(input);
-            auto prodIt = dag.producerMap.find(inputKey);
-            if (prodIt == dag.producerMap.end()) return true;
-            if (!subgraphSet.contains(prodIt->second)) return true;
-            if (prodIt->second != consumerIdx) return false;
-            auto prevIt = dag.previousWriterMap.find(inputKey);
-            if (prevIt != dag.previousWriterMap.end() && subgraphSet.contains(prevIt->second)) return false;
-            return true;
+            size_t producerIdx = useInput1 ? dag.nodes[consumerIdx].input1Producer
+                                           : dag.nodes[consumerIdx].input0Producer;
+            return producerIdx == SIZE_MAX || !subgraphSet.contains(producerIdx);
         };
 
         auto getExistingInputBuffer = [&](const DeviceTensorParams& params) -> size_t {
@@ -576,10 +532,9 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
             {
                 if (ops[idx].type == OpType::Fill || ops[idx].type == OpType::FillMin)
                 {
-                    auto it = dag.consumerMap.find(makeBufferBindingKey(ops[idx].output));
-                    if (it != dag.consumerMap.end() && it->second.size() == 1)
+                    if (dag.nodes[idx].consumers.size() == 1)
                     {
-                        size_t consumer = it->second[0];
+                        size_t consumer = dag.nodes[idx].consumers[0];
                         if (subgraphSet.contains(consumer))
                         {
                             absorbedFills.insert(idx);
@@ -597,11 +552,11 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
         for (size_t idx : sortedOps)
         {
             const auto& op = ops[idx];
-            if (needsExternalInput(idx, op.input0))
+            if (needsExternalInput(idx, false))
             {
                 getOrCreateInputBuffer(op.input0);
             }
-            if (op.hasInput1 && needsExternalInput(idx, op.input1))
+            if (op.hasInput1 && needsExternalInput(idx, true))
             {
                 getOrCreateInputBuffer(op.input1);
             }
@@ -627,26 +582,10 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
             }
             else
             {
-                auto input0Key = makeBufferBindingKey(op.input0);
-                auto producerIt = dag.producerMap.find(input0Key);
-                if (producerIt != dag.producerMap.end() && subgraphSet.contains(producerIt->second))
+                size_t producerIdx = dag.nodes[idx].input0Producer;
+                if (producerIdx != SIZE_MAX && subgraphSet.contains(producerIdx))
                 {
-                    if (producerIt->second == idx)
-                    {
-                        auto prevIt = dag.previousWriterMap.find(input0Key);
-                        if (prevIt != dag.previousWriterMap.end() && subgraphSet.contains(prevIt->second))
-                        {
-                            descOp.inputIndex0 = inputBufCount + opToDescriptorIndex[prevIt->second];
-                        }
-                        else
-                        {
-                            descOp.inputIndex0 = getExistingInputBuffer(op.input0);
-                        }
-                    }
-                    else
-                    {
-                        descOp.inputIndex0 = inputBufCount + opToDescriptorIndex[producerIt->second];
-                    }
+                    descOp.inputIndex0 = inputBufCount + opToDescriptorIndex[producerIdx];
                 }
                 else if (op.input0.data)
                 {
@@ -660,26 +599,10 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
 
             if (op.hasInput1 && op.input1.data)
             {
-                auto input1Key = makeBufferBindingKey(op.input1);
-                auto producerIt = dag.producerMap.find(input1Key);
-                if (producerIt != dag.producerMap.end() && subgraphSet.contains(producerIt->second))
+                size_t producerIdx = dag.nodes[idx].input1Producer;
+                if (producerIdx != SIZE_MAX && subgraphSet.contains(producerIdx))
                 {
-                    if (producerIt->second == idx)
-                    {
-                        auto prevIt = dag.previousWriterMap.find(input1Key);
-                        if (prevIt != dag.previousWriterMap.end() && subgraphSet.contains(prevIt->second))
-                        {
-                            descOp.inputIndex1 = inputBufCount + opToDescriptorIndex[prevIt->second];
-                        }
-                        else
-                        {
-                            descOp.inputIndex1 = getExistingInputBuffer(op.input1);
-                        }
-                    }
-                    else
-                    {
-                        descOp.inputIndex1 = inputBufCount + opToDescriptorIndex[producerIt->second];
-                    }
+                    descOp.inputIndex1 = inputBufCount + opToDescriptorIndex[producerIdx];
                 }
                 else
                 {
@@ -919,11 +842,10 @@ void FuseEngine::flush()
                 if (isDead[i]) continue;
                 void* outPtr = m_pendingOps[i].output.data;
                 if (!outPtr) continue;
-                auto it = dag.consumerMap.find(makeBufferBindingKey(m_pendingOps[i].output));
-                if (it != dag.consumerMap.end())
+                if (!dag.nodes[i].consumers.empty())
                 {
                     bool allConsumersDead = true;
-                    for (size_t c : it->second)
+                    for (size_t c : dag.nodes[i].consumers)
                     {
                         if (!isDead[c]) { allConsumersDead = false; break; }
                     }
