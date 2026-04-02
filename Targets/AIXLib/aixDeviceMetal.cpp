@@ -280,7 +280,8 @@ void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& res
     size_t maxThreadsPerTG = std::min<size_t>(MAX_THREADS_PER_THREADGROUP, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
     auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
-    auto bufTemp = m_allocMap[allocate(a.size, a.dtype)];
+    auto bufResult = m_allocMap[result.data];
+    MTL::Buffer* bufTemp = nullptr;
     auto boundLayout = bindTensorLayout(a, {.bufferIndex=4});
 
     auto encodeReduction = [&](const MTL::Buffer* srcBuffer, MTL::Buffer* dstBuffer, size_t elementCount, size_t useLayout)
@@ -299,21 +300,34 @@ void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& res
 
     size_t elementCount = a.size;
     size_t useLayout = (a.isContiguous && a.offset == 0) ? 0 : 1;
-    encodeReduction(bufSrc, bufTemp, elementCount, useLayout);
-    while (elementCount > 1)
+    const MTL::Buffer* reductionSrc = bufSrc;
+    while (true)
     {
-        elementCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
-        if (elementCount == 1) break;
-        encodeReduction(bufTemp, bufTemp, elementCount, 0);
-    }
+        size_t reducedCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+        if (reducedCount == 1)
+        {
+            encodeReduction(reductionSrc, bufResult, elementCount, useLayout);
+            break;
+        }
 
-    // Copy result from temp buf to result buffer.
-    copy(bufTemp->contents(), result.dtype, result.data, result.dtype, 1);
+        if (!bufTemp)
+        {
+            bufTemp = m_allocMap[allocate(a.size, a.dtype)];
+        }
+
+        encodeReduction(reductionSrc, bufTemp, elementCount, useLayout);
+        reductionSrc = bufTemp;
+        elementCount = reducedCount;
+        useLayout = 0;
+    }
 
     // Free operation is delayed until the commit is done.
     freeTemporaryBuffer(bufSrc);
     releaseTensorLayout(boundLayout);
-    deallocate(bufTemp->contents());
+    if (bufTemp)
+    {
+        deallocate(bufTemp->contents());
+    }
 }
 
 void DeviceMetal::sqrt(const DeviceTensorParams& a, const DeviceTensorParams& result)
