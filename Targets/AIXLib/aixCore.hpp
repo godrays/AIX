@@ -1353,8 +1353,8 @@ private:
     {
         if (shape() != other.shape() || dataType() != other.dataType())
         {
-            TensorValue lhs = *this;
-            TensorValue rhs = other;
+            TensorValue lhs = shallowCopy();
+            TensorValue rhs = other.shallowCopy();
             auto result = prepareTensors(lhs, rhs);
             (result.device()->*func)(lhs.deviceParams(), rhs.deviceParams(), result.deviceParams());
             return result;
