@@ -212,6 +212,7 @@ void* DeviceMetal::allocate(size_t size)
     auto mtlBuf = newBuffer(size);
     auto contentPtr = mtlBuf->contents();
     m_allocMap[contentPtr] = mtlBuf;
+    m_fuseEngine->retainBuffer(contentPtr);
     m_fuseEngine->invalidateBuffer(contentPtr);
     return contentPtr;
 }
@@ -227,6 +228,7 @@ void DeviceMetal::deallocate(void * memory)
     if (!isDeviceBuffer(memory))
         throw std::invalid_argument("DeviceMetal::deallocate() - Found different type of memory to free.");
     auto mtlBuf = m_allocMap[memory];
+    m_fuseEngine->releaseBuffer(memory);
     // IMPORTANT: Delay all deallocations of device buffers until all commands in the batch queue are executed.
     m_tempBuffers.emplace_back(mtlBuf, mtlBuf->contents());
 }

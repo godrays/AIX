@@ -524,6 +524,20 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
             return it->second;
         };
 
+        auto outputEscapesSubgraph = [&](size_t opIdx) -> bool {
+            if (ops[opIdx].output.data && liveBuffers.contains(ops[opIdx].output.data)) return true;
+
+            const auto& consumers = dag.nodes[opIdx].consumers;
+            if (consumers.empty()) return true;
+
+            for (size_t consumerIdx : consumers)
+            {
+                if (!subgraphSet.contains(consumerIdx)) return true;
+            }
+
+            return false;
+        };
+
         std::unordered_set<size_t> absorbedFills;
         std::unordered_map<size_t, size_t> fillConsumer;
         if (config.absorbFills)
@@ -532,7 +546,8 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
             {
                 if (ops[idx].type == OpType::Fill || ops[idx].type == OpType::FillMin)
                 {
-                    if (dag.nodes[idx].consumers.size() == 1)
+                    bool outputStillLive = ops[idx].output.data && liveBuffers.contains(ops[idx].output.data);
+                    if (!outputStillLive && dag.nodes[idx].consumers.size() == 1)
                     {
                         size_t consumer = dag.nodes[idx].consumers[0];
                         if (subgraphSet.contains(consumer))
@@ -618,9 +633,13 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
             {
                 descOp.outputIndex = SIZE_MAX;
             }
-            else
+            else if (outputEscapesSubgraph(idx))
             {
                 descOp.outputIndex = getOrCreateOutputBuffer(op.output);
+            }
+            else
+            {
+                descOp.outputIndex = SIZE_MAX;
             }
 
             desc.ops.push_back(descOp);
@@ -823,6 +842,10 @@ void FuseEngine::flush()
         {
             consumedBuffers.insert(buf);
         }
+        for (void* buf : m_liveBuffers)
+        {
+            consumedBuffers.insert(buf);
+        }
 
         for (size_t i = 0; i < m_pendingOps.size(); ++i)
         {
@@ -1003,6 +1026,19 @@ void FuseEngine::flush()
     m_absorbedFillOutputs.clear();
 
     flushing = false;
+}
+
+void FuseEngine::retainBuffer(void* buffer)
+{
+    if (buffer) m_liveBuffers.insert(buffer);
+}
+
+void FuseEngine::releaseBuffer(void* buffer)
+{
+    if (!buffer) return;
+    m_liveBuffers.erase(buffer);
+    m_externalLiveBuffers.erase(buffer);
+    invalidateBuffer(buffer);
 }
 
 void FuseEngine::invalidateBuffer(void* buffer)

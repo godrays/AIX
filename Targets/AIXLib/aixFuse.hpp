@@ -185,12 +185,15 @@ public:
         return empty;
     }
 
+    void retainBuffer(void* buffer);
+    void releaseBuffer(void* buffer);
     void invalidateBuffer(void* buffer);
 
 private:
     FuseConfig                                m_config;
     FuseEmitter&                              m_emitter;
     std::vector<OpRecord>                     m_pendingOps;
+    std::unordered_set<void*>                 m_liveBuffers;
     std::unordered_set<void*>                 m_externalLiveBuffers;
     std::unordered_set<void*>                 m_absorbedFillOutputs;
     std::unordered_map<void*, OpRecord>       m_deferredFills;
