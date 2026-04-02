@@ -185,6 +185,11 @@ public:
         return empty;
     }
 
+    void resetDiagnostics()
+    {
+        m_diagnostics.reset();
+    }
+
     void retainBuffer(void* buffer);
     void releaseBuffer(void* buffer);
     void invalidateBuffer(void* buffer);

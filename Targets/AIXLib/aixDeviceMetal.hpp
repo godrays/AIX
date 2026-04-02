@@ -63,6 +63,14 @@ class DeviceMetal : public aix::Device
 public:
     friend class MetalFuseEmitter;
 
+    struct Diagnostics
+    {
+        size_t fuseRejectedTopological = 0;
+        size_t fuseSubgraphs = 0;
+        size_t fuseFusedOps = 0;
+        size_t fuseFallbackOps = 0;
+    };
+
     // Constructor
     explicit DeviceMetal(size_t deviceIndex = 0);
 
@@ -152,6 +160,8 @@ public:
     void synchronize() override;
 
     std::pair<size_t, size_t> fuseKernelCacheStats() const;
+    void resetDiagnostics();
+    Diagnostics diagnostics() const;
 
 protected:
     struct MetalLayoutBindingSlots

@@ -340,7 +340,10 @@ std::vector<uint8_t> convertScalarData(const std::vector<uint8_t>& scalarData,
     return converted;
 }
 
-FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, const FuseConfig& config)
+FusionResult analyzeFusion(const std::vector<OpRecord>& ops,
+                           const Dag& dag,
+                           const FuseConfig& config,
+                           const std::unordered_set<void*>& liveBuffers)
 {
     FusionResult result;
     std::vector<bool> visited(ops.size(), false);
@@ -454,20 +457,6 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
             continue;
         }
 
-        std::unordered_set<BufferBindingKey, BufferBindingKeyHash> uniqueBuffers;
-        for (size_t idx : sortedOps)
-        {
-            const auto& op = ops[idx];
-            if (op.input0.data) uniqueBuffers.insert(makeBufferBindingKey(op.input0));
-            if (op.hasInput1 && op.input1.data) uniqueBuffers.insert(makeBufferBindingKey(op.input1));
-            if (op.output.data) uniqueBuffers.insert(makeBufferBindingKey(op.output));
-        }
-        if (uniqueBuffers.size() > 31)
-        {
-            for (size_t idx : sortedOps) result.fallbackIndices.push_back(idx);
-            continue;
-        }
-
         FusedSubgraphDescriptor desc;
         desc.elementCount = elementCount;
         desc.dtype = subgraphDtype;
@@ -562,6 +551,40 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops, const Dag& dag, con
                     }
                 }
             }
+        }
+
+        std::unordered_set<BufferBindingKey, BufferBindingKeyHash> estimatedInputBuffers;
+        std::unordered_set<BufferBindingKey, BufferBindingKeyHash> estimatedOutputBuffers;
+        bool hasRuntimeScalars = false;
+        for (size_t idx : sortedOps)
+        {
+            const auto& op = ops[idx];
+            if (needsExternalInput(idx, false))
+            {
+                estimatedInputBuffers.insert(makeBufferBindingKey(op.input0));
+            }
+            if (op.hasInput1 && needsExternalInput(idx, true))
+            {
+                estimatedInputBuffers.insert(makeBufferBindingKey(op.input1));
+            }
+            if (!absorbedFills.contains(idx) && op.output.data != nullptr && outputEscapesSubgraph(idx))
+            {
+                estimatedOutputBuffers.insert(makeBufferBindingKey(op.output));
+            }
+            if (op.type == OpType::Fill)
+            {
+                hasRuntimeScalars = true;
+            }
+        }
+
+        size_t estimatedMaterializedBufferCount = estimatedInputBuffers.size() + estimatedOutputBuffers.size();
+        size_t estimatedRequiredBufferSlots = estimatedMaterializedBufferCount;
+        if (!allContiguous) estimatedRequiredBufferSlots += estimatedMaterializedBufferCount;
+        if (hasRuntimeScalars) estimatedRequiredBufferSlots += 1;
+        if (estimatedRequiredBufferSlots > 31)
+        {
+            for (size_t idx : sortedOps) result.fallbackIndices.push_back(idx);
+            continue;
         }
 
         for (size_t idx : sortedOps)
@@ -826,6 +849,12 @@ void FuseEngine::flush()
     if (flushing) return;
     flushing = true;
 
+    if (m_pendingOps.empty())
+    {
+        flushing = false;
+        return;
+    }
+
     auto dag = buildDag(m_pendingOps);
 
     std::vector<bool> isDead(m_pendingOps.size(), false);
@@ -929,7 +958,7 @@ void FuseEngine::flush()
             }
 
             auto liveDag = buildDag(liveOps);
-            auto result = analyzeFusion(liveOps, liveDag, m_config);
+            auto result = analyzeFusion(liveOps, liveDag, m_config, m_liveBuffers);
 
             size_t totalFusedOps = 0;
             size_t fillsAbsorbed = 0;

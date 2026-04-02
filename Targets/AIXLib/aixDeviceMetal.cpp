@@ -114,6 +114,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     config.multiOutputKernels = true;
     config.deadResultElimination = false;
     config.absorbFills = true;
+    config.diagnostics = true;
     m_fuseEngine = std::make_unique<aix::fuse::FuseEngine>(config, *m_fuseEmitter);
     m_kernelGen = std::make_unique<aixDeviceMetalKernelGen>(m_mtlDevice);
 
@@ -1793,6 +1794,24 @@ std::pair<size_t, size_t> DeviceMetal::fuseKernelCacheStats() const
 {
     if (m_kernelGen) return {m_kernelGen->cacheHits(), m_kernelGen->cacheMisses()};
     return {0, 0};
+}
+
+void DeviceMetal::resetDiagnostics()
+{
+    synchronize();
+    if (m_fuseEngine) m_fuseEngine->resetDiagnostics();
+}
+
+DeviceMetal::Diagnostics DeviceMetal::diagnostics() const
+{
+    Diagnostics diag;
+    if (!m_fuseEngine) return diag;
+
+    const auto& flushDiag = m_fuseEngine->lastFlushDiagnostics();
+    diag.fuseSubgraphs = flushDiag.fusibleSubgraphs;
+    diag.fuseFusedOps = flushDiag.fusedOps;
+    diag.fuseFallbackOps = flushDiag.fallbackOps;
+    return diag;
 }
 
 }   // namespace
