@@ -1061,6 +1061,122 @@ TEST_CASE("TensorValue - view aliasing through shared storage mirror")
 }
 
 
+TEST_CASE("TensorValue - no operation value returns share storage")
+{
+    auto base = TensorValue({1.0f, 2.0f, 3.0f,
+                             4.0f, 5.0f, 6.0f}, {2, 3}, &testDevice);
+
+    SUBCASE("reshape")
+    {
+        auto result = base.reshape({2, 3});
+
+        CHECK(result.storage() == base.storage());
+        CHECK(result.storageOffset() == base.storageOffset());
+        CHECK(result.strides() == base.strides());
+    }
+
+    SUBCASE("broadcastTo")
+    {
+        auto result = base.broadcastTo({2, 3});
+
+        CHECK(result.storage() == base.storage());
+        CHECK(result.storageOffset() == base.storageOffset());
+        CHECK(result.strides() == base.strides());
+    }
+
+    SUBCASE("reduceTo")
+    {
+        auto result = base.reduceTo({2, 3});
+
+        CHECK(result.storage() == base.storage());
+        CHECK(result.storageOffset() == base.storageOffset());
+        CHECK(result.strides() == base.strides());
+    }
+
+    SUBCASE("contiguous")
+    {
+        auto result = base.contiguous();
+
+        CHECK(result.storage() == base.storage());
+        CHECK(result.storageOffset() == base.storageOffset());
+        CHECK(result.strides() == base.strides());
+    }
+
+    SUBCASE("sum on scalar")
+    {
+        auto scalar = TensorValue(5.0f, {}, &testDevice);
+        auto result = scalar.sum(0);
+
+        CHECK(result.storage() == scalar.storage());
+        CHECK(result.storageOffset() == scalar.storageOffset());
+        CHECK(result.strides() == scalar.strides());
+    }
+
+    SUBCASE("max on scalar")
+    {
+        auto scalar = TensorValue(5.0f, {}, &testDevice);
+        auto result = scalar.max(0);
+
+        CHECK(result.storage() == scalar.storage());
+        CHECK(result.storageOffset() == scalar.storageOffset());
+        CHECK(result.strides() == scalar.strides());
+    }
+
+    SUBCASE("permute identity")
+    {
+        auto result = base.permute({0, 1});
+
+        CHECK(result.storage() == base.storage());
+        CHECK(result.storageOffset() == base.storageOffset());
+        CHECK(result.strides() == base.strides());
+    }
+
+    SUBCASE("squeeze no-op")
+    {
+        auto result = base.squeeze(0);
+
+        CHECK(result.storage() == base.storage());
+        CHECK(result.storageOffset() == base.storageOffset());
+        CHECK(result.strides() == base.strides());
+    }
+
+    SUBCASE("sliceSet in-place")
+    {
+        auto replacement = TensorValue({9.0f, 8.0f, 7.0f}, {1, 3}, &testDevice);
+        auto result = base.sliceSet(replacement, 0, 1, 2, 1, true);
+
+        CHECK(result.storage() == base.storage());
+        CHECK(result.storageOffset() == base.storageOffset());
+        CHECK(result.strides() == base.strides());
+        CheckVectorApproxValues(base, TensorValue({1.0f, 2.0f, 3.0f,
+                                                   9.0f, 8.0f, 7.0f}, {2, 3}, &testDevice));
+    }
+
+    SUBCASE("indexAdd in-place")
+    {
+        auto vector = TensorValue({1.0f, 2.0f, 3.0f}, {3}, &testDevice);
+        auto indices = TensorValue({1}, {1}, &testDevice, DataType::kInt32);
+        auto source = TensorValue({10.0f}, {1}, &testDevice);
+        auto result = vector.indexAdd(0, indices, source, true);
+
+        CHECK(result.storage() == vector.storage());
+        CHECK(result.storageOffset() == vector.storageOffset());
+        CHECK(result.strides() == vector.strides());
+        CheckVectorApproxValues(vector, TensorValue({1.0f, 12.0f, 3.0f}, {3}, &testDevice));
+    }
+
+    SUBCASE("cat single tensor")
+    {
+        std::vector<TensorValue> tensors{base};
+        auto result = TensorValue::cat(tensors, 1);
+
+        CHECK(result.storage() == tensors[0].storage());
+        CHECK(result.storageOffset() == tensors[0].storageOffset());
+        CHECK(result.strides() == tensors[0].strides());
+    }
+}
+
+
 TEST_CASE("TensorValue - broadcast")
 {
     SUBCASE("([],[1],[1,1],[1,3],[2,3]) op [2x3]")

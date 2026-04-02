@@ -419,7 +419,7 @@ public:
     // Set the device
     TensorValue to(Device * device) const
     {
-        if (m_device == device) return *this;
+        if (m_device == device) return shallowCopy();
         auto materialized = isContiguous() && m_offset == 0 ? *this : contiguous();
         return {materialized.data(), materialized.size(), materialized.dataType(), materialized.shape(), device, materialized.dataType()};
     }
@@ -448,7 +448,7 @@ public:
 
         if (newShape == m_shape)
         {
-            return *this;
+            return shallowCopy();
         }
 
         if (isContiguous())
@@ -472,7 +472,7 @@ public:
             auto materialized = isContiguous() && m_offset == 0 ? *this : contiguous();
             return {materialized.data(), materialized.size(), materialized.dataType(), materialized.shape(), device(), newDataType};
         }
-        return *this;
+        return shallowCopy();
     }
 
     // Returns true if two TensorValue shapes are compatible for a broadcast operation.
@@ -536,7 +536,7 @@ public:
     // Returns a broadcasted TensorValue with a new shape.
     TensorValue broadcastTo(const Shape& newShape) const
     {
-        if (shape() == newShape) return *this;
+        if (shape() == newShape) return shallowCopy();
         if (!checkBroadcastTo(shape(), newShape))
         {
             throw std::invalid_argument("Target TensorValue shape is not broadcastable.");
@@ -569,7 +569,7 @@ public:
     // Reduces the TensorValue back to the original shape.
     TensorValue reduceTo(const Shape & originalShape) const
     {
-        if (shape() == originalShape) return *this;
+        if (shape() == originalShape) return shallowCopy();
         // Ensure tensor values are initialized to zero, as the reduction operation performs a summation.
         TensorValue result(0, originalShape, device(), m_dType);
         device()->reduceTo(deviceParams(), result.deviceParams());
@@ -584,7 +584,7 @@ public:
 
     TensorValue contiguous() const
     {
-        if (isContiguous() && m_offset == 0) return *this;
+        if (isContiguous() && m_offset == 0) return shallowCopy();
 
         TensorValue result(m_shape, m_device, m_dType);
         m_device->contiguous(deviceParams(), result.deviceParams());
@@ -728,7 +728,7 @@ public:
 
     TensorValue sum(ssize_t dim, bool keepDim=false) const
     {
-        if (m_shape.empty()) return *this;      // Return itself if it's a scalar tensor.
+        if (m_shape.empty()) return shallowCopy();      // Return itself if it's a scalar tensor.
 
         dim = dim < 0 ? static_cast<ssize_t>(m_shape.size()) + dim : dim;
         if (dim < 0 || dim >= static_cast<ssize_t>(m_shape.size()))
@@ -810,7 +810,7 @@ public:
 
     TensorValue max(ssize_t dim, bool keepDim=false) const
     {
-        if (m_shape.empty()) return *this;      // Return itself if it's a scalar tensor.
+        if (m_shape.empty()) return shallowCopy();      // Return itself if it's a scalar tensor.
 
         dim = dim < 0 ? static_cast<ssize_t>(m_shape.size()) + dim : dim;
         if (dim < 0 || dim >= static_cast<ssize_t>(m_shape.size()))
@@ -938,8 +938,8 @@ public:
             throw std::invalid_argument("Dimension count does not match in permute.");
         }
 
-        if (shape().empty()) return *this;      // Nothing to do for a scalar tensor.
-        if (shape().size() == 1 && (newDims[0] == 0 || newDims[0] == -1)) return *this;
+        if (shape().empty()) return shallowCopy();      // Nothing to do for a scalar tensor.
+        if (shape().size() == 1 && (newDims[0] == 0 || newDims[0] == -1)) return shallowCopy();
 
         auto shapeSize = static_cast<ssize_t>(shape().size());
         std::vector<ssize_t> dimTable(shapeSize, -1);
@@ -962,7 +962,7 @@ public:
             if (dim != i) isIdentity = false;
         }
 
-        if (isIdentity) return *this;
+        if (isIdentity) return shallowCopy();
 
         // Create the new shape.
         Shape newShape(shapeSize);
@@ -992,7 +992,7 @@ public:
             squeezedStrides.erase(squeezedStrides.begin() + dim);
             return {m_storage, m_size, m_offset, squeezedShape, squeezedStrides, m_device, m_dType};
         }
-        return *this;
+        return shallowCopy();
     }
 
     TensorValue unsqueeze(ssize_t dim) const
@@ -1132,7 +1132,7 @@ public:
         {
             // Slice and set tensor's data to the result tensor.
             device()->sliceSet(tensor.deviceParams(), deviceParams(), dim, start, end, step);
-            return *this;
+            return shallowCopy();
         }
 
         TensorValue result(0, m_shape, device(), m_dType);  // Zero initialization is required.
@@ -1224,7 +1224,7 @@ public:
         if (inPlace)
         {
             device()->indexAdd(source.deviceParams(), deviceParams(), indices.deviceParams(), dim);
-            return *this;
+            return shallowCopy();
         }
 
         TensorValue result(data(), size(), dataType(), shape(), device(), dataType());
@@ -1297,7 +1297,7 @@ public:
             throw std::invalid_argument("Zero-dimensional tensor cannot be concatenated.");
         }
 
-        if (tensors.size() == 1) return tensor;
+        if (tensors.size() == 1) return tensor.shallowCopy();
 
         dim = dim < 0 ? static_cast<ssize_t>(tensor.shape().size()) + dim : dim;
         if (dim < 0 || dim >= static_cast<ssize_t>(tensor.shape().size()))
@@ -1343,6 +1343,11 @@ public:
     inline friend std::ostream& operator<<(std::ostream & os, const TensorValue & tensor);
 
 private:
+    TensorValue shallowCopy() const
+    {
+        return {m_storage, m_size, m_offset, m_shape, m_strides, m_device, m_dType};
+    }
+
     template<typename T>
     inline TensorValue arithmeticOpFunc(const T & func, const TensorValue & other) const
     {
