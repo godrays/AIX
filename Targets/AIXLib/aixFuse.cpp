@@ -849,12 +849,6 @@ void FuseEngine::flush()
     if (flushing) return;
     flushing = true;
 
-    if (m_pendingOps.empty())
-    {
-        flushing = false;
-        return;
-    }
-
     auto dag = buildDag(m_pendingOps);
 
     std::vector<bool> isDead(m_pendingOps.size(), false);
@@ -1041,7 +1035,7 @@ void FuseEngine::flush()
         }
     }
 
-    m_emitter.commitCommandBuffer();
+    m_emitter.finishFlush();
 
     if (m_config.diagnostics)
     {
@@ -1055,6 +1049,11 @@ void FuseEngine::flush()
     m_absorbedFillOutputs.clear();
 
     flushing = false;
+}
+
+void FuseEngine::recordExternalRead(const void* buffer)
+{
+    if (buffer) m_externalLiveBuffers.insert(const_cast<void*>(buffer));
 }
 
 void FuseEngine::retainBuffer(void* buffer)

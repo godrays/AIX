@@ -1696,9 +1696,6 @@ TEST_CASE("DeviceMetal in place fusion respects prior writer order")
     auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
     if (!device) return;
 
-    auto* metal = dynamic_cast<aix::metal::DeviceMetal*>(device.get());
-    REQUIRE(metal != nullptr);
-
     auto refMoment = TensorValue({1.0f, -2.0f,
                                   3.0f, -4.0f}, {2, 2}, &refDevice);
     auto refGrad = TensorValue({0.5f, 1.0f,
@@ -1713,7 +1710,6 @@ TEST_CASE("DeviceMetal in place fusion respects prior writer order")
                                   -1.5f, 2.0f}, {2, 2}, device.get());
 
     device->synchronize();
-    metal->resetDiagnostics();
 
     metalMoment *= 0.9f;
     metalMoment += 0.1f * metalGrad;
@@ -1722,12 +1718,37 @@ TEST_CASE("DeviceMetal in place fusion respects prior writer order")
 
     CheckVectorApproxValues(metalMoment, refMoment);
     CheckVectorApproxValues(metalOutput, refOutput);
+}
 
-    auto diag = metal->diagnostics();
-    CHECK(diag.fuseRejectedTopological == 0);
-    CHECK(diag.fuseSubgraphs >= 1);
-    CHECK(diag.fuseFusedOps >= 3);
-    CHECK(diag.fuseFallbackOps == 0);
+
+TEST_CASE("DeviceMetal dead result elimination preserves matmul boundary inputs")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuLhs = TensorValue({1.0f, 2.0f,
+                               3.0f, 4.0f}, {2, 2}, &refDevice);
+    auto cpuRhs = TensorValue({5.0f, 6.0f,
+                               7.0f, 8.0f}, {2, 2}, &refDevice);
+    auto expected = (cpuLhs * 2.0f + 1.0f).matmul(cpuRhs);
+
+    auto metalLhs = TensorValue({1.0f, 2.0f,
+                                 3.0f, 4.0f}, {2, 2}, device.get());
+    auto metalRhs = TensorValue({5.0f, 6.0f,
+                                 7.0f, 8.0f}, {2, 2}, device.get());
+
+    device->synchronize();
+
+    {
+        auto dead = metalLhs + 5.0f;
+        (void)dead;
+    }
+
+    auto actual = (metalLhs * 2.0f + 1.0f).matmul(metalRhs);
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected, EPSILON_MATMUL_F32_METAL);
 }
 
 

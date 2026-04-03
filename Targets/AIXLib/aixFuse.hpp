@@ -159,7 +159,7 @@ public:
 
     virtual void emitFused(const FusedSubgraphDescriptor&) = 0;
     virtual void emitSingle(const OpRecord&) = 0;
-    virtual void commitCommandBuffer() = 0;
+    virtual void finishFlush() = 0;
     virtual std::pair<size_t, size_t> getKernelCacheStats() const { return {0, 0}; }
 };
 
@@ -185,11 +185,7 @@ public:
         return empty;
     }
 
-    void resetDiagnostics()
-    {
-        m_diagnostics.reset();
-    }
-
+    void recordExternalRead(const void* buffer);
     void retainBuffer(void* buffer);
     void releaseBuffer(void* buffer);
     void invalidateBuffer(void* buffer);
