@@ -29,6 +29,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     // Create autorelease pool.
     m_pool = NS::AutoreleasePool::alloc()->init();
     m_mtlDevice = createMTLDevice(deviceIndex);
+    m_maxThreadsPerThreadgroup = m_mtlDevice->maxThreadsPerThreadgroup().width;
     m_maxWorkingSetSize = static_cast<size_t>(static_cast<double>(m_mtlDevice->recommendedMaxWorkingSetSize()) * 0.7);
     m_allocator = std::make_unique<MetalAllocator>(m_mtlDevice, ALLOCATOR_ALIGNMENT_SIZE);
     m_bufferCache = std::make_unique<MTLBufferCache>();
@@ -290,7 +291,7 @@ void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& res
     if (!isDeviceBuffer(result.data))
         throw std::invalid_argument("DeviceMetal::sum() result must have GPU memory.");
 
-    size_t maxThreadsPerTG = std::min<size_t>(MAX_THREADS_PER_THREADGROUP, compFuncPSO->maxTotalThreadsPerThreadgroup());
+    size_t maxThreadsPerTG = std::min<size_t>(m_maxThreadsPerThreadgroup, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
     auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
     auto bufResult = m_allocMap[result.data];
@@ -390,7 +391,7 @@ void DeviceMetal::max(const DeviceTensorParams& a, const DeviceTensorParams& res
     if (!isDeviceBuffer(result.data))
         throw std::invalid_argument("DeviceMetal::max() result must have GPU memory.");
 
-    size_t maxThreadsPerTG = std::min<size_t>(MAX_THREADS_PER_THREADGROUP, compFuncPSO->maxTotalThreadsPerThreadgroup());
+    size_t maxThreadsPerTG = std::min<size_t>(m_maxThreadsPerThreadgroup, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
     auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
     auto bufTemp = m_allocMap[allocate(a.size, a.dtype)];
@@ -450,8 +451,7 @@ void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& 
     auto iDType = static_cast<size_t>(a.dtype);
     auto argmaxInitPSO = m_compFuncPSOArgmaxInit[iDType];
     auto argmaxReducePSO = m_compFuncPSOArgmaxReduce[iDType];
-    size_t maxThreadsPerTG = std::min<size_t>(MAX_THREADS_PER_THREADGROUP,
-                                              argmaxReducePSO->maxTotalThreadsPerThreadgroup());
+    size_t maxThreadsPerTG = std::min<size_t>(m_maxThreadsPerThreadgroup, argmaxReducePSO->maxTotalThreadsPerThreadgroup());
 
     auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
     auto bufTempValues = m_allocMap[allocate(a.size, a.dtype)];
