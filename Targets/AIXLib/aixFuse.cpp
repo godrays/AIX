@@ -933,7 +933,7 @@ void FuseEngine::flush()
                         auto it = m_deferredFills.find(op.input0.data);
                         if (it != m_deferredFills.end())
                         {
-                            m_emitter.emitSingle(it->second);
+                            m_callbacks.emitSingle(it->second);
                             m_emittedFillBuffers.insert(it->first);
                             m_deferredFills.erase(it);
                         }
@@ -943,7 +943,7 @@ void FuseEngine::flush()
                         auto it = m_deferredFills.find(op.input1.data);
                         if (it != m_deferredFills.end())
                         {
-                            m_emitter.emitSingle(it->second);
+                            m_callbacks.emitSingle(it->second);
                             m_emittedFillBuffers.insert(it->first);
                             m_deferredFills.erase(it);
                         }
@@ -958,7 +958,7 @@ void FuseEngine::flush()
             size_t fillsAbsorbed = 0;
             for (auto& subgraph : result.subgraphs)
             {
-                m_emitter.emitFused(subgraph);
+                m_callbacks.emitFused(subgraph);
                 totalFusedOps += subgraph.ops.size();
                 for (const auto& op : subgraph.ops)
                 {
@@ -971,7 +971,7 @@ void FuseEngine::flush()
             std::sort(result.fallbackIndices.begin(), result.fallbackIndices.end());
             for (size_t idx : result.fallbackIndices)
             {
-                m_emitter.emitSingle(liveOps[idx]);
+                m_callbacks.emitSingle(liveOps[idx]);
             }
 
             for (const auto& fill : result.nonInPlaceAbsorbedFills)
@@ -1015,7 +1015,7 @@ void FuseEngine::flush()
     {
         for (size_t i = 0; i < m_pendingOps.size(); ++i)
         {
-            if (!isDead[i]) m_emitter.emitSingle(m_pendingOps[i]);
+            if (!isDead[i]) m_callbacks.emitSingle(m_pendingOps[i]);
         }
 
         if (m_config.diagnostics)
@@ -1035,11 +1035,11 @@ void FuseEngine::flush()
         }
     }
 
-    m_emitter.finishFlush();
+    m_callbacks.finishFlush();
 
     if (m_config.diagnostics)
     {
-        auto [hits, misses] = m_emitter.getKernelCacheStats();
+        auto [hits, misses] = m_callbacks.getKernelCacheStats();
         m_diagnostics->kernelCacheHits = hits;
         m_diagnostics->kernelCacheMisses = misses;
     }

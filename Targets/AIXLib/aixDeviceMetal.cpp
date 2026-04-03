@@ -18,6 +18,7 @@
 // External includes
 #include <Metal/Metal.hpp>
 // System includes
+#include <functional>
 
 
 namespace aix::metal
@@ -108,13 +109,20 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     m_compEncoder = m_cmdBuffer->computeCommandEncoder();
     m_event = m_mtlDevice->newEvent();
 
-    m_fuseEmitter = std::make_unique<MetalFuseEmitter>(this);
+    // Setup fusion configuration.
     aix::fuse::FuseConfig config;
     config.elementwiseFusion = true;
     config.multiOutputKernels = true;
     config.deadResultElimination = true;
     config.absorbFills = true;
-    m_fuseEngine = std::make_unique<aix::fuse::FuseEngine>(config, *m_fuseEmitter);
+
+    // Setup Fusion callbacks.
+    aix::fuse::FuseCallbacks callbacks;
+    callbacks.emitFused = std::bind(&DeviceMetal::emitFused, this, std::placeholders::_1);
+    callbacks.emitSingle = std::bind(&DeviceMetal::emitSingle, this, std::placeholders::_1);
+    callbacks.finishFlush = std::bind(&DeviceMetal::finishFlush, this);
+    callbacks.getKernelCacheStats = std::bind(&DeviceMetal::getKernelCacheStats, this);
+    m_fuseEngine = std::make_unique<aix::fuse::FuseEngine>(config, std::move(callbacks));
     m_kernelGen = std::make_unique<aixDeviceMetalKernelGen>(m_mtlDevice);
 
     m_sentinelBuffer = m_allocator->alloc(4);
@@ -134,7 +142,6 @@ DeviceMetal::~DeviceMetal()
     }
 
     m_fuseEngine.reset();
-    m_fuseEmitter.reset();
     m_kernelGen.reset();
 
     if (m_sentinelBuffer) { m_sentinelBuffer->release(); m_sentinelBuffer = nullptr; }
@@ -1691,27 +1698,25 @@ void DeviceMetal::CheckCommandBufferStatus(const MTL::CommandBuffer *commandBuff
     }
 }
 
-void MetalFuseEmitter::emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph)
+void DeviceMetal::emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph)
 {
-    auto* dm = m_device;
-
     if (subgraph.outputBuffers.empty() && subgraph.ops.size() > 1)
     {
         return;
     }
 
-    auto* pso = dm->m_kernelGen->getOrCreatePSO(subgraph);
+    auto* pso = m_kernelGen->getOrCreatePSO(subgraph);
     if (!pso)
     {
         return;
     }
-    auto allocMapCopy = dm->m_allocMap;
+    auto allocMapCopy = m_allocMap;
     std::vector<std::pair<MTL::Buffer*, const void*>> uploadTemps;
 
     auto ensureDeviceBuffer = [&](const void* ptr, size_t size, size_t dtypeSize) -> MTL::Buffer* {
         auto it = allocMapCopy.find(ptr);
         if (it != allocMapCopy.end()) return it->second;
-        auto buf = dm->getReadOnlyMTLBuffer(ptr, size, dtypeSize);
+        auto buf = getReadOnlyMTLBuffer(ptr, size, dtypeSize);
         allocMapCopy[buf->contents()] = buf;
         allocMapCopy[ptr] = buf;
         uploadTemps.emplace_back(buf, ptr);
@@ -1727,111 +1732,110 @@ void MetalFuseEmitter::emitFused(const aix::fuse::FusedSubgraphDescriptor& subgr
         ensureDeviceBuffer(buf.data, buf.size, aix::Device::dataTypeSize(buf.dtype));
     }
 
-    dm->m_kernelGen->encodeFusedDispatch(dm->m_compEncoder, pso, subgraph, allocMapCopy);
+    m_kernelGen->encodeFusedDispatch(m_compEncoder, pso, subgraph, allocMapCopy);
 
     for (auto& [buf, ptr] : uploadTemps)
     {
-        if (!dm->isDeviceBuffer(ptr))
+        if (!isDeviceBuffer(ptr))
         {
-            dm->freeTemporaryBuffer(buf);
+            freeTemporaryBuffer(buf);
         }
     }
 
-    dm->commitBatchQueue();
+    commitBatchQueue();
 }
 
-void MetalFuseEmitter::emitSingle(const aix::fuse::OpRecord& op)
+void DeviceMetal::emitSingle(const aix::fuse::OpRecord& op)
 {
-    auto* dm = m_device;
     auto iDType = static_cast<size_t>(op.output.dtype);
 
     switch (op.type)
     {
         case aix::fuse::OpType::Add:
-            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
-                dm->m_compFuncPSOAdd[iDType], dm->m_compFuncPSOAddStrided[iDType], "add");
+            executeTripleArrayCmd(op.input0, op.input1, op.output,
+                m_compFuncPSOAdd[iDType], m_compFuncPSOAddStrided[iDType], "add");
             break;
         case aix::fuse::OpType::Sub:
-            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
-                dm->m_compFuncPSOSub[iDType], dm->m_compFuncPSOSubStrided[iDType], "sub");
+            executeTripleArrayCmd(op.input0, op.input1, op.output,
+                m_compFuncPSOSub[iDType], m_compFuncPSOSubStrided[iDType], "sub");
             break;
         case aix::fuse::OpType::Mul:
-            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
-                dm->m_compFuncPSOMul[iDType], dm->m_compFuncPSOMulStrided[iDType], "mul");
+            executeTripleArrayCmd(op.input0, op.input1, op.output,
+                m_compFuncPSOMul[iDType], m_compFuncPSOMulStrided[iDType], "mul");
             break;
         case aix::fuse::OpType::Div:
-            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
-                dm->m_compFuncPSODiv[iDType], dm->m_compFuncPSODivStrided[iDType], "div");
+            executeTripleArrayCmd(op.input0, op.input1, op.output,
+                m_compFuncPSODiv[iDType], m_compFuncPSODivStrided[iDType], "div");
             break;
         case aix::fuse::OpType::Pow:
-            dm->executeTripleArrayCmd(op.input0, op.input1, op.output,
-                dm->m_compFuncPSOPow[iDType], dm->m_compFuncPSOPowStrided[iDType], "pow");
+            executeTripleArrayCmd(op.input0, op.input1, op.output,
+                m_compFuncPSOPow[iDType], m_compFuncPSOPowStrided[iDType], "pow");
             break;
         case aix::fuse::OpType::Negate:
-            dm->executeDoubleArrayCmd(op.input0, op.output,
-                dm->m_compFuncPSOUnary[iDType], dm->m_compFuncPSOUnaryStrided[iDType], "unary");
+            executeDoubleArrayCmd(op.input0, op.output,
+                m_compFuncPSOUnary[iDType], m_compFuncPSOUnaryStrided[iDType], "unary");
             break;
         case aix::fuse::OpType::Sqrt:
-            dm->executeDoubleArrayCmd(op.input0, op.output,
-                dm->m_compFuncPSOSqrt[iDType], dm->m_compFuncPSOSqrtStrided[iDType], "sqrt");
+            executeDoubleArrayCmd(op.input0, op.output,
+                m_compFuncPSOSqrt[iDType], m_compFuncPSOSqrtStrided[iDType], "sqrt");
             break;
         case aix::fuse::OpType::Sin:
-            dm->executeDoubleArrayCmd(op.input0, op.output,
-                dm->m_compFuncPSOSin[iDType], dm->m_compFuncPSOSinStrided[iDType], "sin");
+            executeDoubleArrayCmd(op.input0, op.output,
+                m_compFuncPSOSin[iDType], m_compFuncPSOSinStrided[iDType], "sin");
             break;
         case aix::fuse::OpType::Cos:
-            dm->executeDoubleArrayCmd(op.input0, op.output,
-                dm->m_compFuncPSOCos[iDType], dm->m_compFuncPSOCosStrided[iDType], "cos");
+            executeDoubleArrayCmd(op.input0, op.output,
+                m_compFuncPSOCos[iDType], m_compFuncPSOCosStrided[iDType], "cos");
             break;
         case aix::fuse::OpType::Tanh:
-            dm->executeDoubleArrayCmd(op.input0, op.output,
-                dm->m_compFuncPSOTanh[iDType], dm->m_compFuncPSOTanhStrided[iDType], "tanh");
+            executeDoubleArrayCmd(op.input0, op.output,
+                m_compFuncPSOTanh[iDType], m_compFuncPSOTanhStrided[iDType], "tanh");
             break;
         case aix::fuse::OpType::Log:
-            dm->executeDoubleArrayCmd(op.input0, op.output,
-                dm->m_compFuncPSOLog[iDType], dm->m_compFuncPSOLogStrided[iDType], "log");
+            executeDoubleArrayCmd(op.input0, op.output,
+                m_compFuncPSOLog[iDType], m_compFuncPSOLogStrided[iDType], "log");
             break;
         case aix::fuse::OpType::Exp:
-            dm->executeDoubleArrayCmd(op.input0, op.output,
-                dm->m_compFuncPSOExp[iDType], dm->m_compFuncPSOExpStrided[iDType], "exp");
+            executeDoubleArrayCmd(op.input0, op.output,
+                m_compFuncPSOExp[iDType], m_compFuncPSOExpStrided[iDType], "exp");
             break;
         case aix::fuse::OpType::Fill:
         {
             assert(op.output.isContiguous);
-            dm->validateDataType(op.scalarDType);
-            dm->validateDataType(op.output.dtype);
+            validateDataType(op.scalarDType);
+            validateDataType(op.output.dtype);
 
-            if (!dm->isDeviceBuffer(op.output.data))
+            if (!isDeviceBuffer(op.output.data))
                 throw std::invalid_argument("DeviceMetal::fill() result must have GPU memory.");
 
-            auto scalarBuf = dm->getReadOnlyMTLBuffer(op.scalarData.data(), 1,
+            auto scalarBuf = getReadOnlyMTLBuffer(op.scalarData.data(), 1,
                 aix::Device::dataTypeSize(op.scalarDType), 1);
-            auto resultBuf = dm->m_allocMap[op.output.data];
+            auto resultBuf = m_allocMap[op.output.data];
             auto iSrcDType = static_cast<size_t>(op.scalarDType);
-            auto compFuncPSO = dm->m_compFuncPSOFill[iSrcDType][iDType];
-            auto asize = dm->align(op.output.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
+            auto compFuncPSO = m_compFuncPSOFill[iSrcDType][iDType];
+            auto asize = align(op.output.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
             auto w = std::min(asize, static_cast<size_t>(compFuncPSO->maxTotalThreadsPerThreadgroup()));
-            dm->encodeComputeCommandDoubleBuffer(scalarBuf, resultBuf, compFuncPSO, {asize, 1, 1}, {w, 1, 1});
-            dm->freeTemporaryBuffer(scalarBuf);
-            dm->commitBatchQueue();
+            encodeComputeCommandDoubleBuffer(scalarBuf, resultBuf, compFuncPSO, {asize, 1, 1}, {w, 1, 1});
+            freeTemporaryBuffer(scalarBuf);
+            commitBatchQueue();
             break;
         }
         case aix::fuse::OpType::FillMin:
         {
             assert(op.output.isContiguous);
-            dm->validateDataType(op.output.dtype);
+            validateDataType(op.output.dtype);
 
-            if (!dm->isDeviceBuffer(op.output.data))
+            if (!isDeviceBuffer(op.output.data))
                 throw std::invalid_argument("DeviceMetal::fillMin() result must have GPU memory.");
 
-            auto compFuncPSO = dm->m_compFuncPSOFillMin[iDType];
-            auto resultBuf = dm->m_allocMap[op.output.data];
-            auto asize = dm->align(op.output.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
+            auto compFuncPSO = m_compFuncPSOFillMin[iDType];
+            auto resultBuf = m_allocMap[op.output.data];
+            auto asize = align(op.output.size, TOTAL_COMPONENT_COUNT) / TOTAL_COMPONENT_COUNT;
             auto w = std::min(asize, static_cast<size_t>(compFuncPSO->maxTotalThreadsPerThreadgroup()));
-            dm->m_compEncoder->setComputePipelineState(compFuncPSO);
-            dm->m_compEncoder->setBuffer(resultBuf, 0, 0);
-            dm->m_compEncoder->dispatchThreads({asize, 1, 1}, {w, 1, 1});
-            dm->commitBatchQueue();
+            m_compEncoder->setComputePipelineState(compFuncPSO);
+            m_compEncoder->setBuffer(resultBuf, 0, 0);
+            m_compEncoder->dispatchThreads({asize, 1, 1}, {w, 1, 1});
+            commitBatchQueue();
             break;
         }
         default:
@@ -1839,13 +1843,13 @@ void MetalFuseEmitter::emitSingle(const aix::fuse::OpRecord& op)
     }
 }
 
-void MetalFuseEmitter::finishFlush()
+void DeviceMetal::finishFlush()
 {
 }
 
-std::pair<size_t, size_t> MetalFuseEmitter::getKernelCacheStats() const
+std::pair<size_t, size_t> DeviceMetal::getKernelCacheStats() const
 {
-    return m_device->fuseKernelCacheStats();
+    return fuseKernelCacheStats();
 }
 
 std::pair<size_t, size_t> DeviceMetal::fuseKernelCacheStats() const

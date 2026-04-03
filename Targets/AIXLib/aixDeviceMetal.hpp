@@ -55,14 +55,11 @@ namespace aix::metal
 
 class MetalAllocator;
 class MTLBufferCache;
-class MetalFuseEmitter;
 class aixDeviceMetalKernelGen;
 
 class DeviceMetal : public aix::Device
 {
 public:
-    friend class MetalFuseEmitter;
-
     // Constructor
     explicit DeviceMetal(size_t deviceIndex = 0);
 
@@ -235,6 +232,12 @@ protected:
 
     static void CheckCommandBufferStatus(const MTL::CommandBuffer* commandBuffer);
 
+    // Fusion engine callback methods.
+    void emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph);
+    void emitSingle(const aix::fuse::OpRecord& op);
+    void finishFlush();
+    std::pair<size_t, size_t> getKernelCacheStats() const;
+
     NS::AutoreleasePool*   m_pool{nullptr};
     MTL::Device*           m_mtlDevice{nullptr};
     MTL::CommandQueue*     m_cmdQueue{nullptr};
@@ -292,12 +295,11 @@ protected:
     MTL::ComputePipelineState*   m_compFuncPSOTriu[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOIndexSelect[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOIndexAdd[aix::DataTypeCount]{nullptr};
-    std::vector<std::pair<MTL::Buffer*, void*>>    m_tempBuffers;
-    std::vector<void*>                              m_contiguousTempAllocations;
-    std::unordered_map<const void*, MTL::Buffer*>  m_allocMap;
+    std::vector<std::pair<MTL::Buffer*, void*>>   m_tempBuffers;
+    std::vector<void*>   m_contiguousTempAllocations;
+    std::unordered_map<const void*, MTL::Buffer*>   m_allocMap;
     std::unique_ptr<MetalAllocator>  m_allocator;
     std::unique_ptr<MTLBufferCache>  m_bufferCache;
-    std::unique_ptr<MetalFuseEmitter>  m_fuseEmitter;
     std::unique_ptr<aix::fuse::FuseEngine>  m_fuseEngine;
     std::unique_ptr<aixDeviceMetalKernelGen>  m_kernelGen;
     size_t   m_currentBatchSize{0};
@@ -307,20 +309,6 @@ protected:
     MTL::Event*  m_event{nullptr};
     uint64_t     m_eventValue{0};
     MTL::Buffer* m_sentinelBuffer{nullptr};
-};
-
-class MetalFuseEmitter : public aix::fuse::FuseEmitter
-{
-public:
-    explicit MetalFuseEmitter(DeviceMetal* device) : m_device(device) {}
-
-    void emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph) override;
-    void emitSingle(const aix::fuse::OpRecord& op) override;
-    void finishFlush() override;
-    std::pair<size_t, size_t> getKernelCacheStats() const override;
-
-private:
-    DeviceMetal* m_device;
 };
 
 }   // namespace

@@ -13,10 +13,13 @@
 #include "aixCore.hpp"
 // External includes
 // System includes
+#include <cassert>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 
 namespace aix::fuse
@@ -95,13 +98,13 @@ struct FuseConfig
 
 struct OpRecord
 {
-    OpType               type;
+    OpType  type;
     DeviceTensorParams   input0;
     DeviceTensorParams   input1;
     DeviceTensorParams   output;
     std::vector<uint8_t> scalarData;
-    DataType             scalarDType = DataType::kFloat32;
-    bool                 hasInput1   = false;
+    DataType  scalarDType = DataType::kFloat32;
+    bool      hasInput1   = false;
 
     OpRecord() = default;
 
@@ -152,22 +155,28 @@ struct FlushDiagnostics
     std::string fallbackSummary;
 };
 
-class FuseEmitter
+struct FuseCallbacks
 {
-public:
-    virtual ~FuseEmitter() = default;
-
-    virtual void emitFused(const FusedSubgraphDescriptor&) = 0;
-    virtual void emitSingle(const OpRecord&) = 0;
-    virtual void finishFlush() = 0;
-    virtual std::pair<size_t, size_t> getKernelCacheStats() const { return {0, 0}; }
+    std::function<void(const FusedSubgraphDescriptor&)> emitFused;
+    std::function<void(const OpRecord&)> emitSingle;
+    std::function<void()> finishFlush;
+    std::function<std::pair<size_t, size_t>()> getKernelCacheStats = [] { return std::pair<size_t, size_t>{0, 0}; };
 };
 
 class FuseEngine
 {
 public:
-    FuseEngine(const FuseConfig& config, FuseEmitter& emitter)
-        : m_config(config), m_emitter(emitter) {}
+    FuseEngine(const FuseConfig& config, FuseCallbacks callbacks)
+        : m_config(config), m_callbacks(std::move(callbacks))
+    {
+        assert(m_callbacks.emitFused);
+        assert(m_callbacks.emitSingle);
+        assert(m_callbacks.finishFlush);
+        if (!m_callbacks.getKernelCacheStats)
+        {
+            m_callbacks.getKernelCacheStats = [] { return std::pair<size_t, size_t>{0, 0}; };
+        }
+    }
 
     void record(OpType type, const DeviceTensorParams& input0, const DeviceTensorParams& output);
     void record(OpType type, const DeviceTensorParams& input0, const DeviceTensorParams& input1,
@@ -191,15 +200,15 @@ public:
     void invalidateBuffer(void* buffer);
 
 private:
-    FuseConfig                                m_config;
-    FuseEmitter&                              m_emitter;
-    std::vector<OpRecord>                     m_pendingOps;
-    std::unordered_set<void*>                 m_liveBuffers;
-    std::unordered_set<void*>                 m_externalLiveBuffers;
-    std::unordered_set<void*>                 m_absorbedFillOutputs;
-    std::unordered_map<void*, OpRecord>       m_deferredFills;
-    std::unordered_set<void*>                 m_emittedFillBuffers;
-    std::optional<FlushDiagnostics>           m_diagnostics;
+    FuseConfig    m_config;
+    FuseCallbacks m_callbacks;
+    std::vector<OpRecord>     m_pendingOps;
+    std::unordered_set<void*> m_liveBuffers;
+    std::unordered_set<void*> m_externalLiveBuffers;
+    std::unordered_set<void*> m_absorbedFillOutputs;
+    std::unordered_set<void*> m_emittedFillBuffers;
+    std::unordered_map<void*, OpRecord> m_deferredFills;
+    std::optional<FlushDiagnostics>     m_diagnostics;
 };
 
 }  // namespace aix::fuse
