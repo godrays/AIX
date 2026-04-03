@@ -28,6 +28,14 @@ namespace aix::fuse
 namespace
 {
 
+size_t requiredFusedBufferSlots(size_t materializedBufferCount, bool allContiguous, bool hasRuntimeScalars)
+{
+    size_t requiredBufferSlots = materializedBufferCount;
+    if (!allContiguous) requiredBufferSlots += materializedBufferCount;
+    if (hasRuntimeScalars) requiredBufferSlots += 1;
+    return requiredBufferSlots;
+}
+
 struct BufferBindingKey
 {
     const void*         data{nullptr};
@@ -386,6 +394,7 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops,
             if (!op.output.isContiguous || op.output.offset != 0) allContiguous = false;
             if (op.input0.data && (!op.input0.isContiguous || op.input0.offset != 0)) allContiguous = false;
             if (op.hasInput1 && op.input1.data && (!op.input1.isContiguous || op.input1.offset != 0)) allContiguous = false;
+            if (!config.supportsStridedFusion && !allContiguous) { valid = false; break; }
 
             subgraphOps.push_back(opIdx);
             visited[opIdx] = true;
@@ -454,6 +463,30 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops,
         if (sortedOps.size() != subgraphOps.size())
         {
             for (size_t idx : subgraphOps) result.fallbackIndices.push_back(idx);
+            continue;
+        }
+
+        bool dependsOnOutsidePendingProducer = false;
+        for (size_t idx : sortedOps)
+        {
+            size_t input0Producer = dag.nodes[idx].input0Producer;
+            if (input0Producer != SIZE_MAX && !subgraphSet.contains(input0Producer))
+            {
+                dependsOnOutsidePendingProducer = true;
+                break;
+            }
+
+            size_t input1Producer = dag.nodes[idx].input1Producer;
+            if (input1Producer != SIZE_MAX && !subgraphSet.contains(input1Producer))
+            {
+                dependsOnOutsidePendingProducer = true;
+                break;
+            }
+        }
+
+        if (dependsOnOutsidePendingProducer)
+        {
+            for (size_t idx : sortedOps) result.fallbackIndices.push_back(idx);
             continue;
         }
 
@@ -578,10 +611,10 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops,
         }
 
         size_t estimatedMaterializedBufferCount = estimatedInputBuffers.size() + estimatedOutputBuffers.size();
-        size_t estimatedRequiredBufferSlots = estimatedMaterializedBufferCount;
-        if (!allContiguous) estimatedRequiredBufferSlots += estimatedMaterializedBufferCount;
-        if (hasRuntimeScalars) estimatedRequiredBufferSlots += 1;
-        if (estimatedRequiredBufferSlots > 31)
+        size_t estimatedRequiredBufferSlots = requiredFusedBufferSlots(estimatedMaterializedBufferCount,
+                                                                       allContiguous,
+                                                                       hasRuntimeScalars);
+        if (estimatedRequiredBufferSlots > config.maxBufferSlots)
         {
             for (size_t idx : sortedOps) result.fallbackIndices.push_back(idx);
             continue;
@@ -773,10 +806,10 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops,
         if (!desc.ops.empty())
         {
             size_t totalBufferCount = desc.inputBuffers.size() + desc.outputBuffers.size();
-            size_t requiredBufferSlots = totalBufferCount;
-            if (!desc.allContiguous) requiredBufferSlots += totalBufferCount;
-            if (!desc.scalarData.empty()) requiredBufferSlots += 1;
-            if (requiredBufferSlots > 31)
+            size_t requiredBufferSlots = requiredFusedBufferSlots(totalBufferCount,
+                                                                  desc.allContiguous,
+                                                                  !desc.scalarData.empty());
+            if (requiredBufferSlots > config.maxBufferSlots)
             {
                 for (size_t idx : sortedOps) result.fallbackIndices.push_back(idx);
                 continue;
@@ -969,6 +1002,8 @@ void FuseEngine::flush()
                 }
             }
             std::sort(result.fallbackIndices.begin(), result.fallbackIndices.end());
+            result.fallbackIndices.erase(std::unique(result.fallbackIndices.begin(), result.fallbackIndices.end()),
+                                         result.fallbackIndices.end());
             for (size_t idx : result.fallbackIndices)
             {
                 m_callbacks.emitSingle(liveOps[idx]);

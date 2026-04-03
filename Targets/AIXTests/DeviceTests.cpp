@@ -10,6 +10,7 @@
 // Project includes
 #include "Utils.hpp"
 #include <aix.hpp>
+#include <aixFuse.hpp>
 #include <aixDeviceMetal.hpp>
 #include <aixDevices.hpp>
 // External includes
@@ -229,6 +230,63 @@ bool testAdd(Device* testDevice, size_t n)
     }
 
     return true;
+}
+
+TEST_CASE("FuseEngine requires maxBufferSlots in config")
+{
+    aix::fuse::FuseCallbacks callbacks;
+    callbacks.emitFused = [](const aix::fuse::FusedSubgraphDescriptor&) {};
+    callbacks.emitSingle = [](const aix::fuse::OpRecord&) {};
+    callbacks.finishFlush = [] {};
+
+    aix::fuse::FuseConfig invalidConfig;
+    DOCTEST_CHECK_THROWS_AS(aix::fuse::FuseEngine(invalidConfig, callbacks), std::invalid_argument);
+
+    aix::fuse::FuseConfig validConfig;
+    validConfig.maxBufferSlots = 31;
+    DOCTEST_CHECK_NOTHROW(aix::fuse::FuseEngine(validConfig, callbacks));
+}
+
+
+TEST_CASE("FuseEngine emits non-contiguous fallback ops once when strided fusion is disabled")
+{
+    std::vector<aix::fuse::OpType> emittedOps;
+
+    aix::fuse::FuseCallbacks callbacks;
+    callbacks.emitFused = [](const aix::fuse::FusedSubgraphDescriptor&) {};
+    callbacks.emitSingle = [&](const aix::fuse::OpRecord& op) { emittedOps.push_back(op.type); };
+    callbacks.finishFlush = [] {};
+
+    aix::fuse::FuseConfig config;
+    config.deadResultElimination = false;
+    config.maxBufferSlots = 31;
+    config.supportsStridedFusion = false;
+
+    aix::fuse::FuseEngine engine(config, callbacks);
+
+    std::array<float, 4> inputStorage {1.0f, 2.0f, 3.0f, 4.0f};
+    std::array<float, 4> outputStorage{};
+
+    DeviceTensorParams input;
+    input.data = inputStorage.data();
+    input.dtype = aix::DataType::kFloat32;
+    input.isContiguous = false;
+    input.shape = {2, 2};
+    input.size = 4;
+    input.strides = {1, 2};
+
+    DeviceTensorParams output;
+    output.data = outputStorage.data();
+    output.dtype = aix::DataType::kFloat32;
+    output.isContiguous = true;
+    output.shape = {2, 2};
+    output.size = 4;
+    output.strides = {2, 1};
+
+    engine.record(aix::fuse::OpType::Mul, input, input, output);
+    engine.flush();
+
+    CHECK(emittedOps == std::vector<aix::fuse::OpType>{aix::fuse::OpType::Mul});
 }
 
 
@@ -1687,6 +1745,79 @@ TEST_CASE("DeviceMetal fused kernels reuse runtime scalar bindings")
     CHECK(misses2 == misses1);
     CHECK(hits2 > hits1);
     CHECK(hits1 >= hits0);
+}
+
+
+TEST_CASE("FuseEngine does not fuse ops that depend on rejected fallback producers")
+{
+    std::vector<std::string> emitted;
+
+    aix::fuse::FuseCallbacks callbacks;
+    callbacks.emitFused = [&](const aix::fuse::FusedSubgraphDescriptor& subgraph)
+    {
+        emitted.push_back("fused:" + std::to_string(subgraph.ops.size()));
+    };
+    callbacks.emitSingle = [&](const aix::fuse::OpRecord& op)
+    {
+        switch (op.type)
+        {
+            case aix::fuse::OpType::Add: emitted.push_back("Add"); break;
+            case aix::fuse::OpType::Exp: emitted.push_back("Exp"); break;
+            case aix::fuse::OpType::Tanh: emitted.push_back("Tanh"); break;
+            default: emitted.push_back("Other"); break;
+        }
+    };
+    callbacks.finishFlush = [] {};
+
+    aix::fuse::FuseConfig config;
+    config.deadResultElimination = false;
+    config.maxBufferSlots = 31;
+    config.supportsStridedFusion = false;
+
+    aix::fuse::FuseEngine engine(config, callbacks);
+
+    std::array<float, 4> storageA {1.0f, 2.0f, 3.0f, 4.0f};
+    std::array<float, 4> storageB {5.0f, 6.0f, 7.0f, 8.0f};
+    std::array<float, 4> storageC {};
+    std::array<float, 4> storageD {};
+    std::array<float, 4> storageE {};
+
+    DeviceTensorParams input0;
+    input0.data = storageA.data();
+    input0.dtype = aix::DataType::kFloat32;
+    input0.isContiguous = true;
+    input0.shape = {2, 2};
+    input0.size = 4;
+    input0.strides = {2, 1};
+
+    DeviceTensorParams input1;
+    input1.data = storageB.data();
+    input1.dtype = aix::DataType::kFloat32;
+    input1.isContiguous = false;
+    input1.shape = {2, 2};
+    input1.size = 4;
+    input1.strides = {0, 1};
+
+    DeviceTensorParams intermediate0;
+    intermediate0.data = storageC.data();
+    intermediate0.dtype = aix::DataType::kFloat32;
+    intermediate0.isContiguous = true;
+    intermediate0.shape = {2, 2};
+    intermediate0.size = 4;
+    intermediate0.strides = {2, 1};
+
+    DeviceTensorParams intermediate1 = intermediate0;
+    intermediate1.data = storageD.data();
+
+    DeviceTensorParams output = intermediate0;
+    output.data = storageE.data();
+
+    engine.record(aix::fuse::OpType::Add, input0, input1, intermediate0);
+    engine.record(aix::fuse::OpType::Exp, intermediate0, intermediate1);
+    engine.record(aix::fuse::OpType::Tanh, intermediate1, output);
+    engine.flush();
+
+    CHECK(emitted == std::vector<std::string>{"Add", "Exp", "Tanh"});
 }
 
 

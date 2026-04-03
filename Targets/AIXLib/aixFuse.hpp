@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -93,7 +94,9 @@ struct FuseConfig
     bool   absorbFills            = true;
     bool   deadResultElimination  = true;
     bool   diagnostics            = false;
-    size_t flushThreshold         = 200;
+    size_t flushThreshold         = 200;        // Pending ops before fusion planning runs.
+    size_t maxBufferSlots         = 0;
+    bool   supportsStridedFusion  = true;
 };
 
 struct OpRecord
@@ -169,6 +172,11 @@ public:
     FuseEngine(const FuseConfig& config, FuseCallbacks callbacks)
         : m_config(config), m_callbacks(std::move(callbacks))
     {
+        if (m_config.maxBufferSlots == 0)
+        {
+            throw std::invalid_argument("FuseEngine requires FuseConfig::maxBufferSlots > 0.");
+        }
+
         assert(m_callbacks.emitFused);
         assert(m_callbacks.emitSingle);
         assert(m_callbacks.finishFlush);
