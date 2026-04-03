@@ -114,7 +114,7 @@ public:
         ++m_timestep;
         for (size_t i = 0; i < m_parameters.size(); ++i)
         {
-            auto & parameter = m_parameters[i].second;
+            auto & [name, parameter] = m_parameters[i];
 
             if (parameter.isRequireGrad())
             {
