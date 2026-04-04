@@ -84,6 +84,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
         m_compFuncPSOArgmaxReduce[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxReduce_" + dtypeStr);
         m_compFuncPSOArgmaxTo[i]     = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxTo_" + dtypeStr);
         m_compFuncPSOMatMulStrided[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulStrided_" + dtypeStr);
+        m_compFuncPSOMatMulStridedTiled1616[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulStridedTiled_16_16_" + dtypeStr);
         m_compFuncPSOMatMulTiledBC6464888[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiledBC_64_64_8_8_8_" + dtypeStr);
         m_compFuncPSOMatMulTiled32x32[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiled_32_32_" + dtypeStr);
         m_compFuncPSOMatMulTiled32x64[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiled_32_64_" + dtypeStr);
@@ -128,8 +129,6 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     callbacks.getKernelCacheStats = std::bind(&DeviceMetal::getKernelCacheStats, this);
     m_fuseEngine = std::make_unique<aix::fuse::FuseEngine>(config, std::move(callbacks));
     m_kernelGen = std::make_unique<aixDeviceMetalKernelGen>(m_mtlDevice);
-
-    m_sentinelBuffer = m_allocator->alloc(4);
 }
 
 // Destructor
@@ -147,8 +146,6 @@ DeviceMetal::~DeviceMetal()
 
     m_fuseEngine.reset();
     m_kernelGen.reset();
-
-    if (m_sentinelBuffer) { m_sentinelBuffer->release(); m_sentinelBuffer = nullptr; }
 
     m_bufferCache->clear();
 
@@ -576,76 +573,54 @@ void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& 
     size_t K = buf1Size.cols;
     size_t N = buf2Size.cols;
 
-    auto encodeParams = [&](const MTL::ComputePipelineState* compFuncPSO)
-    {
-        m_compEncoder->setComputePipelineState(compFuncPSO);
-        m_compEncoder->setBuffer(buf1, 0, 0);
-        m_compEncoder->setBuffer(buf2, 0, 1);
-        m_compEncoder->setBuffer(bufResult, 0, 2);
-        m_compEncoder->setBytes(&buf1Size, sizeof(MatrixSize), 3);
-        m_compEncoder->setBytes(&buf2Size, sizeof(MatrixSize), 4);
-    };
+    // HEURISTIC FOR KERNEL SELECTION
+    // The tiled kernel is insanely fast for large matrices but carries minor overhead
+    // for very small matrices. If dimensions are tiny, the Level 1 kernel is preferred.
+    const bool useTiled = M >= 16 && N >= 16 && K >= 16;
 
-    auto dispatchTiled = [&](const MTL::ComputePipelineState* compFuncPSO, const size_t tileSizeX, const size_t tileSizeY)
-    {
-        // Encode the pipeline state object and its parameters.
-        uint numThreadgroupsX = (N + tileSizeX - 1) / tileSizeX;
-        uint numThreadgroupsY = (M + tileSizeY - 1) / tileSizeY;
-        assert(tileSizeX * tileSizeY / tileSizeX <= compFuncPSO->maxTotalThreadsPerThreadgroup());
-        encodeParams(compFuncPSO);
-        m_compEncoder->dispatchThreadgroups({numThreadgroupsX, numThreadgroupsY, 1}, {tileSizeX, tileSizeY/tileSizeX, 1});
-    };
+    // Select the appropriate Pipeline State Object, compute kernel.
+    auto compFuncPSO = useTiled ? m_compFuncPSOMatMulStridedTiled1616[iDType]
+                                : m_compFuncPSOMatMulStrided[iDType];
 
-    bool packedOperands = a.isContiguous && a.offset == 0 && b.isContiguous && b.offset == 0;
-    bool commonCondition = packedOperands && K % 32 == 0 && N % 32 == 0 &&
-                           (result.dtype == aix::DataType::kFloat32 ||
-                            result.dtype == aix::DataType::kFloat16 ||
-                            result.dtype == aix::DataType::kBFloat16);
-    if (!packedOperands)
+    m_compEncoder->setComputePipelineState(compFuncPSO);
+
+    // Bindings remain exactly the same for both kernels!
+    m_compEncoder->setBuffer(buf1, 0, 0);
+    m_compEncoder->setBuffer(buf2, 0, 1);
+    m_compEncoder->setBuffer(bufResult, 0, 2);
+    m_compEncoder->setBytes(&buf1Size, sizeof(MatrixSize), 3);
+    m_compEncoder->setBytes(&buf2Size, sizeof(MatrixSize), 4);
+
+    const auto boundLayoutA = bindTensorLayout(a, {.bufferIndex=5});
+    const auto boundLayoutB = bindTensorLayout(b, {.bufferIndex=6});
+
+    if (useTiled)
     {
-        auto compFuncPSO = m_compFuncPSOMatMulStrided[iDType];
-        m_compEncoder->setComputePipelineState(compFuncPSO);
-        m_compEncoder->setBuffer(buf1, 0, 0);
-        m_compEncoder->setBuffer(buf2, 0, 1);
-        m_compEncoder->setBuffer(bufResult, 0, 2);
-        m_compEncoder->setBytes(&buf1Size, sizeof(MatrixSize), 3);
-        m_compEncoder->setBytes(&buf2Size, sizeof(MatrixSize), 4);
-        auto boundLayoutA = bindTensorLayout(a, {.bufferIndex=5});
-        auto boundLayoutB = bindTensorLayout(b, {.bufferIndex=6});
-        constexpr NS::UInteger tileWidth = 8;
-        constexpr NS::UInteger tileHeight = 8;
-        assert(tileWidth * tileHeight <= compFuncPSO->maxTotalThreadsPerThreadgroup());
-        m_compEncoder->dispatchThreads({N, M, 1}, {tileWidth, tileHeight, 1});
-        releaseTensorLayout(boundLayoutA);
-        releaseTensorLayout(boundLayoutB);
-    }
-    // Use fast matmul where dimensions are multiple of TSY.
-    // TODO: Make SIMD comparison.
-    else if (M % 128 == 0 && commonCondition)
-    {
-        dispatchTiled(m_compFuncPSOMatMulTiled32x128[iDType], 32, 128);
-    }
-    else if (M % 64 == 0 && commonCondition)
-    {
-        dispatchTiled(m_compFuncPSOMatMulTiled32x64[iDType], 32, 64);
-    }
-    else if (M % 32 == 0 && commonCondition)
-    {
-        dispatchTiled(m_compFuncPSOMatMulTiled32x32[iDType], 32, 32);
+        // Tiled threadgroup dispatch.
+        constexpr NS::UInteger TILE_SIZE = 16;
+        assert(TILE_SIZE * TILE_SIZE <= compFuncPSO->maxTotalThreadsPerThreadgroup());
+
+        // Calculate the number of threadgroups (ceiling division to pad edges)
+        NS::UInteger tgX = (N + TILE_SIZE - 1) / TILE_SIZE;
+        NS::UInteger tgY = (M + TILE_SIZE - 1) / TILE_SIZE;
+
+        // Note: dispatchThreadgroups MUST be used here, NOT dispatchThreads
+        m_compEncoder->dispatchThreadgroups({tgX, tgY, 1}, {TILE_SIZE, TILE_SIZE, 1});
     }
     else
     {
-        constexpr size_t tileSize = 64;
-        constexpr size_t numThreads = 64;
-        uint numThreadgroupsX = (N + tileSize - 1) / tileSize;
-        uint numThreadgroupsY = (M + tileSize - 1) / tileSize;
-        auto compFuncPSO = m_compFuncPSOMatMulTiledBC6464888[iDType];
-        assert(numThreads <= compFuncPSO->maxTotalThreadsPerThreadgroup());
-        encodeParams(compFuncPSO);
-        m_compEncoder->dispatchThreadgroups({numThreadgroupsX, numThreadgroupsY, 1}, {numThreads, 1, 1});
+        // Simple threadgroup dispatch.
+        constexpr NS::UInteger tileWidth  = 8;
+        constexpr NS::UInteger tileHeight = 8;
+        assert(tileWidth * tileHeight <= compFuncPSO->maxTotalThreadsPerThreadgroup());
+
+        // dispatchThreads safely handles edge bounds automatically via non-uniform grids
+        m_compEncoder->dispatchThreads({N, M, 1}, {tileWidth, tileHeight, 1});
     }
 
-    // Free operation is delayed until the commit is done.
+    releaseTensorLayout(boundLayoutA);
+    releaseTensorLayout(boundLayoutB);
+
     freeTemporaryBuffer(buf1);
     freeTemporaryBuffer(buf2);
     commitBatchQueue();

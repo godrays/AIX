@@ -275,6 +275,7 @@ protected:
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxIndicesSet{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxIndicesToSet{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulStrided[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOMatMulStridedTiled1616[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulTiledBC6464888[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulTiled32x32[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulTiled32x64[aix::DataTypeCount]{nullptr};
@@ -308,7 +309,6 @@ protected:
     size_t   m_currentWorkingSetSize{0};
     MTL::Event*  m_event{nullptr};
     uint64_t     m_eventValue{0};
-    MTL::Buffer* m_sentinelBuffer{nullptr};
 };
 
 }   // namespace

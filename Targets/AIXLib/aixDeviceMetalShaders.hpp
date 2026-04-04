@@ -1000,15 +1000,136 @@ template<typename T>
         return;
     }
 
+    // Fetch layout information ONCE per thread, outside the loop.
+    const constant size_t* stridesA = layoutStrides(layoutA);
+    const constant size_t* stridesB = layoutStrides(layoutB);
+
+    // The amount to advance our pointers per k iteration.
+    size_t strideA_k = stridesA[1];
+    size_t strideB_k = stridesB[0];
+
+    // Calculate starting physical positions for this thread.
+    size_t startA = layoutOffset(layoutA) + gid.y * stridesA[0];
+    size_t startB = layoutOffset(layoutB) + gid.x * stridesB[1];
+
+    const device T* ptrA = inA + startA;
+    const device T* ptrB = inB + startB;
+
     T sum = 0;
-    for (size_t k = 0; k < matASize.cols; ++k)
+    size_t K = matASize.cols;
+    size_t k = 0;
+
+    // Manually unroll the loop for better Instruction Level Parallelism (ILP).
+    for (; k + 4 <= K; k += 4)
     {
-        sum += inA[physicalIndex2D(gid.y, k, layoutA)] * inB[physicalIndex2D(k, gid.x, layoutB)];
+        sum += ptrA[0] * ptrB[0];
+        ptrA += strideA_k; ptrB += strideB_k;
+
+        sum += ptrA[0] * ptrB[0];
+        ptrA += strideA_k; ptrB += strideB_k;
+
+        sum += ptrA[0] * ptrB[0];
+        ptrA += strideA_k; ptrB += strideB_k;
+
+        sum += ptrA[0] * ptrB[0];
+        ptrA += strideA_k; ptrB += strideB_k;
+    }
+
+    // Handle remaining elements.
+    for (; k < K; ++k)
+    {
+        sum += ptrA[0] * ptrB[0];
+        ptrA += strideA_k; ptrB += strideB_k;
     }
 
     result[gid.y * matBSize.cols + gid.x] = sum;
 }
 
+template<typename T, uint N>
+[[kernel]] void matrixMulStridedTiled(const device T* inA,
+                                      const device T* inB,
+                                      device T* result,
+                                      constant MatrixSize& matASize,
+                                      constant MatrixSize& matBSize,
+                                      const constant size_t* layoutA,
+                                      const constant size_t* layoutB,
+                                      uint2 gid [[thread_position_in_grid]],
+                                      uint2 tid [[thread_position_in_threadgroup]])
+{
+    constexpr int TILE_SIZE = N;
+
+    // Fast on chip memory to hold matrix blocks.
+    threadgroup T tileA[TILE_SIZE][TILE_SIZE];
+    threadgroup T tileB[TILE_SIZE][TILE_SIZE];
+
+    size_t rowA = gid.y;
+    size_t colB = gid.x;
+    size_t colA = tid.x;
+    size_t rowB = tid.y;
+
+    const constant size_t* stridesA = layoutStrides(layoutA);
+    const constant size_t* stridesB = layoutStrides(layoutB);
+
+    // Prevent out of bounds pointer calculation (cap at max valid row/col).
+    size_t safeRowA = rowA < matASize.rows ? rowA : 0;
+    size_t safeColB = colB < matBSize.cols ? colB : 0;
+
+    const device T* ptrA = inA + layoutOffset(layoutA) + safeRowA * stridesA[0] + colA * stridesA[1];
+    const device T* ptrB = inB + layoutOffset(layoutB) + rowB * stridesB[0] + safeColB * stridesB[1];
+
+    size_t strideA_tile = TILE_SIZE * stridesA[1];
+    size_t strideB_tile = TILE_SIZE * stridesB[0];
+
+    T sum = 0;
+    size_t numTiles = (matASize.cols + TILE_SIZE - 1) / TILE_SIZE;
+
+    for (size_t t = 0; t < numTiles; ++t)
+    {
+        // Collaboratively load tiles into threadgroup memory.
+        if (rowA < matASize.rows && colA < matASize.cols)
+        {
+            tileA[tid.y][tid.x] = *ptrA;
+        }
+        else
+        {
+            tileA[tid.y][tid.x] = 0;
+        }
+
+        if (rowB < matASize.cols && colB < matBSize.cols)
+        {
+            tileB[tid.y][tid.x] = *ptrB;
+        }
+        else
+        {
+            tileB[tid.y][tid.x] = 0;
+        }
+
+        // Wait for all threads to finish loading the tile.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Compute the math entirely using fast on chip memory.
+        #pragma unroll
+        for (uint k = 0; k < TILE_SIZE; ++k)
+        {
+            sum += tileA[tid.y][k] * tileB[k][tid.x];
+        }
+
+        // Wait for math to finish before overwriting the tile in the next loop.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Advance pointers to the next tile block.
+        ptrA += strideA_tile;
+        ptrB += strideB_tile;
+        colA += TILE_SIZE;
+        rowB += TILE_SIZE;
+    }
+
+    // Finally, write the output safely.
+    if (rowA < matASize.rows && colB < matBSize.cols)
+    {
+        result[rowA * matBSize.cols + colB] = sum;
+    }
+}
 
 // Matrix Mul Tiled
 // -----------------------------------------------------------------
@@ -2223,6 +2344,27 @@ SpecializeMatrixMulStrided("i32",  int);
 SpecializeMatrixMulStrided("i16",  short);
 SpecializeMatrixMulStrided("i8",   char);
 SpecializeMatrixMulStrided("ui8",  uchar);
+
+#define SpecializeMatrixMulStridedTiled(tname, n, type) \
+    template [[ host_name("matrixMulStridedTiled_" #n "_" #n "_" tname) ]] \
+    [[kernel]] void matrixMulStridedTiled<type, n>(const device type* inA, \
+                                                   const device type* inB, \
+                                                   device type* result, \
+                                                   constant MatrixSize& matASize, \
+                                                   constant MatrixSize& matBSize, \
+                                                   const constant size_t* layoutA, \
+                                                   const constant size_t* layoutB, \
+                                                   uint2 gid [[thread_position_in_grid]], \
+                                                   uint2 tid [[thread_position_in_threadgroup]])
+
+SpecializeMatrixMulStridedTiled("f32",  16, float);
+SpecializeMatrixMulStridedTiled("f16",  16, half);
+SpecializeMatrixMulStridedTiled("bf16", 16, bfloat);
+SpecializeMatrixMulStridedTiled("i64",  16, long);
+SpecializeMatrixMulStridedTiled("i32",  16, int);
+SpecializeMatrixMulStridedTiled("i16",  16, short);
+SpecializeMatrixMulStridedTiled("i8",   16, char);
+SpecializeMatrixMulStridedTiled("ui8",  16, uchar);
 
 #define SpecializeMatrixMulTiledBC(tname, bm, bn, bk, tm, tn, type)  \
     template [[ host_name("matrixMulTiledBC_" #bm "_" #bn "_" #bk "_" #tm "_" #tn "_" tname) ]]  \
