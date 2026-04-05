@@ -2124,6 +2124,11 @@ public:
             // ∂f/∂a = b * pow(a, b-1)
             node->m_inputs[0]->backward(seed * node->m_inputs[1]->m_value * node->m_inputs[0]->m_value.pow(node->m_inputs[1]->m_value - float(1)));
         }
+        if (node->m_inputs[1]->m_requireGrad || node->m_inputs[1]->m_retainGrad)
+        {
+            // ∂f/∂b = pow(a, b) * log(a)
+            node->m_inputs[1]->backward(seed * node->m_value * node->m_inputs[0]->m_value.log());
+        }
     }
 
     static void matmulBackwardFunc(TensorNode * node, const TensorValue & seed)
@@ -2465,7 +2470,7 @@ public:
 
     Tensor pow(float exp) const
     {
-        TensorOptions opt{ .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() };
+        TensorOptions opt{ .m_dtype=dataType(), .m_device=device() };
         Tensor expTensor = Tensor(exp, Shape{}, opt).broadcastTo(shape());
         auto result = makeResult(m_data->m_value.pow(expTensor.m_data->m_value), isRequireGrad());
         result.m_data->setBackward({ m_data, expTensor.m_data }, powBackwardFunc);
@@ -2479,7 +2484,7 @@ public:
         auto lhs = broadcastTo(bcShape).to(promotedDType);
         auto rhs = other.broadcastTo(bcShape).to(promotedDType);
 
-        auto result = makeResult(lhs.m_data->m_value.pow(rhs.m_data->m_value), isRequireGrad());
+        auto result = makeResult(lhs.m_data->m_value.pow(rhs.m_data->m_value), isRequireGrad() || other.isRequireGrad());
         result.m_data->setBackward({ lhs.m_data, rhs.m_data }, powBackwardFunc);
         return result;
     }

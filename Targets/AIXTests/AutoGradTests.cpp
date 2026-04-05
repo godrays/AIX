@@ -269,6 +269,38 @@ TEST_CASE("Auto Grad - pow Test - 2x2")
 }
 
 
+TEST_CASE("Auto Grad - pow propagates exponent gradient")
+{
+    aix::Shape shape{2,2};
+
+    auto x = aix::tensor({1.0, 2.0, 3.0, 4.0}, shape, { .m_requireGrad=true });
+    auto exp = aix::tensor({1.0, 2.0, 3.0, 4.0}, shape, { .m_requireGrad=true });
+    auto loss = pow(x, exp).sum();
+    loss.backward();
+
+    CHECK(x.grad().shape() == shape);
+    CHECK(exp.grad().shape() == shape);
+    CheckVectorApproxValues(x.grad(), tensor({1.0, 4.0, 27.0, 256.0}, shape).value());
+    CheckVectorApproxValues(exp.grad(), tensor({0.0, 2.7725887, 29.6625318, 354.8913564}, shape).value());
+}
+
+
+TEST_CASE("Auto Grad - pow tracks exponent-only gradients")
+{
+    aix::Shape shape{2,2};
+
+    auto x = aix::tensor({1.0, 2.0, 3.0, 4.0}, shape);
+    auto exp = aix::tensor({1.0, 2.0, 3.0, 4.0}, shape, { .m_requireGrad=true });
+    auto z = pow(x, exp);
+    auto loss = z.sum();
+    loss.backward();
+
+    CHECK(z.isRequireGrad());
+    CHECK(exp.grad().shape() == shape);
+    CheckVectorApproxValues(exp.grad(), tensor({0.0, 2.7725887, 29.6625318, 354.8913564}, shape).value());
+}
+
+
 TEST_CASE("Auto Grad - sum Test - 2x2")
 {
     aix::Shape shape{2,2};
