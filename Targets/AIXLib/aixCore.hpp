@@ -2237,15 +2237,15 @@ public:
 
         // The dimension along which tensors were concatenated.
         auto dim = static_cast<ssize_t>(node->m_dim0);
-
-        // Get the shape of the original tensors.
-        size_t dimSize = node->m_inputs[0]->m_value.shape()[dim];
+        size_t dimOffset = 0;
 
         // Iterate over each original tensor and propagate the gradient.
         for (size_t i=0; i<numTensors; ++i)
         {
+            size_t dimSize = node->m_inputs[i]->m_value.shape()[dim];
             if (node->m_inputs[i]->m_requireGrad || node->m_inputs[i]->m_retainGrad)
-                node->m_inputs[i]->backward(seed.slice(dim, i * dimSize, (i + 1) * dimSize, 1));
+                node->m_inputs[i]->backward(seed.slice(dim, dimOffset, dimOffset + dimSize, 1));
+            dimOffset += dimSize;
         }
     }
 

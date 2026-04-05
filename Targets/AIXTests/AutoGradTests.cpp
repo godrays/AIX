@@ -2422,6 +2422,26 @@ TEST_CASE("Auto Grad - Cat")
                                                            7.0, 8.0 }, t422.grad().shape()).value());
     }
 
+    SUBCASE("Shape{1,2} + Shape{2,2} - dim=0 - variable sizes")
+    {
+        auto t12 = aix::tensor({1.0, 2.0}, Shape{1,2}).requireGrad(true);
+        auto t22 = aix::tensor({3.0, 4.0,
+                                5.0, 6.0}, Shape{2,2}).requireGrad(true);
+        auto t32 = aix::tensor({10.0, 20.0,
+                                30.0, 40.0,
+                                50.0, 60.0}, Shape{3,2}).requireGrad(true);
+
+        auto t = aix::cat({t12, t22}, 0) * t32;
+        t.backward(1, t.shape());
+
+        CheckVectorApproxValues(t12.grad(), aix::tensor({10.0, 20.0}, t12.grad().shape()).value());
+        CheckVectorApproxValues(t22.grad(), aix::tensor({30.0, 40.0,
+                                                         50.0, 60.0}, t22.grad().shape()).value());
+        CheckVectorApproxValues(t32.grad(), aix::tensor({1.0, 2.0,
+                                                         3.0, 4.0,
+                                                         5.0, 6.0}, t32.grad().shape()).value());
+    }
+
 }
 
 
