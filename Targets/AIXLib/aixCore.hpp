@@ -420,7 +420,7 @@ public:
     TensorValue to(Device * device) const
     {
         if (m_device == device) return shallowCopy();
-        auto materialized = isContiguous() && m_offset == 0 ? *this : contiguous();
+        auto materialized = isContiguous() && m_offset == 0 ? shallowCopy() : contiguous();
         return {materialized.data(), materialized.size(), materialized.dataType(), materialized.shape(), device, materialized.dataType()};
     }
     inline TensorValue to(std::unique_ptr<Device>& device) const    { return to(device.get()); }
@@ -469,7 +469,7 @@ public:
     {
         if (dataType() != newDataType)
         {
-            auto materialized = isContiguous() && m_offset == 0 ? *this : contiguous();
+            auto materialized = isContiguous() && m_offset == 0 ? shallowCopy() : contiguous();
             return {materialized.data(), materialized.size(), materialized.dataType(), materialized.shape(), device(), newDataType};
         }
         return shallowCopy();
@@ -787,8 +787,8 @@ public:
     {
         if (shape() != exp.shape() || dataType() != exp.dataType())
         {
-            TensorValue lhs = *this;
-            TensorValue rhs = exp;
+            TensorValue lhs = shallowCopy();
+            TensorValue rhs = exp.shallowCopy();
             auto result = prepareTensors(lhs, rhs);
             result.device()->pow(lhs.deviceParams(), rhs.deviceParams(), result.deviceParams());
             return result;
@@ -897,8 +897,8 @@ public:
         // Convert tensors to the promoted data type if necessary.
         if (dataType() != b.dataType())
         {
-            TensorValue lhs = *this;
-            TensorValue rhs = b;
+            TensorValue lhs = shallowCopy();
+            TensorValue rhs = b.shallowCopy();
             auto promotedDType = promoteDataType(lhs.dataType(), rhs.dataType());
             lhs = lhs.to(promotedDType);
             rhs = rhs.to(promotedDType);
@@ -1369,10 +1369,10 @@ private:
     {
         if (shape() != other.shape() || dataType() != other.dataType())
         {
-            TensorValue rhs = (dataType() != other.dataType()) ? other.to(m_dType) : TensorValue(other);
+            TensorValue rhs = (dataType() != other.dataType()) ? other.to(m_dType) : other.shallowCopy();
             if (shape() != rhs.shape())
             {
-                TensorValue lhs = *this;
+                TensorValue lhs = shallowCopy();
                 auto bcShape = broadcastShapes(lhs.shape(), rhs.shape());
                 lhs = lhs.broadcastTo(bcShape);
                 rhs = rhs.broadcastTo(bcShape);
