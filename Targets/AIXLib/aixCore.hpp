@@ -2209,15 +2209,13 @@ public:
     static void trillBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.empty()) return;
-        auto onesLikeSeed = TensorValue(1.0, seed.shape(), seed.device(), seed.dataType());
-        node->m_inputs[0]->backward(seed * onesLikeSeed.tril(static_cast<ssize_t>(node->m_dim0)));      // m_dim0 = diagonal
+        node->m_inputs[0]->backward(seed.tril(static_cast<ssize_t>(node->m_dim0)));      // m_dim0 = diagonal
     }
 
     static void triuBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.empty()) return;
-        auto onesLikeSeed = TensorValue(1.0, seed.shape(), seed.device(), seed.dataType());
-        node->m_inputs[0]->backward(seed * onesLikeSeed.triu(static_cast<ssize_t>(node->m_dim0)));      // m_dim0 = diagonal
+        node->m_inputs[0]->backward(seed.triu(static_cast<ssize_t>(node->m_dim0)));      // m_dim0 = diagonal
     }
 
     static void indexSelectBackwardFunc(TensorNode * node, const TensorValue& seed)
