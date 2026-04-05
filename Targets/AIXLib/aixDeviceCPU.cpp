@@ -564,47 +564,59 @@ static void indexAddGeneric(const DeviceTensorParams& src, const DeviceTensorPar
 }
 
 template <typename T>
-static void trilGeneric(const DeviceTensorParams& dst, ssize_t diagonal)
+static void trilGeneric(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal)
 {
+    auto tSrc = static_cast<const T*>(src.data);
     auto tDst = static_cast<T*>(dst.data);
 
-    size_t shapeSize = dst.shape.size();
-    size_t rows = dst.shape[shapeSize - 2];      // Rows in the last 2-dim tensor.
-    size_t cols = dst.shape[shapeSize - 1];      // Columns in the last 2-dim tensor.
+    size_t shapeSize = src.shape.size();
+    size_t rows = src.shape[shapeSize - 2];      // Rows in the last 2-dim tensor.
+    size_t cols = src.shape[shapeSize - 1];      // Columns in the last 2-dim tensor.
 
     for (size_t i = 0; i < dst.size; ++i)
     {
         // Calculate the row and column indices for the last 2-dim slice.
-        size_t row = (i / dst.strides[shapeSize - 2]) % rows;
-        size_t col = (i / dst.strides[shapeSize - 1]) % cols;
+        size_t row = (i / cols) % rows;
+        size_t col = i % cols;
+        size_t dstOffset = physicalIndex(i, dst.offset, dst.shape, dst.strides);
 
         // Zero out the elements above the specified diagonal.
         if (static_cast<ssize_t>(col) > static_cast<ssize_t>(row) + diagonal)
         {
-            tDst[i] = 0;
+            tDst[dstOffset] = 0;
+        }
+        else
+        {
+            tDst[dstOffset] = tSrc[physicalIndex(i, src.offset, src.shape, src.strides)];
         }
     }
 }
 
 template <typename T>
-static void triuGeneric(const DeviceTensorParams& dst, ssize_t diagonal)
+static void triuGeneric(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal)
 {
+    auto tSrc = static_cast<const T*>(src.data);
     auto tDst = static_cast<T*>(dst.data);
 
-    size_t shapeSize = dst.shape.size();
-    size_t rows = dst.shape[shapeSize - 2];      // Rows in the last 2-dim tensor.
-    size_t cols = dst.shape[shapeSize - 1];      // Columns in the last 2-dim tensor.
+    size_t shapeSize = src.shape.size();
+    size_t rows = src.shape[shapeSize - 2];      // Rows in the last 2-dim tensor.
+    size_t cols = src.shape[shapeSize - 1];      // Columns in the last 2-dim tensor.
 
     for (size_t i = 0; i < dst.size; ++i)
     {
         // Calculate the row and column indices for the last 2-dim slice.
-        size_t row = (i / dst.strides[shapeSize - 2]) % rows;
-        size_t col = (i / dst.strides[shapeSize - 1]) % cols;
+        size_t row = (i / cols) % rows;
+        size_t col = i % cols;
+        size_t dstOffset = physicalIndex(i, dst.offset, dst.shape, dst.strides);
 
         // Zero out the elements above the specified diagonal.
         if (static_cast<ssize_t>(col) < static_cast<ssize_t>(row) + diagonal)
         {
-            tDst[i] = 0;
+            tDst[dstOffset] = 0;
+        }
+        else
+        {
+            tDst[dstOffset] = tSrc[physicalIndex(i, src.offset, src.shape, src.strides)];
         }
     }
 }
@@ -1239,7 +1251,7 @@ void DeviceCPU::sliceSet(const DeviceTensorParams& src, const DeviceTensorParams
     funcTable[static_cast<size_t>(src.dtype)](src, dst, dim, start, end, step);
 }
 
-void DeviceCPU::tril(const DeviceTensorParams& dst, ssize_t diagonal)
+void DeviceCPU::tril(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal)
 {
     static const auto funcTable = std::array
     {
@@ -1254,10 +1266,10 @@ void DeviceCPU::tril(const DeviceTensorParams& dst, ssize_t diagonal)
         trilGeneric<uint8_t   >,
     };
     // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(dst.dtype)](dst, diagonal);
+    funcTable[static_cast<size_t>(src.dtype)](src, dst, diagonal);
 }
 
-void DeviceCPU::triu(const DeviceTensorParams& dst, ssize_t diagonal)
+void DeviceCPU::triu(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal)
 {
     static const auto funcTable = std::array
     {
@@ -1272,7 +1284,7 @@ void DeviceCPU::triu(const DeviceTensorParams& dst, ssize_t diagonal)
         triuGeneric<uint8_t   >,
     };
     // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(dst.dtype)](dst, diagonal);
+    funcTable[static_cast<size_t>(src.dtype)](src, dst, diagonal);
 }
 
 void DeviceCPU::indexSelect(const DeviceTensorParams& src, const DeviceTensorParams& dst,

@@ -72,8 +72,8 @@ public:
     virtual void argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim) = 0;
     virtual void sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,
                           size_t dim, size_t start, size_t end, size_t step) = 0;
-    virtual void tril(const DeviceTensorParams& dst, ssize_t diagonal) = 0;
-    virtual void triu(const DeviceTensorParams& dst, ssize_t diagonal) = 0;
+    virtual void tril(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal) = 0;
+    virtual void triu(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal) = 0;
     virtual void indexSelect(const DeviceTensorParams& src, const DeviceTensorParams& dst,
                              const DeviceTensorParams& indices, size_t dim) = 0;
     virtual void indexAdd(const DeviceTensorParams& src, const DeviceTensorParams& dst,

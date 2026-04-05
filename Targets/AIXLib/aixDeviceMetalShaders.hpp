@@ -1721,29 +1721,32 @@ template<typename T, typename T2>
 // Tril - Naive Implementation
 // -----------------------------------------------------------------
 template<typename T, typename T2, typename T3>
-[[kernel]] void tril(device T* dst             [[buffer(1)]],
-                     const device T2* shape    [[buffer(2)]],
-                     const device T2* strides  [[buffer(3)]],
-                     constant T2& shapeSize    [[buffer(4)]],
-                     constant T2& stridesSize  [[buffer(5)]],
-                     constant T3& diagonal     [[buffer(6)]],
-                     constant T2& size         [[buffer(7)]],
+[[kernel]] void tril(const device T* src             [[buffer(0)]],
+                     device T* dst                   [[buffer(1)]],
+                     const constant T2* srcLayout   [[buffer(2)]],
+                     const constant T2* dstLayout   [[buffer(3)]],
+                     constant T3& diagonal          [[buffer(4)]],
+                     constant T2& size              [[buffer(5)]],
                      uint index [[thread_position_in_grid]])
 {
+    if (index >= size) return;
+
+    size_t shapeSize = layoutRank(dstLayout);
+    const constant T2* shape = layoutShape(dstLayout);
     size_t rows = shape[shapeSize - 2];      // Rows in the last 2-dim tensor.
     size_t cols = shape[shapeSize - 1];      // Columns in the last 2-dim tensor.
+    size_t row = (index / cols) % rows;
+    size_t col = index % cols;
+    size_t dstIndex = physicalIndex(index, dstLayout);
 
-    for (size_t i = 0; i < size; ++i)
+    // Zero out the elements above the specified diagonal.
+    if (static_cast<int64_t>(col) > static_cast<int64_t>(row) + diagonal)
     {
-        // Calculate the row and column indices for the last 2-dim slice.
-        size_t row = (i / strides[shapeSize - 2]) % rows;
-        size_t col = (i / strides[shapeSize - 1]) % cols;
-
-        // Zero out the elements above the specified diagonal.
-        if (static_cast<int64_t>(col) > static_cast<int64_t>(row) + diagonal)
-        {
-            dst[i] = 0;
-        }
+        dst[dstIndex] = 0;
+    }
+    else
+    {
+        dst[dstIndex] = src[physicalIndex(index, srcLayout)];
     }
 }
 
@@ -1751,29 +1754,32 @@ template<typename T, typename T2, typename T3>
 // Triu - Naive Implementation
 // -----------------------------------------------------------------
 template<typename T, typename T2, typename T3>
-[[kernel]] void triu(device T* dst             [[buffer(1)]],
-                     const device T2* shape    [[buffer(2)]],
-                     const device T2* strides  [[buffer(3)]],
-                     constant T2& shapeSize    [[buffer(4)]],
-                     constant T2& stridesSize  [[buffer(5)]],
-                     constant T3& diagonal     [[buffer(6)]],
-                     constant T2& size         [[buffer(7)]],
+[[kernel]] void triu(const device T* src             [[buffer(0)]],
+                     device T* dst                   [[buffer(1)]],
+                     const constant T2* srcLayout   [[buffer(2)]],
+                     const constant T2* dstLayout   [[buffer(3)]],
+                     constant T3& diagonal          [[buffer(4)]],
+                     constant T2& size              [[buffer(5)]],
                      uint index [[thread_position_in_grid]])
 {
+    if (index >= size) return;
+
+    size_t shapeSize = layoutRank(dstLayout);
+    const constant T2* shape = layoutShape(dstLayout);
     size_t rows = shape[shapeSize - 2];      // Rows in the last 2-dim tensor.
     size_t cols = shape[shapeSize - 1];      // Columns in the last 2-dim tensor.
+    size_t row = (index / cols) % rows;
+    size_t col = index % cols;
+    size_t dstIndex = physicalIndex(index, dstLayout);
 
-    for (size_t i = 0; i < size; ++i)
+    // Zero out the elements below the specified diagonal.
+    if (static_cast<int64_t>(col) < static_cast<int64_t>(row) + diagonal)
     {
-        // Calculate the row and column indices for the last 2-dim slice.
-        size_t row = (i / strides[shapeSize - 2]) % rows;
-        size_t col = (i / strides[shapeSize - 1]) % cols;
-
-        // Zero out the elements above the specified diagonal.
-        if (static_cast<int64_t>(col) < static_cast<int64_t>(row) + diagonal)
-        {
-            dst[i] = 0;
-        }
+        dst[dstIndex] = 0;
+    }
+    else
+    {
+        dst[dstIndex] = src[physicalIndex(index, srcLayout)];
     }
 }
 
@@ -2706,13 +2712,12 @@ SpecializeSliceSet("ui8",  uchar , size_t);
 // -----------------------------------------------------------------
 #define SpecializeTril(tname, type1, type2, type3)  \
     template [[ host_name("tril_" tname) ]]  \
-    [[kernel]] void tril(device type1* dst            [[buffer(1)]], \
-                         const device type2* shape    [[buffer(2)]], \
-                         const device type2* strides  [[buffer(3)]], \
-                         constant type2& shapeSize    [[buffer(4)]], \
-                         constant type2& stridesSize  [[buffer(5)]], \
-                         constant type3& diagonal     [[buffer(6)]], \
-                         constant type2& size         [[buffer(7)]], \
+    [[kernel]] void tril(const device type1* src           [[buffer(0)]], \
+                         device type1* dst                 [[buffer(1)]], \
+                         const constant type2* srcLayout  [[buffer(2)]], \
+                         const constant type2* dstLayout  [[buffer(3)]], \
+                         constant type3& diagonal         [[buffer(4)]], \
+                         constant type2& size             [[buffer(5)]], \
                          uint index [[thread_position_in_grid]])
 
 SpecializeTril("f32",  float , size_t, int64_t);
@@ -2729,13 +2734,12 @@ SpecializeTril("ui8",  uchar , size_t, int64_t);
 // -----------------------------------------------------------------
 #define SpecializeTriu(tname, type1, type2, type3)  \
     template [[ host_name("triu_" tname) ]]  \
-    [[kernel]] void triu(device type1* dst            [[buffer(1)]], \
-                         const device type2* shape    [[buffer(2)]], \
-                         const device type2* strides  [[buffer(3)]], \
-                         constant type2& shapeSize    [[buffer(4)]], \
-                         constant type2& stridesSize  [[buffer(5)]], \
-                         constant type3& diagonal     [[buffer(6)]], \
-                         constant type2& size         [[buffer(7)]], \
+    [[kernel]] void triu(const device type1* src           [[buffer(0)]], \
+                         device type1* dst                 [[buffer(1)]], \
+                         const constant type2* srcLayout  [[buffer(2)]], \
+                         const constant type2* dstLayout  [[buffer(3)]], \
+                         constant type3& diagonal         [[buffer(4)]], \
+                         constant type2& size             [[buffer(5)]], \
                          uint index [[thread_position_in_grid]])
 
 SpecializeTriu("f32",  float , size_t, int64_t);

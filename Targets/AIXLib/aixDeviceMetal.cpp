@@ -948,35 +948,34 @@ void DeviceMetal::sliceSet(const DeviceTensorParams& src, const DeviceTensorPara
     commitBatchQueue();
 }
 
-void DeviceMetal::tril(const DeviceTensorParams& dst, ssize_t diagonal)
+void DeviceMetal::tril(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal)
 {
-    recordExternalRead(dst);
+    recordExternalRead(src);
     flushPendingFusedWork();
-    assert(dst.isContiguous == true);
+    validateDataType(src.dtype);
     validateDataType(dst.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
     if (!isDeviceBuffer(dst.data))
         throw std::invalid_argument("DeviceMetal::tril() result must have GPU memory.");
+    if (src.dtype != dst.dtype)
+        throw std::invalid_argument("DeviceMetal::tril() source and result data types must match.");
 
-    size_t shapeSize   = dst.shape.size();
-    size_t stridesSize = dst.strides.size();
-    assert(dst.size > 0);
+    assert(src.size == dst.size);
+    assert(src.shape == dst.shape);
+    assert(src.size > 0);
 
-    // NOTE: For a scalar tensor shape size could be zero.
-    auto bufShape   = shapeSize    != 0 ? getReadOnlyMTLBuffer(dst.shape.data(),    shapeSize,    sizeof(size_t)) : nullptr;
-    auto bufStrides = stridesSize  != 0 ? getReadOnlyMTLBuffer(dst.strides.data(),  stridesSize,  sizeof(size_t)) : nullptr;
+    auto bufSrc     = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
     auto bufDst     = m_allocMap[dst.data];
-    auto compFuncPSO = m_compFuncPSOTril[static_cast<size_t>(dst.dtype)];
+    auto compFuncPSO = m_compFuncPSOTril[static_cast<size_t>(src.dtype)];
 
     // Serialize resources and states to be used by the GPU.
     m_compEncoder->setComputePipelineState(compFuncPSO);
+    m_compEncoder->setBuffer(bufSrc,     0, 0);
     m_compEncoder->setBuffer(bufDst,     0, 1);
-    m_compEncoder->setBuffer(bufShape,   0, 2);
-    m_compEncoder->setBuffer(bufStrides, 0, 3);
-    m_compEncoder->setBytes(&shapeSize,    sizeof(shapeSize),    4);
-    m_compEncoder->setBytes(&stridesSize,  sizeof(stridesSize),  5);
-    m_compEncoder->setBytes(&diagonal,     sizeof(diagonal),     6);
-    m_compEncoder->setBytes(&dst.size,     sizeof(dst.size),     7);
+    auto boundSrcLayout = bindTensorLayout(src, {.bufferIndex=2});
+    auto boundDstLayout = bindTensorLayout(dst, {.bufferIndex=3});
+    m_compEncoder->setBytes(&diagonal,     sizeof(diagonal),     4);
+    m_compEncoder->setBytes(&dst.size,     sizeof(dst.size),     5);
 
     // Calculate maximum thread group dimensions
     NS::UInteger w = std::min(dst.size, compFuncPSO->maxTotalThreadsPerThreadgroup());
@@ -985,40 +984,40 @@ void DeviceMetal::tril(const DeviceTensorParams& dst, ssize_t diagonal)
     m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});
 
     // Free operation is delayed until the commit is done.
-    freeTemporaryBuffer(bufShape);
-    freeTemporaryBuffer(bufStrides);
+    freeTemporaryBuffer(bufSrc);
+    releaseTensorLayout(boundSrcLayout);
+    releaseTensorLayout(boundDstLayout);
     commitBatchQueue();
 }
 
-void DeviceMetal::triu(const DeviceTensorParams& dst, ssize_t diagonal)
+void DeviceMetal::triu(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal)
 {
-    recordExternalRead(dst);
+    recordExternalRead(src);
     flushPendingFusedWork();
-    assert(dst.isContiguous == true);
+    validateDataType(src.dtype);
     validateDataType(dst.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
     if (!isDeviceBuffer(dst.data))
         throw std::invalid_argument("DeviceMetal::triu() result must have GPU memory.");
+    if (src.dtype != dst.dtype)
+        throw std::invalid_argument("DeviceMetal::triu() source and result data types must match.");
 
-    size_t shapeSize   = dst.shape.size();
-    size_t stridesSize = dst.strides.size();
-    assert(dst.size > 0);
+    assert(src.size == dst.size);
+    assert(src.shape == dst.shape);
+    assert(src.size > 0);
 
-    // NOTE: For a scalar tensor shape size could be zero.
-    auto bufShape   = shapeSize    != 0 ? getReadOnlyMTLBuffer(dst.shape.data(),    shapeSize,    sizeof(size_t)) : nullptr;
-    auto bufStrides = stridesSize  != 0 ? getReadOnlyMTLBuffer(dst.strides.data(),  stridesSize,  sizeof(size_t)) : nullptr;
+    auto bufSrc     = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
     auto bufDst     = m_allocMap[dst.data];
-    auto compFuncPSO = m_compFuncPSOTriu[static_cast<size_t>(dst.dtype)];
+    auto compFuncPSO = m_compFuncPSOTriu[static_cast<size_t>(src.dtype)];
 
     // Serialize resources and states to be used by the GPU.
     m_compEncoder->setComputePipelineState(compFuncPSO);
+    m_compEncoder->setBuffer(bufSrc,     0, 0);
     m_compEncoder->setBuffer(bufDst,     0, 1);
-    m_compEncoder->setBuffer(bufShape,   0, 2);
-    m_compEncoder->setBuffer(bufStrides, 0, 3);
-    m_compEncoder->setBytes(&shapeSize,    sizeof(shapeSize),    4);
-    m_compEncoder->setBytes(&stridesSize,  sizeof(stridesSize),  5);
-    m_compEncoder->setBytes(&diagonal,     sizeof(diagonal),     6);
-    m_compEncoder->setBytes(&dst.size,     sizeof(dst.size),     7);
+    auto boundSrcLayout = bindTensorLayout(src, {.bufferIndex=2});
+    auto boundDstLayout = bindTensorLayout(dst, {.bufferIndex=3});
+    m_compEncoder->setBytes(&diagonal,     sizeof(diagonal),     4);
+    m_compEncoder->setBytes(&dst.size,     sizeof(dst.size),     5);
 
     // Calculate maximum thread group dimensions
     NS::UInteger w = std::min(dst.size, compFuncPSO->maxTotalThreadsPerThreadgroup());
@@ -1027,8 +1026,9 @@ void DeviceMetal::triu(const DeviceTensorParams& dst, ssize_t diagonal)
     m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});
 
     // Free operation is delayed until the commit is done.
-    freeTemporaryBuffer(bufShape);
-    freeTemporaryBuffer(bufStrides);
+    freeTemporaryBuffer(bufSrc);
+    releaseTensorLayout(boundSrcLayout);
+    releaseTensorLayout(boundDstLayout);
     commitBatchQueue();
 }
 

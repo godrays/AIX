@@ -133,9 +133,9 @@ public:
     void sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,
                   size_t dim, size_t start, size_t end, size_t step) override;
 
-    void tril(const DeviceTensorParams& dst, ssize_t diagonal) override;
+    void tril(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal) override;
 
-    void triu(const DeviceTensorParams& dst, ssize_t diagonal) override;
+    void triu(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal) override;
 
     void indexSelect(const DeviceTensorParams& src, const DeviceTensorParams& dst, const DeviceTensorParams& indices,
                      size_t dim) override;

@@ -1266,8 +1266,8 @@ public:
             throw std::invalid_argument("Tensor must have at least two dimensions for tril operation.");
         }
 
-        TensorValue result = *this;
-        device()->tril(result.deviceParams(), diagonal);
+        TensorValue result(m_shape, m_device, m_dType);
+        device()->tril(deviceParams(), result.deviceParams(), diagonal);
         return result;
     }
 
@@ -1278,8 +1278,8 @@ public:
             throw std::invalid_argument("Tensor must have at least two dimensions for triu operation.");
         }
 
-        TensorValue result = *this;
-        device()->triu(result.deviceParams(), diagonal);
+        TensorValue result(m_shape, m_device, m_dType);
+        device()->triu(deviceParams(), result.deviceParams(), diagonal);
         return result;
     }
 
