@@ -1854,28 +1854,21 @@ public:
     }
 
     // Perform backpropagation to calculate gradients recursively.
-    void backward(float value=1)
+    void backward()
     {
-        if (m_data->m_inputs.empty())
-        {
-            if (m_data->m_requireGrad) m_data->grad() += TensorValue{value, shape(), device(), dataType()};
-            return;
-        }
+        validateImplicitBackwardSeed();
         if (shape().empty())
         {
-            m_data->backward(TensorValue{value, device(), dataType()});
+            m_data->backward(TensorValue{1, device(), dataType()});
             return;
         }
-        m_data->backward(TensorValue{value, m_data->m_inputs[0]->m_value.shape(), device(), dataType()});
+        m_data->backward(TensorValue{1, shape(), device(), dataType()});
     }
-    void backward(float value, const Shape & gradShape)
+
+    void backward(const Tensor & grad)
     {
-        if (m_data->m_inputs.empty())
-        {
-            if (m_data->m_requireGrad) m_data->grad() += TensorValue{value, gradShape, device(), dataType()};
-            return;
-        }
-        m_data->backward(TensorValue{value, gradShape, device(), dataType()});
+        validateExplicitBackwardSeed(grad);
+        m_data->backward(grad.value());
     }
 
     // Getters and setters for the tensor's value.
@@ -2728,6 +2721,34 @@ protected:
             throw std::runtime_error("Gradients for non-leaf tensors won’t be populated during automatic gradient"
                                      " calculation. Use .retainGrad() on the non-leaf tensor if needed, or access"
                                      " the leaf tensor instead.");
+        }
+    }
+
+    inline void validateImplicitBackwardSeed() const
+    {
+        if (value().size() != 1)
+        {
+            throw std::invalid_argument("backward() requires a scalar or one-element tensor. Use backward(const Tensor&) for non-scalar outputs.");
+        }
+    }
+
+    inline void validateExplicitBackwardSeed(const Tensor & grad) const
+    {
+        if (!grad.m_data)
+        {
+            throw std::invalid_argument("backward(const Tensor&) requires a valid gradient tensor.");
+        }
+        if (shape() != grad.shape())
+        {
+            throw std::invalid_argument("backward(const Tensor&) requires a gradient tensor with the same shape as the output.");
+        }
+        if (dataType() != grad.dataType())
+        {
+            throw std::invalid_argument("backward(const Tensor&) requires a gradient tensor with the same data type as the output.");
+        }
+        if (device() != grad.device())
+        {
+            throw std::invalid_argument("backward(const Tensor&) requires a gradient tensor on the same device as the output.");
         }
     }
 

@@ -3024,7 +3024,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x + y;
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({1608.0,2010.0,2412.0,2814.0,3216.0,3618.0},  shape));
@@ -3050,7 +3050,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z - x - y;
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({-1606.0,-2006.0,-2406.0,-2806.0,-3206.0,-3606.0},  shape));
@@ -3076,7 +3076,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x * y;
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({1407.0,3216.0,5427.0,8040.0,11055.0,14472.0}, shape));
@@ -3102,7 +3102,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x / y;
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({28.7143,50.25,66.9999,80.4002,91.3635,100.5}, shape));
@@ -3128,7 +3128,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.sum() + y.sum();
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor(15678));
@@ -3154,7 +3154,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.mean() + y.mean();
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor(2613));
@@ -3180,7 +3180,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.sqrt() + y.sqrt();
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({732.7961,852.7692,951.1430,1037.6198,1116.0948,1188.6305}, shape));
@@ -3206,7 +3206,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.sin() + y.sin();
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({301.1897,381.6301,111.2009,-261.4660,-393.7420,-164.0143}, shape));
@@ -3232,7 +3232,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.cos() + y.cos();
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({260.1352,-112.8908,-382.1257,-300.0356,57.9055,362.6089}, shape));
@@ -3258,7 +3258,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.log() + y.log();
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({391.1286,557.2905,662.4633,741.4656,805.4725,859.6092}, shape));
@@ -3284,7 +3284,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.exp() + y.exp();
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({220970.0,600657.0,1.63276e+06,4.43829e+06,1.20645e+07,3.27948e+07}, shape));
@@ -3311,7 +3311,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.pow(exp) + y.pow(exp);
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({10050.0,13668.0,18090.0,23316.0,29346.0,36180.0}, shape));
@@ -3337,7 +3337,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.tanh() + y.tanh();
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({354.0808,394.7695,401.0063,401.8651,401.9816,401.9982}, shape));
@@ -3364,7 +3364,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x.matmul(y) + y.matmul(x);
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({8442.0,11256.0,14874.0,19296.0}, matShape));
@@ -3390,7 +3390,7 @@ TEST_CASE("DeviceCPU Tests - batch compute")
             {
                 z = z + x + y*y / x.sum() - (x * y).sin()- y / y.exp() + (x-y) * x * x.sin() / y.tanh() + (y * y) / (x*x).mean();
             }
-            z.backward();
+            z.backward(aix::onesLike(z));
             device->synchronize();
 
             CheckVectorApproxValues(z, aix::tensor({178.2879,-264.8438,1748.9033,6566.8809,9716.0850,6445.9224}, shape));

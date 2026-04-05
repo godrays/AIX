@@ -43,7 +43,7 @@ TEST_CASE("Loss Func - BinaryCrossEntropy - 2x2")
     auto bceLoss = aix::nn::BinaryCrossEntropyLoss();
     auto loss    = bceLoss(pred, target);
 
-    loss.backward(1, shape);   // grad [1,1,1,1] shape 2x2
+    loss.backward();
 
     CHECK(loss.dataType() == DataType::kFloat32);
     CHECK(loss.value().item<float>() == doctest::Approx(0.648247));

@@ -98,7 +98,7 @@ TEST_CASE("Auto Grad - Module Test - 1x2 Tensor")
     auto m = tm.forward({});
 
     // Traverse the graph (starting from the end) to calculate all tensor gradients.
-    m.backward();   // ∂m/∂m = [1, 1]  1x2 tensor
+    m.backward(onesLike(m));   // ∂m/∂m = [1, 1]  1x2 tensor
 
     // Check shapes
     CHECK(tm.m_x.grad().shape()  == shape);
@@ -132,7 +132,7 @@ TEST_CASE("Auto Grad - Module Test - 2x3 Tensor")
     auto m = tm.forward({});
 
     // Traverse the graph (starting from the end) to calculate all tensor gradients.
-    m.backward();   // ∂m/∂m = [1,1,1,1,1,1]  2x3 tensor
+    m.backward(onesLike(m));   // ∂m/∂m = [1,1,1,1,1,1]  2x3 tensor
 
     // Check shapes
     CHECK(tm.m_x.grad().shape()  == shape);
@@ -167,7 +167,7 @@ TEST_CASE("Auto Grad with broadcasting")
     auto m = m_x * z + sin(m_u) * m_u;
 
     // Traverse the graph (starting from the end) to calculate all tensor gradients.
-    m.backward();   // ∂m/∂m = [1,1,1,1,1,1]  2x3 tensor
+    m.backward(onesLike(m));   // ∂m/∂m = [1,1,1,1,1,1]  2x3 tensor
 
     // Check shapes
     CHECK(m_x.grad().shape()  == shape1);
@@ -194,7 +194,7 @@ TEST_CASE("Auto Grad - log Test - 2x2")
 
     auto x = aix::tensor({0.1, 0.2, 0.3, 0.4}, shape, { .m_requireGrad=true });
     auto z = log(x);
-    z.backward();
+    z.backward(onesLike(z));
 
     // Check shapes
     CHECK(x.grad().shape() == shape);
@@ -208,7 +208,7 @@ TEST_CASE("Auto Grad - exp Test - 2x2")
 
     auto x = aix::tensor({0.1, 0.2, 0.3, 0.4}, shape, { .m_requireGrad=true });
     auto z = exp(x);
-    z.backward();
+    z.backward(onesLike(z));
 
     // Check shapes
     CHECK(x.grad().shape() == shape);
@@ -222,7 +222,7 @@ TEST_CASE("Auto Grad - tanh Test - 2x2")
 
     auto x = aix::tensor({0.1, 0.2, 0.3, 0.4}, shape, { .m_requireGrad=true });
     auto z = tanh(x);
-    z.backward();
+    z.backward(onesLike(z));
 
     // ∂tanh/∂x = 1 - tanh^2(x)
     // tanh(0.1)=0.099668, tanh(0.2)=0.197375, tanh(0.3)=0.291313, tanh(0.4)=0.379949
@@ -245,8 +245,8 @@ TEST_CASE("Auto Grad - tanh Test - Metal parity")
     auto cpuZ = tanh(cpuX);
     auto metalZ = tanh(metalX);
 
-    cpuZ.backward();
-    metalZ.backward();
+    cpuZ.backward(onesLike(cpuZ));
+    metalZ.backward(onesLike(metalZ));
     device->synchronize();
 
     CheckVectorApproxValues(metalZ, cpuZ);
@@ -261,7 +261,7 @@ TEST_CASE("Auto Grad - pow Test - 2x2")
     auto x = aix::tensor({1.0, 2.0, 3.0, 4.0}, shape, { .m_requireGrad=true });
     auto exp = aix::tensor({1.0, 2.0, 3.0, 4.0}, shape);
     auto z = pow(x, exp);
-    z.backward();
+    z.backward(onesLike(z));
 
     // Check shapes
     CHECK(x.grad().shape() == shape);
@@ -307,7 +307,7 @@ TEST_CASE("Auto Grad - sum Test - 2x2")
 
     auto x = aix::tensor({0.1, 0.2, 0.3, 0.4}, shape, { .m_requireGrad=true });
     auto z = x.sum();
-    z.backward();
+    z.backward(onesLike(z));
 
     // Check shapes
     CHECK(x.grad().shape() == shape);
@@ -332,13 +332,38 @@ TEST_CASE("Auto Grad - sum retainGrad stays scalar")
 }
 
 
+TEST_CASE("Auto Grad - explicit scalar backward seed scales gradients")
+{
+    aix::Shape shape{2,2};
+
+    auto x = aix::tensor({0.1, 0.2, 0.3, 0.4}, shape, { .m_requireGrad=true });
+    auto z = x.sum();
+    z.backward(aix::tensor(2.0f));
+
+    CHECK(x.grad().shape() == shape);
+    CheckVectorApproxValues(x.grad(), tensor({2.0, 2.0, 2.0, 2.0}, shape).value());
+}
+
+
+TEST_CASE("Auto Grad - implicit backward accepts one-element tensor view")
+{
+    auto a = aix::tensor({5.0}, Shape{1,1}, { .m_requireGrad=true });
+    auto z = a.transpose(0, 1);
+
+    z.backward();
+
+    CHECK(a.grad().shape() == Shape{1,1});
+    CheckVectorApproxValues(a.grad(), aix::tensor({1.0}, a.shape()).value());
+}
+
+
 TEST_CASE("Auto Grad - sigmoid Test - 2x2")
 {
     aix::Shape shape{2,2};
 
     auto x = aix::tensor({0.1, 0.2, 0.3, 0.4}, shape, { .m_requireGrad=true });
     auto z = aix::nn::Sigmoid().forward(x);
-    z.backward();
+    z.backward(onesLike(z));
 
     // Check shapes
     CHECK(x.grad().shape() == shape);
@@ -354,7 +379,7 @@ TEST_CASE("Auto Grad - transpose")
 
         auto x = aix::tensor({1.0,2.0,3.0,4.0,5.0,6.0}, shape, { .m_requireGrad=true });
         auto z = x.transpose(0, 1);
-        z.backward(1, {2,3});       // Starting with the transposed shape
+        z.backward(onesLike(z));
 
         // Check shapes
         CHECK(x.grad().shape() == shape);
@@ -367,7 +392,7 @@ TEST_CASE("Auto Grad - transpose")
         auto x = aix::tensor({1.0,2.0,3.0,4.0,5.0,6.0}, shape, { .m_requireGrad=true });
         auto z = x.transpose(0, 1);
         DOCTEST_CHECK_THROWS_AS(z.backward(), std::invalid_argument);
-        DOCTEST_CHECK_THROWS_AS(z.backward(1, {3,2}), std::invalid_argument);
+        DOCTEST_CHECK_THROWS_AS(z.backward(ones({3,2}, { .m_dtype=z.dataType(), .m_device=z.device() })), std::invalid_argument);
     }
 }
 
@@ -384,7 +409,7 @@ TEST_CASE("Auto Grad - Broadcast from [1x3] to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = x + y;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({2.0,2.0,2.0}, shape1).value());
@@ -396,7 +421,7 @@ TEST_CASE("Auto Grad - Broadcast from [1x3] to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = y + x;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({2.0,2.0,2.0}, shape1).value());
@@ -408,7 +433,7 @@ TEST_CASE("Auto Grad - Broadcast from [1x3] to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = x - y;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({2.0,2.0,2.0}, shape1).value());
@@ -420,7 +445,7 @@ TEST_CASE("Auto Grad - Broadcast from [1x3] to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = y - x;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({-2.0,-2.0,-2.0}, shape1).value());
@@ -432,7 +457,7 @@ TEST_CASE("Auto Grad - Broadcast from [1x3] to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = x * y;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({17.0,19.0,21.0}, shape1).value());
@@ -444,7 +469,7 @@ TEST_CASE("Auto Grad - Broadcast from [1x3] to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = y * x;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({17.0,19.0,21.0}, shape1).value());
@@ -456,7 +481,7 @@ TEST_CASE("Auto Grad - Broadcast from [1x3] to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = x / y;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({0.242857, 0.215909, 0.194444}, shape1).value());
@@ -469,7 +494,7 @@ TEST_CASE("Auto Grad - Broadcast from [1x3] to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = y / x;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({-17.0, -4.75, -2.33333}, shape1).value());
@@ -490,7 +515,7 @@ TEST_CASE("Auto Grad - Broadcast from Scalar to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = x + y;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({6.0}, shape1).value());
@@ -502,7 +527,7 @@ TEST_CASE("Auto Grad - Broadcast from Scalar to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = y + x;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({6.0}, shape1).value());
@@ -514,7 +539,7 @@ TEST_CASE("Auto Grad - Broadcast from Scalar to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = x - y;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({6.0}, shape1).value());
@@ -526,7 +551,7 @@ TEST_CASE("Auto Grad - Broadcast from Scalar to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = y - x;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({-6.0}, shape1).value());
@@ -538,7 +563,7 @@ TEST_CASE("Auto Grad - Broadcast from Scalar to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = x * y;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({57.0}, shape1).value());
@@ -550,7 +575,7 @@ TEST_CASE("Auto Grad - Broadcast from Scalar to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = y * x;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({57.0}, shape1).value());
@@ -562,7 +587,7 @@ TEST_CASE("Auto Grad - Broadcast from Scalar to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = x / y;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({0.653211}, shape1).value());
@@ -575,7 +600,7 @@ TEST_CASE("Auto Grad - Broadcast from Scalar to [2x3]")
         auto x = aix::tensor(data1, shape1, { .m_requireGrad=true });
         auto y = aix::tensor(data2, shape2, { .m_requireGrad=true });
         auto z = y / x;
-        z.backward();
+        z.backward(onesLike(z));
         CHECK(x.grad().shape() == shape1);
         CHECK(y.grad().shape() == shape2);
         CheckVectorApproxValues(x.grad(), tensor({-2.28}, shape1).value());
@@ -599,7 +624,7 @@ TEST_CASE("Auto Grad - sum with dimension")
     {
         auto sum = t.sum(0, false);
         sum.retainGrad();
-        sum.backward(1, sum.shape());
+        sum.backward(onesLike(sum));
         CHECK(t.grad().shape() == t.shape());
         CHECK(sum.grad().shape() == Shape{4, 2});
         CheckVectorApproxValues(t.grad(), aix::onesLike(t).value());
@@ -610,7 +635,7 @@ TEST_CASE("Auto Grad - sum with dimension")
     {
         auto sum = t.sum(0, true);
         sum.retainGrad();
-        sum.backward(1, sum.shape());
+        sum.backward(onesLike(sum));
         CHECK(t.grad().shape() == t.shape());
         CHECK(sum.grad().shape() == Shape{1, 4, 2});
         CheckVectorApproxValues(t.grad(), aix::onesLike(t).value());
@@ -621,7 +646,7 @@ TEST_CASE("Auto Grad - sum with dimension")
     {
         auto sum = t.sum(1, false);
         sum.retainGrad();
-        sum.backward(1, sum.shape());
+        sum.backward(onesLike(sum));
         CHECK(t.grad().shape() == t.shape());
         CHECK(sum.grad().shape() == Shape{3, 2});
         CheckVectorApproxValues(t.grad(), aix::onesLike(t).value());
@@ -632,7 +657,7 @@ TEST_CASE("Auto Grad - sum with dimension")
     {
         auto sum = t.sum(1, true);
         sum.retainGrad();
-        sum.backward(1, sum.shape());
+        sum.backward(onesLike(sum));
         CHECK(t.grad().shape() == t.shape());
         CHECK(sum.grad().shape() == Shape{3, 1, 2});
         CheckVectorApproxValues(t.grad(), aix::onesLike(t).value());
@@ -643,7 +668,7 @@ TEST_CASE("Auto Grad - sum with dimension")
     {
         auto sum = t.sum(2, false);
         sum.retainGrad();
-        sum.backward(1, sum.shape());
+        sum.backward(onesLike(sum));
         CHECK(t.grad().shape() == t.shape());
         CHECK(sum.grad().shape() == Shape{3, 4});
         CheckVectorApproxValues(t.grad(), aix::onesLike(t).value());
@@ -654,7 +679,7 @@ TEST_CASE("Auto Grad - sum with dimension")
     {
         auto sum = t.sum(2, true);
         sum.retainGrad();
-        sum.backward(1, sum.shape());
+        sum.backward(onesLike(sum));
         CHECK(t.grad().shape() == t.shape());
         CHECK(sum.grad().shape() == Shape{3, 4, 1});
         CheckVectorApproxValues(t.grad(), aix::onesLike(t).value());
@@ -680,7 +705,7 @@ TEST_CASE("Auto Grad - sum with dimension - complex")
         auto z = a.sum(1, false).sum(1, true);
         z.retainGrad();
         auto sum = z * b;
-        sum.backward();
+        sum.backward(onesLike(sum));
 
         CHECK(z.shape() == Shape{3,1});
         CHECK(z.grad().shape() == Shape{3,1});
@@ -699,7 +724,7 @@ TEST_CASE("Auto Grad - sum with dimension - complex")
 
         auto sum = ((a * a2).sum(1, false) / b).sum(1, true);
         sum.retainGrad();
-        sum.backward(1, sum.shape());
+        sum.backward(onesLike(sum));
 
         CHECK(a.grad().shape() == Shape{3,4,2});
         CHECK(a2.grad().shape() == Shape{3,4,2});
@@ -731,7 +756,7 @@ TEST_CASE("Auto Grad - sum with dimension - complex")
 
         auto sum = b2 * ((a * a2).sum(1, false) / b).sum(1, true);
         sum.retainGrad();
-        sum.backward();
+        sum.backward(onesLike(sum));
 
         CHECK(a.grad().shape() == Shape{3,4,2});
         CHECK(a2.grad().shape() == Shape{3,4,2});
@@ -765,7 +790,7 @@ TEST_CASE("Auto Grad - sum with dimension - complex")
         auto z = a2 * b;
         z.retainGrad();
         auto sum = z;
-        sum.backward(1, sum.shape());
+        sum.backward(onesLike(sum));
 
         CHECK(z.shape() == Shape{3,1});
         CHECK(z.grad().shape() == Shape{3,1});
@@ -784,7 +809,7 @@ TEST_CASE("Auto Grad - sum with dimension - complex")
         auto z = a2 * b;
         z.retainGrad();
         auto sum = z;
-        sum.backward(1, sum.shape());
+        sum.backward(onesLike(sum));
 
         CHECK(z.shape() == Shape{3,3});
         CHECK(z.grad().shape() == Shape{3,3});
@@ -808,7 +833,7 @@ TEST_CASE("Auto Grad - Squeeze")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto s = a.squeeze(1);
-        s.backward(1, s.shape());
+        s.backward(onesLike(s));
         CheckVectorApproxValues(a.grad(), aix::tensor({1.0, 1.0, 1.0, 1.0}, a.shape()).value());
     }
 }
@@ -823,7 +848,7 @@ TEST_CASE("Auto Grad - Unsqueeze")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto s = a.unsqueeze(1);
-        s.backward(1, s.shape());
+        s.backward(onesLike(s));
         CheckVectorApproxValues(a.grad(), aix::tensor({1.0, 1.0, 1.0, 1.0}, a.shape()).value());
     }
 }
@@ -839,7 +864,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var();
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CheckVectorApproxValues(a.grad(), aix::tensor({-1.0000, -0.3333,
                                                         0.3333,  1.0000}, a.shape()).value());
     }
@@ -848,7 +873,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var  = a.var(true);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CheckVectorApproxValues(a.grad(), aix::tensor({-1.0000, -0.3333,
                                                         0.3333,  1.0000}, a.shape()).value());
     }
@@ -857,7 +882,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var  = a.var(false);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CheckVectorApproxValues(a.grad(), aix::tensor({-0.7500, -0.2500,
                                                         0.2500,  0.7500}, a.shape()).value());
     }
@@ -866,7 +891,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(ssize_t(0));
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{2});
         CheckVectorApproxValues(a.grad(), aix::tensor({-2.0, -2.0,
                                                         2.0,  2.0}, shape).value());
@@ -876,7 +901,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(ssize_t(0), true);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{2});
         CheckVectorApproxValues(a.grad(), aix::tensor({-2.0, -2.0,
                                                         2.0,  2.0}, shape).value());
@@ -888,7 +913,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(0, true, false);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{2});
         CheckVectorApproxValues(a.grad(), aix::tensor({-2.0, -2.0,
                                                         2.0,  2.0}, shape).value());
@@ -898,7 +923,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(0, true, true);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{1,2});
         CheckVectorApproxValues(a.grad(), aix::tensor({-2.0, -2.0,
                                                         2.0,  2.0}, shape).value());
@@ -908,7 +933,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(0, false, false);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{2});
         CheckVectorApproxValues(a.grad(), aix::tensor({-1.0, -1.0,
                                                         1.0,  1.0}, shape).value());
@@ -918,7 +943,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(0, false, true);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{1, 2});
         CheckVectorApproxValues(a.grad(), aix::tensor({-1.0, -1.0,
                                                         1.0,  1.0}, shape).value());
@@ -930,7 +955,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(1, true, false);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{2});
         CheckVectorApproxValues(a.grad(), aix::tensor({-1.0, 1.0,
                                                        -1.0, 1.0}, shape).value());
@@ -940,7 +965,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(1, true, true);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{2,1});
         CheckVectorApproxValues(a.grad(), aix::tensor({-1.0, 1.0,
                                                        -1.0, 1.0}, shape).value());
@@ -950,7 +975,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(1, false, false);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{2});
         CheckVectorApproxValues(a.grad(), aix::tensor({-0.5, 0.5,
                                                        -0.5, 0.5}, shape).value());
@@ -960,7 +985,7 @@ TEST_CASE("Auto Grad - variance")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto var = a.var(1, false, true);
-        var.backward(1, var.shape());
+        var.backward(onesLike(var));
         CHECK(var.shape() == Shape{2,1});
         CheckVectorApproxValues(a.grad(), aix::tensor({-0.5, 0.5,
                                                        -0.5, 0.5}, shape).value());
@@ -1222,7 +1247,7 @@ TEST_CASE("Auto Grad - max")
     {
         auto a = aix::tensor({1.0, 4.0, 3.0, 2.0}, {2,2}).requireGrad(true);
         auto max = a.max() * a;
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(max.shape() == Shape{2,2});
         CHECK(a.grad().shape() == Shape{2,2});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 4.0, 14.0, 4.0, 4.0 }, a.shape()).value());
@@ -1236,7 +1261,7 @@ TEST_CASE("Auto Grad - argmax")
     {
         auto a = aix::tensor(5.0, {}).requireGrad(true);
         auto amax = a.argmax();
-        amax.backward(1, amax.shape());
+        amax.backward(onesLike(amax));
         CHECK(amax.shape() == Shape{});
         CHECK(amax.value().item<int32_t>() == 0);
         CHECK(a.grad().shape() == Shape{});
@@ -1247,7 +1272,7 @@ TEST_CASE("Auto Grad - argmax")
     {
         auto a = aix::Tensor(5.0, Shape{1}).requireGrad(true);
         auto amax = a.argmax();
-        amax.backward(1, amax.shape());
+        amax.backward(onesLike(amax));
         CHECK(amax.shape() == Shape{});
         CHECK(amax.value().item<int32_t>() == 0);
         CHECK(a.grad().shape() == Shape{1});
@@ -1258,7 +1283,7 @@ TEST_CASE("Auto Grad - argmax")
     {
         auto a = aix::Tensor(5.0, Shape{1,1}).requireGrad(true);
         auto amax = a.argmax();
-        amax.backward(1, amax.shape());
+        amax.backward(onesLike(amax));
         CHECK(amax.shape() == Shape{});
         CHECK(amax.value().item<int32_t>() == 0);
         CHECK(a.grad().shape() == Shape{1,1});
@@ -1269,7 +1294,7 @@ TEST_CASE("Auto Grad - argmax")
     {
         auto a = aix::tensor({1.0,2.0,3.0,4.0}, Shape{2,2}).requireGrad(true);
         auto amax = a.argmax();
-        amax.backward(1, amax.shape());
+        amax.backward(onesLike(amax));
         CHECK(amax.shape() == Shape{});
         CHECK(amax.value().item<int32_t>() == 3);
         CHECK(a.grad().shape() == Shape{2,2});
@@ -1280,7 +1305,7 @@ TEST_CASE("Auto Grad - argmax")
     {
         auto a = aix::tensor({1.0,4.0,3.0,2.0}, Shape{2,2}).requireGrad(true);
         auto amax = a.argmax() * a;
-        amax.backward(1, amax.shape());
+        amax.backward(onesLike(amax));
         CHECK(amax.shape() == Shape{2,2});
         CHECK(a.grad().shape() == Shape{2,2});
         CheckVectorApproxValues(a.grad(), aix::Tensor(1.0, a.shape()).value());
@@ -1299,7 +1324,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::Tensor(5, {}).requireGrad(true);
         auto max = a.max(0, false);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 1.0 }, a.shape()).value());
     }
@@ -1308,7 +1333,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::Tensor(5, {}).requireGrad(true);
         auto max = a.max(0, true);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 1.0 }, a.shape()).value());
     }
@@ -1317,7 +1342,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::Tensor(5, {1}).requireGrad(true);
         auto max = a.max(0, false);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{1});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 1.0 }, a.shape()).value());
     }
@@ -1326,7 +1351,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::Tensor(5, {1}).requireGrad(true);
         auto max = a.max(0, true);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{1});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 1.0 }, a.shape()).value());
     }
@@ -1335,7 +1360,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::Tensor(5, {1,1}).requireGrad(true);
         auto max = a.max(0, false);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{1,1});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 1.0 }, a.shape()).value());
     }
@@ -1344,7 +1369,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::Tensor(5, {1,1}).requireGrad(true);
         auto max = a.max(0, true);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{1,1});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 1.0 }, a.shape()).value());
     }
@@ -1354,7 +1379,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto max = a.max(0, false);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{3,3});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 0.0, 0.0, 0.0,
                                                         0.0, 0.0, 0.0,
@@ -1365,7 +1390,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto max = a.max(0, true);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{3,3});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 0.0, 0.0, 0.0,
                                                         0.0, 0.0, 0.0,
@@ -1378,7 +1403,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto max = a.max(1, false);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{3,3});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 0.0, 0.0, 1.0,
                                                         0.0, 1.0, 0.0,
@@ -1389,7 +1414,7 @@ TEST_CASE("Auto Grad - max with dimension")
     {
         auto a = aix::tensor(data, shape).requireGrad(true);
         auto max = a.max(1, true);
-        max.backward(1, max.shape());
+        max.backward(onesLike(max));
         CHECK(a.shape() == Shape{3,3});
         CheckVectorApproxValues(a.grad(), aix::tensor({ 0.0, 0.0, 1.0,
                                                         0.0, 1.0, 0.0,
@@ -1415,7 +1440,7 @@ TEST_CASE("Auto Grad - slice")
     {
         auto t3  = aix::tensor({5.0}, aix::Shape{1}).requireGrad(true);
         auto t = t3.slice();
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t3.grad().shape() == Shape{1});
         CheckVectorApproxValues(t3.grad(), aix::Tensor(1.0, t3.grad().shape()).value());
     }
@@ -1424,7 +1449,7 @@ TEST_CASE("Auto Grad - slice")
     {
         auto t3  = aix::tensor({5.0}, aix::Shape{1,1}).requireGrad(true);
         auto t = t3.slice();
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t3.grad().shape() == Shape{1,1});
         CheckVectorApproxValues(t3.grad(), aix::Tensor(1.0, t3.grad().shape()).value());
     }
@@ -1432,7 +1457,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - default parameters")
     {
         auto t = t33.slice();
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::Tensor(1.0, t33.grad().shape()).value());
     }
@@ -1443,7 +1468,7 @@ TEST_CASE("Auto Grad - slice")
     {
         auto t11  = aix::tensor({5.0}, aix::Shape{1,1}).requireGrad(true);
         auto t = t11.slice(0,0,1,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t11.grad().shape() == Shape{1,1});
         CheckVectorApproxValues(t11.grad(), aix::Tensor(1.0, t11.grad().shape()).value());
     }
@@ -1451,7 +1476,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=0 end=3 step=1")
     {
         auto t = t33.slice(0,0,3,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::Tensor(1.0, t33.grad().shape()).value());
     }
@@ -1459,7 +1484,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=0 end=2 step=1")
     {
         auto t = t33.slice(0,0,2,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 1.0, 1.0, 1.0,
                                                           1.0, 1.0, 1.0,
@@ -1469,7 +1494,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=-2 start=-3 end=-1 step=1")
     {
         auto t = t33.slice(-2,-3,-1,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 1.0, 1.0, 1.0,
                                                           1.0, 1.0, 1.0,
@@ -1479,7 +1504,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=0 end=1 step=1")
     {
         auto t = t33.slice(0,0,1,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 1.0, 1.0, 1.0,
                                                           0.0, 0.0, 0.0,
@@ -1489,7 +1514,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=1 end=3 step=1")
     {
         auto t = t33.slice(0,1,3,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 0.0, 0.0, 0.0,
                                                           1.0, 1.0, 1.0,
@@ -1499,7 +1524,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=2 end=3 step=1")
     {
         auto t = t33.slice(0,2,3,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 0.0, 0.0, 0.0,
                                                           0.0, 0.0, 0.0,
@@ -1509,7 +1534,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=0 end=3 step=2")
     {
         auto t = t33.slice(0,0,3,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 1.0, 1.0, 1.0,
                                                           0.0, 0.0, 0.0,
@@ -1519,7 +1544,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=0 end=3 step=3")
     {
         auto t = t33.slice(0,0,3,3);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 1.0, 1.0, 1.0,
                                                           0.0, 0.0, 0.0,
@@ -1529,7 +1554,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=0 end=3 step=4")
     {
         auto t = t33.slice(0,0,3,4);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 1.0, 1.0, 1.0,
                                                           0.0, 0.0, 0.0,
@@ -1539,7 +1564,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=1 end=3 step=2")
     {
         auto t = t33.slice(0,1,3,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 0.0, 0.0, 0.0,
                                                           1.0, 1.0, 1.0,
@@ -1549,7 +1574,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=1 end=3 step=3")
     {
         auto t = t33.slice(0,1,3,3);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 0.0, 0.0, 0.0,
                                                           1.0, 1.0, 1.0,
@@ -1559,7 +1584,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=2 end=3 step=2")
     {
         auto t = t33.slice(0,2,3,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 0.0, 0.0, 0.0,
                                                           0.0, 0.0, 0.0,
@@ -1569,7 +1594,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=0 start=2 end=3 step=3")
     {
         auto t = t33.slice(0,2,3,3);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 0.0, 0.0, 0.0,
                                                           0.0, 0.0, 0.0,
@@ -1579,7 +1604,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=0 start=0 end=2 step=1")
     {
         auto t = t33.slice(0,0,2,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 1.0, 1.0, 1.0,
                                                           1.0, 1.0, 1.0,
@@ -1589,7 +1614,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=0 start=0 end=1 step=1")
     {
         auto t = t222.slice(0,0,1,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({ 1.0, 1.0,
                                                            1.0, 1.0,
@@ -1600,7 +1625,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=0 start=1 end=2 step=1")
     {
         auto t = t222.slice(0,1,2,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({ 0.0, 0.0,
                                                            0.0, 0.0,
@@ -1611,7 +1636,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=0 start=1 end=2 step=2")
     {
         auto t = t222.slice(0,1,2,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({ 0.0, 0.0,
                                                            0.0, 0.0,
@@ -1622,7 +1647,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=-3 start=-2 end=2 step=2")
     {
         auto t = t222.slice(-3,-2,2,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({ 1.0, 1.0,
                                                            1.0, 1.0,
@@ -1636,7 +1661,7 @@ TEST_CASE("Auto Grad - slice")
     {
         auto t3  = aix::tensor({5.0}, aix::Shape{1,1}).requireGrad(true);
         auto t = t3.slice(1,0,1,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t3.grad().shape() == Shape{1,1});
         CheckVectorApproxValues(t3.grad(), aix::Tensor(1.0, t3.grad().shape()).value());
     }
@@ -1644,7 +1669,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=0 end=3 step=1")
     {
         auto t = t33.slice(1,0,3,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::Tensor(1.0, t33.grad().shape()).value());
     }
@@ -1652,7 +1677,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=0 end=2 step=1")
     {
         auto t = t33.slice(1,0,2,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           1.0, 1.0, 0.0,
@@ -1664,7 +1689,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=0 end=1 step=1")
     {
         auto t = t33.slice(1,0,1,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           1.0, 0.0, 0.0,
@@ -1676,7 +1701,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=1 end=3 step=1")
     {
         auto t = t33.slice(1,1,3,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           0.0, 1.0, 1.0,
@@ -1688,7 +1713,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=2 end=3 step=1")
     {
         auto t = t33.slice(1,2,3,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           0.0, 0.0, 1.0,
@@ -1700,7 +1725,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=0 end=3 step=2")
     {
         auto t = t33.slice(1,0,3,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           1.0, 0.0, 1.0,
@@ -1712,7 +1737,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=0 end=3 step=3")
     {
         auto t = t33.slice(1,0,3,3);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           1.0, 0.0, 0.0,
@@ -1724,7 +1749,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=0 end=3 step=4")
     {
         auto t = t33.slice(1,0,3,4);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           1.0, 0.0, 0.0,
@@ -1736,7 +1761,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=1 end=3 step=2")
     {
         auto t = t33.slice(1,1,3,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           0.0, 1.0, 0.0,
@@ -1748,7 +1773,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=1 end=3 step=3")
     {
         auto t = t33.slice(1,1,3,3);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           0.0, 1.0, 0.0,
@@ -1760,7 +1785,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=2 end=3 step=2")
     {
         auto t = t33.slice(1,2,3,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           0.0, 0.0, 1.0,
@@ -1772,7 +1797,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{3,3} - dim=1 start=2 end=3 step=3")
     {
         auto t = t33.slice(1,2,3,3);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                           0.0, 0.0, 1.0,
@@ -1784,7 +1809,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=1 start=0 end=2 step=1")
     {
         auto t = t222.slice(1,0,2,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            1.0, 1.0,
@@ -1797,7 +1822,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=1 start=0 end=1 step=1")
     {
         auto t = t222.slice(1,0,1,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            1.0, 1.0,
@@ -1810,7 +1835,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=1 start=1 end=2 step=1")
     {
         auto t = t222.slice(1,1,2,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            0.0, 0.0,
@@ -1823,7 +1848,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=1 start=1 end=2 step=2")
     {
         auto t = t222.slice(1,1,2,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            0.0, 0.0,
@@ -1836,7 +1861,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=-2 start=1 end=2 step=2")
     {
         auto t = t222.slice(-2,1,2,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            0.0, 0.0,
@@ -1851,7 +1876,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=2 start=0 end=2 step=1")
     {
         auto t = t222.slice(2,0,2,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            1.0, 1.0,
@@ -1864,7 +1889,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=2 start=0 end=1 step=1")
     {
         auto t = t222.slice(2,0,1,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            1.0, 0.0,
@@ -1877,7 +1902,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=2 start=1 end=2 step=1")
     {
         auto t = t222.slice(2,1,2,1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            0.0, 1.0,
@@ -1890,7 +1915,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=2 start=1 end=2 step=2")
     {
         auto t = t222.slice(2,1,2,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            0.0, 1.0,
@@ -1903,7 +1928,7 @@ TEST_CASE("Auto Grad - slice")
     SUBCASE("Shape{2,2,2} - dim=-1 start=1 end=2 step=2")
     {
         auto t = t222.slice(-1,1,2,2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({
                                                            0.0, 1.0,
@@ -1940,7 +1965,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{1,1} - diagonal=default")
     {
         auto t = t11.tril() * t11;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t11.grad().shape() == Shape{1,1});
         CheckVectorApproxValues(t11.grad(), aix::Tensor(10.0, t11.grad().shape()).value());
     }
@@ -1948,7 +1973,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{3,3} - diagonal=default")
     {
         auto t = t33.tril() * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                            2.0,  0.0,  0.0,
@@ -1959,7 +1984,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{1,1} - diagonal=1")
     {
         auto t = t11.tril(1) * t11;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t11.grad().shape() == Shape{1,1});
         CheckVectorApproxValues(t11.grad(), aix::Tensor(10.0, t11.grad().shape()).value());
     }
@@ -1967,7 +1992,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{1,1} - diagonal=-1")
     {
         auto t = t11.tril(-1) * t11;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t11.grad().shape() == Shape{1,1});
         CheckVectorApproxValues(t11.grad(), aix::Tensor(0.0, t11.grad().shape()).value());
     }
@@ -1975,7 +2000,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{3,3} - diagonal=0")
     {
         auto t = t33.tril(0) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({  2.0,  0.0,  0.0,
                                                            8.0, 10.0,  0.0,
@@ -1985,7 +2010,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{3,3} - diagonal=1")
     {
         auto t = t33.tril(1) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({  2.0,  4.0,  0.0,
                                                            8.0, 10.0, 12.0,
@@ -1995,7 +2020,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{3,3} - diagonal=2")
     {
         auto t = t33.tril(2) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({  2.0,  4.0,  6.0,
                                                            8.0, 10.0, 12.0,
@@ -2005,7 +2030,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{3,3} - diagonal=-1")
     {
         auto t = t33.tril(-1) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({  0.0,  0.0, 0.0,
                                                            8.0,  0.0, 0.0,
@@ -2015,7 +2040,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{3,3} - diagonal=-2")
     {
         auto t = t33.tril(-2) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({  0.0, 0.0, 0.0,
                                                            0.0, 0.0, 0.0,
@@ -2025,7 +2050,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{3,3} - diagonal=-3")
     {
         auto t = t33.tril(-3) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({  0.0, 0.0, 0.0,
                                                            0.0, 0.0, 0.0,
@@ -2037,7 +2062,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{2,2,2} - diagonal=0")
     {
         auto t = t222.tril(0) * t222;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({  2.0,  0.0,
                                                             6.0,  8.0,
@@ -2048,7 +2073,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{2,2,2} - diagonal=1")
     {
         auto t = t222.tril(1) * t222;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({  2.0,  4.0,
                                                             6.0,  8.0,
@@ -2059,7 +2084,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{2,2,2} - diagonal=-1")
     {
         auto t = t222.tril(-1) * t222;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({  0.0, 0.0,
                                                             6.0, 0.0,
@@ -2070,7 +2095,7 @@ TEST_CASE("Auto Grad - tril")
     SUBCASE("Shape{2,2,2} - diagonal=-2")
     {
         auto t = t222.tril(-2) * t222;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({  0.0, 0.0,
                                                             0.0, 0.0,
@@ -2099,7 +2124,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{1,1} - diagonal=default")
     {
         auto t = t11.triu() * t11;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t11.grad().shape() == Shape{1,1});
         CheckVectorApproxValues(t11.grad(), aix::Tensor(10.0, t11.grad().shape()).value());
     }
@@ -2107,7 +2132,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{3,3} - diagonal=default")
     {
         auto t = t33.triu() * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({
                                                            2.0,  4.0,  6.0,
@@ -2118,7 +2143,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{1,1} - diagonal=1")
     {
         auto t = t11.triu(1) * t11;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t11.grad().shape() == Shape{1,1});
         CheckVectorApproxValues(t11.grad(), aix::Tensor(0.0, t11.grad().shape()).value());
     }
@@ -2126,7 +2151,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{1,1} - diagonal=-1")
     {
         auto t = t11.triu(-1) * t11;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t11.grad().shape() == Shape{1,1});
         CheckVectorApproxValues(t11.grad(), aix::Tensor(10.0, t11.grad().shape()).value());
     }
@@ -2134,7 +2159,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{3,3} - diagonal=0")
     {
         auto t = t33.triu(0) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({  2.0,  4.0,  6.0,
                                                            0.0, 10.0, 12.0,
@@ -2144,7 +2169,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{3,3} - diagonal=1")
     {
         auto t = t33.triu(1) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 0.0,  4.0,  6.0,
                                                           0.0,  0.0, 12.0,
@@ -2154,7 +2179,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{3,3} - diagonal=2")
     {
         auto t = t33.triu(2) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 0.0,  0.0,  6.0,
                                                           0.0,  0.0,  0.0,
@@ -2164,7 +2189,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{3,3} - diagonal=-1")
     {
         auto t = t33.triu(-1) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 2.0,  4.0,  6.0,
                                                           8.0, 10.0, 12.0,
@@ -2174,7 +2199,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{3,3} - diagonal=-2")
     {
         auto t = t33.triu(-2) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 2.0,  4.0,  6.0,
                                                           8.0, 10.0, 12.0,
@@ -2184,7 +2209,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{3,3} - diagonal=-3")
     {
         auto t = t33.triu(-3) * t33;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t33.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({ 2.0,  4.0,  6.0,
                                                           8.0, 10.0, 12.0,
@@ -2196,7 +2221,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{2,2,2} - diagonal=0")
     {
         auto t = t222.triu(0) * t222;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({  2.0,  4.0,
                                                             0.0,  8.0,
@@ -2207,7 +2232,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{2,2,2} - diagonal=1")
     {
         auto t = t222.triu(1) * t222;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({  0.0,  4.0,
                                                             0.0,  0.0,
@@ -2218,7 +2243,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{2,2,2} - diagonal=-1")
     {
         auto t = t222.triu(-1) * t222;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({  2.0,  4.0,
                                                             6.0,  8.0,
@@ -2229,7 +2254,7 @@ TEST_CASE("Auto Grad - triu")
     SUBCASE("Shape{2,2,2} - diagonal=-2")
     {
         auto t = t222.triu(-2) * t222;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t222.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({  2.0,  4.0,
                                                             6.0,  8.0,
@@ -2256,7 +2281,7 @@ TEST_CASE("Auto Grad - Cat")
     SUBCASE("Shape{1} - dim=0")
     {
         auto t = aix::cat({t1}, 0);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{1});
         CheckVectorApproxValues(t.grad(), aix::tensor({1.0}, t.grad().shape()).value());
     }
@@ -2264,105 +2289,105 @@ TEST_CASE("Auto Grad - Cat")
     SUBCASE("Shape{1} - dim=0 - 2x")
     {
         auto t = aix::cat({t1,t1}, 0);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t1.grad(), aix::Tensor(2.0, t1.grad().shape()).value());
     }
 
     SUBCASE("Shape{1} - dim=-1 - 2x")
     {
         auto t = aix::cat({t1,t1}, -1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t1.grad(), aix::Tensor(2.0, t1.grad().shape()).value());
     }
 
     SUBCASE("Shape{1,1} - dim=0")
     {
         auto t = aix::cat({t11}, 0);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t11.grad(), aix::Tensor(1.0, t11.grad().shape()).value());
     }
 
     SUBCASE("Shape{1,1} - dim=0 - 2x")
     {
         auto t = aix::cat({t11,t11}, 0);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t11.grad(), aix::Tensor(2.0, t11.shape()).value());
     }
 
     SUBCASE("Shape{1,1} - dim=-2 - 2x")
     {
         auto t = aix::cat({t11,t11}, -2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t11.grad(), aix::Tensor(2.0, t11.grad().shape()).value());
     }
 
     SUBCASE("Shape{1,1} - dim=1 - 2x")
     {
         auto t = aix::cat({t11, t11}, 1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t11.grad(), aix::Tensor(2.0, t11.grad().shape()).value());
     }
 
     SUBCASE("Shape{1,1} - dim=-1 - 2x")
     {
         auto t = aix::cat({t11, t11}, -1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t11.grad(), aix::Tensor(2.0, t11.grad().shape()).value());
     }
 
     SUBCASE("Shape{1,1} - dim=-1 - 2x")
     {
         auto t = aix::cat({t11, t11}, -1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t11.grad(), aix::Tensor(2.0, t11.grad().shape()).value());
     }
 
     SUBCASE("Shape{3,3} - dim=0")
     {
         auto t = aix::cat({t33}, 0);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t33.grad(), aix::Tensor(1.0, t33.grad().shape()).value());
     }
 
     SUBCASE("Shape{3,3} - dim=0 - 2x")
     {
         auto t = aix::cat({t33, t33}, 0);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t33.grad(), aix::Tensor(2.0, t33.grad().shape()).value());
     }
 
     SUBCASE("Shape{3,3} - dim=1 - 2x")
     {
         auto t = aix::cat({t33, t33}, 1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t33.grad(), aix::Tensor(2.0, t33.grad().shape()).value());
     }
 
     SUBCASE("Shape{2,2,2} - dim=0 - 2x")
     {
         auto t = aix::cat({t222,t222}, 0);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t222.grad(), aix::Tensor(2.0, t222.grad().shape()).value());
     }
 
     SUBCASE("Shape{2,2,2} - dim=-3 - 3x")
     {
         auto t = aix::cat({t222,t222,t222}, -3);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t222.grad(), aix::Tensor(3.0, t222.grad().shape()).value());
     }
 
     SUBCASE("Shape{2,2,2} - dim=1 - 2x")
     {
         auto t = aix::cat({t222,t222}, 1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t222.grad(), aix::Tensor(2.0, t222.grad().shape()).value());
     }
 
     SUBCASE("Shape{2,2,2} - dim=2 - 2x")
     {
         auto t = aix::cat({t222,t222}, 2);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t222.grad(), aix::Tensor(2.0, t222.grad().shape()).value());
     }
 
@@ -2371,7 +2396,7 @@ TEST_CASE("Auto Grad - Cat")
         auto t224 = aix::tensor({1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,
                                  9.0,10.0,11.0,12.0,13.0,14.0,15.0,16.0}, {2,2,4}).requireGrad(true);
         auto t = aix::cat({t222,t222}, -1) * t224;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t222.grad(), aix::tensor({  4.0,  6.0,
                                                            12.0, 14.0,
                                                            20.0, 22.0,
@@ -2387,7 +2412,7 @@ TEST_CASE("Auto Grad - Cat")
         auto t242 = aix::tensor({1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,
                                  9.0,10.0,11.0,12.0,13.0,14.0,15.0,16.0}, {2,4,2}).requireGrad(true);
         auto t = aix::cat({t222,t222}, -2) * t242;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t222.grad(), aix::tensor({ 6.0,  8.0,
                                                           10.0, 12.0,
                                                           22.0, 24.0,
@@ -2407,7 +2432,7 @@ TEST_CASE("Auto Grad - Cat")
         auto t422 = aix::tensor({1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,
                                  9.0,10.0,11.0,12.0,13.0,14.0,15.0,16.0}, {4,2,2}).requireGrad(true);
         auto t = aix::cat({t222,t222}, -3) * t422;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t222.grad(), aix::tensor({ 10.0, 12.0,
                                                            14.0, 16.0,
                                                            18.0, 20.0,
@@ -2432,7 +2457,7 @@ TEST_CASE("Auto Grad - Cat")
                                 50.0, 60.0}, Shape{3,2}).requireGrad(true);
 
         auto t = aix::cat({t12, t22}, 0) * t32;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
 
         CheckVectorApproxValues(t12.grad(), aix::tensor({10.0, 20.0}, t12.grad().shape()).value());
         CheckVectorApproxValues(t22.grad(), aix::tensor({30.0, 40.0,
@@ -2462,35 +2487,35 @@ TEST_CASE("Auto Grad - Reshape")
     SUBCASE("Shape{}")
     {
         auto t = ts.reshape({});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(ts.grad(), aix::tensor({1.0}, ts.grad().shape()).value());
     }
 
     SUBCASE("Shape{1}")
     {
         auto t = t1.reshape({1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t1.grad(), aix::Tensor(1.0, t1.grad().shape()).value());
     }
 
     SUBCASE("Shape{1,1}")
     {
         auto t = t11.reshape({1,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t11.grad(), aix::Tensor(1.0, t11.grad().shape()).value());
     }
 
     SUBCASE("Shape{2,2,2} -> Shape{4,1,2}")
     {
         auto t = t222.reshape({4,1,2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t222.grad(), aix::Tensor(1.0, t222.grad().shape()).value());
     }
 
     SUBCASE("Shape{2,2,2} -> Shape{4,1,2} complex")
     {
         auto t = t222.reshape({4,1,2}) * t412n;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CheckVectorApproxValues(t222.grad(), aix::tensor({-1.0, -2.0,
                                                           -3.0, -4.0,
                                                           -5.0, -6.0,
@@ -2504,7 +2529,7 @@ TEST_CASE("Auto Grad - Reshape")
         auto weights = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, Shape{6});
 
         auto out = reshaped * weights;
-        out.backward(1, out.shape());
+        out.backward(onesLike(out));
 
         CheckVectorApproxValues(base.grad(), aix::tensor({1.0f, 0.0f, 2.0f, 0.0f,
                                                           3.0f, 0.0f, 4.0f, 0.0f,
@@ -2519,7 +2544,7 @@ TEST_CASE("Auto Grad - Reshape")
                                     4.0f, 5.0f, 6.0f}, {2, 3});
 
         auto out = reshaped * weights;
-        out.backward(1, out.shape());
+        out.backward(onesLike(out));
 
         CheckVectorApproxValues(base.grad(), aix::tensor({1.0f, 3.0f, 5.0f,
                                                           2.0f, 4.0f, 6.0f}, {2, 3}).value());
@@ -2541,7 +2566,7 @@ TEST_CASE("Auto Grad - Reshape")
         CHECK(reshaped.value().strides() == Stride{2});
 
         auto out = reshaped * weights;
-        out.backward(1, out.shape());
+        out.backward(onesLike(out));
 
         CheckVectorApproxValues(base.grad(), aix::tensor({1.0f, 0.0f, 2.0f, 0.0f,
                                                           3.0f, 0.0f, 4.0f, 0.0f,
@@ -2560,7 +2585,7 @@ TEST_CASE("Auto Grad - Arange")
     SUBCASE("Shape{1}")
     {
         auto t = aix::arange(5, 6, 1, { .m_requireGrad=true });
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{1});
         CheckVectorApproxValues(t.grad(), aix::tensor({1.0}, t.grad().shape()).value());
     }
@@ -2568,7 +2593,7 @@ TEST_CASE("Auto Grad - Arange")
     SUBCASE("Shape{4}")
     {
         auto t = aix::arange(1, 5, 1, { .m_requireGrad=true });
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{4});
         CheckVectorApproxValues(t.grad(), aix::Tensor(1.0, t.grad().shape()).value());
     }
@@ -2576,7 +2601,7 @@ TEST_CASE("Auto Grad - Arange")
     SUBCASE("Shape{1} - complex")
     {
         auto t = t1 * aix::arange(5, 6, 1, { .m_requireGrad=true });
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t1.grad().shape() == Shape{1});
         CheckVectorApproxValues(t1.grad(), aix::tensor({5.0}, t1.grad().shape()).value());
     }
@@ -2584,7 +2609,7 @@ TEST_CASE("Auto Grad - Arange")
     SUBCASE("Shape{4} - complex")
     {
         auto t = t4 * aix::arange(1, 5, 1, { .m_requireGrad=true });
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t4.grad().shape() == Shape{4});
         CheckVectorApproxValues(t4.grad(), aix::tensor({1.0, 2.0, 3.0, 4.0}, t4.grad().shape()).value());
     }
@@ -2609,7 +2634,7 @@ TEST_CASE("Auto Grad - indexSelect")
     SUBCASE("Shape{} - dim=0 - index{}")
     {
         auto t = ts.indexSelect(0, is);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{});
         CheckVectorApproxValues(ts.grad(), aix::Tensor(1.0, ts.grad().shape()).value());
     }
@@ -2617,7 +2642,7 @@ TEST_CASE("Auto Grad - indexSelect")
     SUBCASE("Shape{1} - dim=0 - index{}")
     {
         auto t = t1.indexSelect(0, is);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{1});
         CheckVectorApproxValues(t1.grad(), aix::Tensor(1.0, t1.grad().shape()).value());
     }
@@ -2625,7 +2650,7 @@ TEST_CASE("Auto Grad - indexSelect")
     SUBCASE("Shape{} - dim=0 - index{1}")
     {
         auto t = ts.indexSelect(0, i1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{});
         CheckVectorApproxValues(ts.grad(), aix::Tensor(1.0, ts.grad().shape()).value());
     }
@@ -2633,7 +2658,7 @@ TEST_CASE("Auto Grad - indexSelect")
     SUBCASE("Shape{1} - dim=0 - index{1}")
     {
         auto t = t1.indexSelect(0, i1);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{1});
         CheckVectorApproxValues(t1.grad(), aix::Tensor(1.0, t1.grad().shape()).value());
     }
@@ -2644,7 +2669,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{1,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          0.0, 0.0, 0.0,
@@ -2655,7 +2680,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{1,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 0.0,
                                                          1.0, 1.0, 1.0,
@@ -2666,7 +2691,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({2.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{1,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 0.0,
                                                          0.0, 0.0, 0.0,
@@ -2677,7 +2702,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
@@ -2688,7 +2713,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 2.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 0.0,
                                                          1.0, 1.0, 1.0,
@@ -2699,7 +2724,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0, 2.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          0.0, 0.0, 0.0,
@@ -2710,7 +2735,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({2.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          0.0, 0.0, 0.0,
@@ -2721,7 +2746,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 0.0,
                                                          2.0, 2.0, 2.0,
@@ -2733,7 +2758,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0, 1.0, 2.0}, Shape{3}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
@@ -2744,7 +2769,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({2.0, 1.0, 0.0}, Shape{3}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
@@ -2757,7 +2782,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,1});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 0.0, 0.0,
                                                          1.0, 0.0, 0.0,
@@ -2768,7 +2793,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,1});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 1.0, 0.0,
                                                          0.0, 1.0, 0.0,
@@ -2779,7 +2804,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({2.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,1});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 1.0,
                                                          0.0, 0.0, 1.0,
@@ -2790,7 +2815,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 0.0,
                                                          1.0, 1.0, 0.0,
@@ -2801,7 +2826,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 2.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 1.0, 1.0,
                                                          0.0, 1.0, 1.0,
@@ -2812,7 +2837,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0, 2.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 0.0, 1.0,
                                                          1.0, 0.0, 1.0,
@@ -2823,7 +2848,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({2.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 0.0, 1.0,
                                                          1.0, 0.0, 1.0,
@@ -2834,7 +2859,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 2.0, 0.0,
                                                          0.0, 2.0, 0.0,
@@ -2845,7 +2870,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0, 1.0, 2.0}, Shape{3}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
@@ -2856,7 +2881,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({2.0, 1.0, 0.0}, Shape{3}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
@@ -2867,7 +2892,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({2.0, 1.0, 0.0, 2.0, 0.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{5,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({2.0, 2.0, 2.0,
                                                          1.0, 1.0, 1.0,
@@ -2878,7 +2903,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({2.0, 1.0, 0.0, 2.0, 0.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{3,5});
         CheckVectorApproxValues(t33.grad(), aix::tensor({2.0, 1.0, 2.0,
                                                          2.0, 1.0, 2.0,
@@ -2891,7 +2916,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{1,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 0.0,
                                                           0.0, 0.0,
@@ -2903,7 +2928,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,1,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 0.0,
                                                           1.0, 1.0,
@@ -2915,7 +2940,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(2, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,2,1});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 1.0,
                                                           0.0, 1.0,
@@ -2927,7 +2952,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({1.0, 1.0,
                                                           1.0, 1.0,
@@ -2939,7 +2964,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({1.0, 1.0,
                                                           1.0, 1.0,
@@ -2951,7 +2976,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(2, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({1.0, 1.0,
                                                           1.0, 1.0,
@@ -2965,7 +2990,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 0.0,
                                                           0.0, 0.0,
@@ -2977,7 +3002,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 0.0,
                                                           2.0, 2.0,
@@ -2989,7 +3014,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(2, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 2.0,
                                                           0.0, 2.0,
@@ -3003,7 +3028,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0, 1.0, 1.0, 0.0, 1.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(0, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{5,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({2.0, 2.0,
                                                           2.0, 2.0,
@@ -3015,7 +3040,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0, 1.0, 1.0, 0.0, 1.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(1, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,5,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({2.0, 2.0,
                                                           3.0, 3.0,
@@ -3027,7 +3052,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto indices  = aix::tensor({0.0, 1.0, 1.0, 0.0, 1.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(2, indices);
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.grad().shape() == Shape{2,2,5});
         CheckVectorApproxValues(t222.grad(), aix::tensor({2.0, 3.0,
                                                           2.0, 3.0,
@@ -3051,7 +3076,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{}, requireGrad(true));
         auto t = a.permute({});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{});
         CheckVectorApproxValues(a.grad(), tensor({1.0}, a.shape()).value());
     }
@@ -3060,7 +3085,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1}, requireGrad(true));
         auto t = a.permute({0});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1});
         CheckVectorApproxValues(a.grad(), tensor({1.0}, a.shape()).value());
     }
@@ -3069,7 +3094,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1}, requireGrad(true));
         auto t = a.permute({-1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1});
         CheckVectorApproxValues(a.grad(), tensor({1.0}, a.shape()).value());
     }
@@ -3078,7 +3103,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1,1}, requireGrad(true));
         auto t = a.permute({0,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,1});
         CheckVectorApproxValues(a.grad(), tensor({1.0}, a.shape()).value());
     }
@@ -3087,7 +3112,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1,1}, requireGrad(true));
         auto t = a.permute({-2,-1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,1});
         CheckVectorApproxValues(a.grad(), tensor({1.0}, a.shape()).value());
     }
@@ -3096,7 +3121,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1,1}, requireGrad(true));
         auto t = a.permute({-1,-2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,1});
         CheckVectorApproxValues(a.grad(), tensor({1.0}, a.shape()).value());
     }
@@ -3105,7 +3130,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t12;
         auto t = a.permute({0,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0}, a.shape()).value());
     }
@@ -3114,7 +3139,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t12;
         auto t = a.permute({-2,-1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0}, a.shape()).value());
     }
@@ -3123,7 +3148,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t12;
         auto t = a.permute({-1,-2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,1});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0}, a.shape()).value());
     }
@@ -3132,7 +3157,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t12.reshape({2,1}).requireGrad(true);
         auto t = a.permute({0,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,1});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0}, a.shape()).value());
     }
@@ -3141,7 +3166,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t12.reshape({2,1}).requireGrad(true);
         auto t = a.permute({-2,-1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,1});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0}, a.shape()).value());
     }
@@ -3150,7 +3175,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t12.reshape({2,1}).requireGrad(true);
         auto t = a.permute({-1,-2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0}, a.shape()).value());
     }
@@ -3159,7 +3184,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t32;
         auto t = a.permute({0,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{3,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0}, a.shape()).value());
     }
@@ -3168,7 +3193,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t32;
         auto t = a.permute({1,0});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,3});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0}, a.shape()).value());
     }
@@ -3177,7 +3202,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t32;
         auto t = a.permute({-2,-1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{3,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0}, a.shape()).value());
     }
@@ -3186,7 +3211,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t32;
         auto t = a.permute({-1,-2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,3});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0}, a.shape()).value());
     }
@@ -3195,7 +3220,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t324;
         auto t = a.permute({0,1,2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{3,2,4});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0,
                                                   1.0,1.0,1.0,1.0,1.0,1.0,
@@ -3207,7 +3232,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t324;
         auto t = a.permute({0,2,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{3,4,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0,
                                                   1.0,1.0,1.0,1.0,1.0,1.0,
@@ -3219,7 +3244,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t324;
         auto t = a.permute({1,0,2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,3,4});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0,
                                                   1.0,1.0,1.0,1.0,1.0,1.0,
@@ -3231,7 +3256,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t324;
         auto t = a.permute({1,2,0});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,4,3});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0,
                                                   1.0,1.0,1.0,1.0,1.0,1.0,
@@ -3243,7 +3268,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t324;
         auto t = a.permute({2,0,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{4,3,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0,
                                                   1.0,1.0,1.0,1.0,1.0,1.0,
@@ -3255,7 +3280,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t324;
         auto t = a.permute({2,1,0});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{4,2,3});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0,
                                                   1.0,1.0,1.0,1.0,1.0,1.0,
@@ -3267,7 +3292,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = t324;
         auto t = a.permute({-1,-2,-3});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{4,2,3});
         CheckVectorApproxValues(a.grad(), tensor({1.0,1.0,1.0,1.0,1.0,1.0,
                                                   1.0,1.0,1.0,1.0,1.0,1.0,
@@ -3283,7 +3308,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{}, requireGrad(true));
         auto t = a.permute({}) * a;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{});
         CheckVectorApproxValues(a.grad(), tensor({10.0}, a.shape()).value());
     }
@@ -3292,7 +3317,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1}, requireGrad(true));
         auto t = a.permute({0}) * a;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1});
         CheckVectorApproxValues(a.grad(), tensor({10.0}, a.shape()).value());
     }
@@ -3301,7 +3326,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1}, requireGrad(true));
         auto t = a.permute({-1}) * a;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1});
         CheckVectorApproxValues(a.grad(), tensor({10.0}, a.shape()).value());
     }
@@ -3310,7 +3335,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1,1}, requireGrad(true));
         auto t = a.permute({0,1}) * a;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,1});
         CheckVectorApproxValues(a.grad(), tensor({10.0}, a.shape()).value());
     }
@@ -3319,7 +3344,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1,1}, requireGrad(true));
         auto t = a.permute({-2,-1}) * a;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,1});
         CheckVectorApproxValues(a.grad(), tensor({10.0}, a.shape()).value());
     }
@@ -3328,7 +3353,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = tensor({5.0}, Shape{1,1}, requireGrad(true));
         auto t = a.permute({-1,-2}) * a;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,1});
         CheckVectorApproxValues(a.grad(), tensor({10.0}, a.shape()).value());
     }
@@ -3337,7 +3362,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a2.reshape({1,2}).requireGrad(true);
         auto t = a.permute({0,1}) * a;
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,2});
         CheckVectorApproxValues(a.grad(), tensor({2.0,4.0}, a.shape()).value());
     }
@@ -3346,7 +3371,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a2.reshape({1,2}).requireGrad(true);
         auto t = a.permute({-2,-1}) * a2.reshape({1,2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,2.0}, a.shape()).value());
     }
@@ -3355,7 +3380,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a2.reshape({1,2}).requireGrad(true);
         auto t = a.permute({-1,-2}) * a2.reshape({2,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,1});
         CheckVectorApproxValues(a.grad(), tensor({1.0,2.0}, a.shape()).value());
     }
@@ -3364,7 +3389,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a2.reshape({2,1}).requireGrad(true);
         auto t = a.permute({0,1}) * a2.reshape({2,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,1});
         CheckVectorApproxValues(a.grad(), tensor({1.0,2.0}, a.shape()).value());
     }
@@ -3373,7 +3398,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a2.reshape({2,1}).requireGrad(true);
         auto t = a.permute({-2,-1}) * a2.reshape({2,1});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,1});
         CheckVectorApproxValues(a.grad(), tensor({1.0,2.0}, a.shape()).value());
     }
@@ -3382,7 +3407,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a2.reshape({2,1}).requireGrad(true);
         auto t = a.permute({-1,-2}) * a2.reshape({1,2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,2.0}, a.shape()).value());
     }
@@ -3391,7 +3416,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a6.reshape({3,2}).requireGrad(true);
         auto t = a.permute({0,1}) * a6.reshape({3,2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{3,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,2.0,3.0,4.0,5.0,6.0}, a.shape()).value());
     }
@@ -3400,7 +3425,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a6.reshape({3,2}).requireGrad(true);
         auto t = a.permute({1,0}) * a6.reshape({2,3});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,3});
         CheckVectorApproxValues(a.grad(), tensor({1.0,4.0,2.0,5.0,3.0,6.0}, a.shape()).value());
     }
@@ -3409,7 +3434,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a6.reshape({3,2}).requireGrad(true);
         auto t = a.permute({-2,-1}) * a6.reshape({3,2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{3,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,2.0,3.0,4.0,5.0,6.0}, a.shape()).value());
     }
@@ -3418,7 +3443,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a6.reshape({3,2}).requireGrad(true);
         auto t = a.permute({-1,-2}) * a6.reshape({2,3});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,3});
         CheckVectorApproxValues(a.grad(), tensor({1.0,4.0,2.0,5.0,3.0,6.0}, a.shape()).value());
     }
@@ -3427,7 +3452,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a24.reshape({3,2,4}).requireGrad(true);
         auto t = a.permute({0,1,2}) * a24.reshape({3,2,4});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{3,2,4});
         CheckVectorApproxValues(a.grad(), tensor({ 1.0,  2.0,  3.0,  4.0,
                                                    5.0,  6.0,  7.0,  8.0,
@@ -3441,7 +3466,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a24.reshape({3,2,4}).requireGrad(true);
         auto t = a.permute({0,2,1}) * a24.reshape({3,4,2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{3,4,2});
         CheckVectorApproxValues(a.grad(), tensor({ 1.0,  3.0,  5.0,  7.0,
                                                    2.0,  4.0,  6.0,  8.0,
@@ -3455,7 +3480,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a24.reshape({3,2,4}).requireGrad(true);
         auto t = a.permute({1,0,2}) * a24.reshape({2,3,4});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,3,4});
         CheckVectorApproxValues(a.grad(), tensor({ 1.0,  2.0,  3.0,  4.0,
                                                   13.0, 14.0, 15.0, 16.0,
@@ -3469,7 +3494,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a24.reshape({3,2,4}).requireGrad(true);
         auto t = a.permute({1,2,0}) * a24.reshape({2,4,3});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,4,3});
         CheckVectorApproxValues(a.grad(), tensor({ 1.0,  4.0,  7.0, 10.0,
                                                   13.0, 16.0, 19.0, 22.0,
@@ -3483,7 +3508,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a24.reshape({3,2,4}).requireGrad(true);
         auto t = a.permute({2,0,1}) * a24.reshape({4,3,2});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{4,3,2});
         CheckVectorApproxValues(a.grad(), tensor({1.0,  7.0, 13.0, 19.0,
                                                   2.0,  8.0, 14.0, 20.0,
@@ -3497,7 +3522,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a24.reshape({3,2,4}).requireGrad(true);
         auto t = a.permute({2,1,0}) * a24.reshape({4,2,3});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{4,2,3});
         CheckVectorApproxValues(a.grad(), tensor({1.0,  7.0, 13.0, 19.0,
                                                   4.0, 10.0, 16.0, 22.0,
@@ -3511,7 +3536,7 @@ TEST_CASE("Auto Grad - permute()")
     {
         auto a = a24.reshape({3,2,4}).requireGrad(true);
         auto t = a.permute({-1,-2,-3}) * a24.reshape({4,2,3});
-        t.backward(1, t.shape());
+        t.backward(onesLike(t));
         CHECK(t.shape() == Shape{4,2,3});
         CheckVectorApproxValues(a.grad(), tensor({1.0,  7.0, 13.0, 19.0,
                                                   4.0, 10.0, 16.0, 22.0,
