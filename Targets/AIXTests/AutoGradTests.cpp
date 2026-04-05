@@ -283,6 +283,23 @@ TEST_CASE("Auto Grad - sum Test - 2x2")
 }
 
 
+TEST_CASE("Auto Grad - sum retainGrad stays scalar")
+{
+    aix::Shape shape{2,2};
+
+    auto x = aix::tensor({0.1, 0.2, 0.3, 0.4}, shape, { .m_requireGrad=true });
+    auto z = x.sum();
+    z.retainGrad();
+    z.backward();
+
+    CHECK(z.shape() == Shape{});
+    CHECK(z.grad().shape() == Shape{});
+    CHECK(z.grad().item<float>() == Approx(1.0));
+    CHECK(x.grad().shape() == shape);
+    CheckVectorApproxValues(x.grad(), tensor({1.0, 1.0, 1.0, 1.0}, shape).value());
+}
+
+
 TEST_CASE("Auto Grad - sigmoid Test - 2x2")
 {
     aix::Shape shape{2,2};

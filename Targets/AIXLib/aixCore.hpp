@@ -1861,6 +1861,11 @@ public:
             if (m_data->m_requireGrad) m_data->grad() += TensorValue{value, shape(), device(), dataType()};
             return;
         }
+        if (shape().empty())
+        {
+            m_data->backward(TensorValue{value, device(), dataType()});
+            return;
+        }
         m_data->backward(TensorValue{value, m_data->m_inputs[0]->m_value.shape(), device(), dataType()});
     }
     void backward(float value, const Shape & gradShape)
@@ -2174,8 +2179,7 @@ public:
     static void sumBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.empty()) return;
-        // For the sum operation, the gradient is simply the seed
-        node->m_inputs[0]->backward(seed);
+        node->m_inputs[0]->backward(seed.broadcastTo(node->m_inputs[0]->m_value.shape()));
     }
 
     static void sumBackwardFunc2(TensorNode* node, const TensorValue& seed)
