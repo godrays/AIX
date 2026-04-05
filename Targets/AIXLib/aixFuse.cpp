@@ -40,16 +40,11 @@ struct BufferBindingKey
 {
     const void*         data{nullptr};
     aix::DataType       dtype{aix::DataType::kFloat32};
-    bool                isContiguous{false};
     size_t              offset{0};
-    size_t              size{0};
-    aix::Shape          shape;
-    aix::Stride         strides;
 
     bool operator==(const BufferBindingKey& other) const
     {
-        return data == other.data && dtype == other.dtype && isContiguous == other.isContiguous &&
-               offset == other.offset && size == other.size && shape == other.shape && strides == other.strides;
+        return data == other.data && dtype == other.dtype && offset == other.offset;
     }
 };
 
@@ -63,13 +58,7 @@ struct BufferBindingKeyHash
         };
 
         combine(static_cast<size_t>(key.dtype));
-        combine(key.isContiguous ? 1ULL : 0ULL);
         combine(key.offset);
-        combine(key.size);
-        for (size_t dim : key.shape) combine(dim);
-        combine(key.shape.size());
-        for (size_t stride : key.strides) combine(stride);
-        combine(key.strides.size());
         return hash;
     }
 };
@@ -79,11 +68,7 @@ BufferBindingKey makeBufferBindingKey(const DeviceTensorParams& params)
     return {
         .data = params.data,
         .dtype = params.dtype,
-        .isContiguous = params.isContiguous,
         .offset = params.offset,
-        .size = params.size,
-        .shape = params.shape,
-        .strides = params.strides,
     };
 }
 
@@ -387,7 +372,11 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops,
             const auto& op = ops[opIdx];
 
             if (!isElementwiseOp(op.type)) { valid = false; break; }
-            if (op.output.size != elementCount) { valid = false; break; }
+            if (op.output.size != elementCount && op.type != OpType::Fill && op.type != OpType::FillMin)
+            {
+                if (elementCount == 1) elementCount = op.output.size;
+                else { valid = false; break; }
+            }
 
             if (op.type != OpType::Cast && op.output.dtype != subgraphDtype) { valid = false; break; }
 

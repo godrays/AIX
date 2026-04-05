@@ -2310,57 +2310,57 @@ public:
     Tensor operator+(const float & scalar) const
     {
         auto promotedFloatType = promoteDataTypeToFloat(dataType());
-        return *this + Tensor(scalar, shape(), { .m_dtype=promotedFloatType, .m_device=device() });
+        return *this + Tensor(scalar, {}, { .m_dtype=promotedFloatType, .m_device=device() }).broadcastTo(shape());
     }
 
     Tensor operator-(const float & scalar) const
     {
         auto promotedFloatType = promoteDataTypeToFloat(dataType());
-        return *this - Tensor(scalar, shape(), { .m_dtype=promotedFloatType, .m_device=device() });
+        return *this - Tensor(scalar, {}, { .m_dtype=promotedFloatType, .m_device=device() }).broadcastTo(shape());
     }
 
     Tensor operator*(const float & scalar) const
     {
         auto promotedFloatType = promoteDataTypeToFloat(dataType());
-        return *this * Tensor(scalar, shape(), { .m_dtype=promotedFloatType, .m_device=device() });
+        return *this * Tensor(scalar, {}, { .m_dtype=promotedFloatType, .m_device=device() }).broadcastTo(shape());
     }
 
     Tensor operator/(const float & scalar) const
     {
         auto promotedFloatType = promoteDataTypeToFloat(dataType());
-        return *this / Tensor(scalar, shape(), { .m_dtype=promotedFloatType, .m_device=device() });
+        return *this / Tensor(scalar, {}, { .m_dtype=promotedFloatType, .m_device=device() }).broadcastTo(shape());
     }
 
     friend Tensor operator+(float scalar, const Tensor & rhsTensor)
     {
         auto promotedFloatType = promoteDataTypeToFloat(rhsTensor.dataType());
-        Tensor tensor(scalar, rhsTensor.shape(), { .m_requireGrad=rhsTensor.isRequireGrad(), .m_dtype=promotedFloatType,
+        Tensor tensor(scalar, {}, { .m_requireGrad=rhsTensor.isRequireGrad(), .m_dtype=promotedFloatType,
                                                    .m_device=rhsTensor.device() });
-        return tensor + rhsTensor;
+        return tensor.broadcastTo(rhsTensor.shape()) + rhsTensor;
     }
 
     friend Tensor operator-(float scalar, const Tensor & rhsTensor)
     {
         auto promotedFloatType = promoteDataTypeToFloat(rhsTensor.dataType());
-        Tensor tensor(scalar, rhsTensor.shape(), { .m_requireGrad=rhsTensor.isRequireGrad(), .m_dtype=promotedFloatType,
+        Tensor tensor(scalar, {}, { .m_requireGrad=rhsTensor.isRequireGrad(), .m_dtype=promotedFloatType,
                                                    .m_device=rhsTensor.device() });
-        return tensor - rhsTensor;
+        return tensor.broadcastTo(rhsTensor.shape()) - rhsTensor;
     }
 
     friend Tensor operator*(float scalar, const Tensor & rhsTensor)
     {
         auto promotedFloatType = promoteDataTypeToFloat(rhsTensor.dataType());
-        Tensor tensor(scalar, rhsTensor.shape(), { .m_requireGrad=rhsTensor.isRequireGrad(), .m_dtype=promotedFloatType,
+        Tensor tensor(scalar, {}, { .m_requireGrad=rhsTensor.isRequireGrad(), .m_dtype=promotedFloatType,
                                                    .m_device=rhsTensor.device() });
-        return tensor * rhsTensor;
+        return tensor.broadcastTo(rhsTensor.shape()) * rhsTensor;
     }
 
     friend Tensor operator/(float scalar, const Tensor & rhsTensor)
     {
         auto promotedFloatType = promoteDataTypeToFloat(rhsTensor.dataType());
-        Tensor tensor(scalar, rhsTensor.shape(), { .m_requireGrad=rhsTensor.isRequireGrad(), .m_dtype=promotedFloatType,
+        Tensor tensor(scalar, {}, { .m_requireGrad=rhsTensor.isRequireGrad(), .m_dtype=promotedFloatType,
                                                    .m_device=rhsTensor.device() });
-        return tensor / rhsTensor;
+        return tensor.broadcastTo(rhsTensor.shape()) / rhsTensor;
     }
 
     Tensor sqrt() const
@@ -2464,7 +2464,7 @@ public:
     Tensor pow(float exp) const
     {
         TensorOptions opt{ .m_requireGrad=isRequireGrad(), .m_dtype=dataType(), .m_device=device() };
-        Tensor expTensor(exp, shape(), opt);
+        Tensor expTensor = Tensor(exp, Shape{}, opt).broadcastTo(shape());
         auto result = makeResult(m_data->m_value.pow(expTensor.m_data->m_value), isRequireGrad());
         result.m_data->setBackward({ m_data, expTensor.m_data }, powBackwardFunc);
         return result;
