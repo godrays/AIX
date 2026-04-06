@@ -289,6 +289,9 @@ protected:
     MTL::ComputePipelineState*   m_compFuncPSOFillMin[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOContiguous[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOReduceTo[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOReduceToContiguousInner[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOReduceToContiguousInnerVec[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOReduceToContiguousOuter[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMaxTo[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOSliceSet[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOTril[aix::DataTypeCount]{nullptr};

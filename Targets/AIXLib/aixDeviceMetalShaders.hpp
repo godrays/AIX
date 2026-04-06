@@ -296,6 +296,70 @@ METAL_FUNC size_t logicalStrideForDimension(const constant size_t* shape, size_t
     return logicalStride;
 }
 
+#define AIX_METAL_MAX_TENSOR_DIMS 16
+
+template <typename T>
+struct SumAccumType
+{
+    using type = T;
+};
+
+template <>
+struct SumAccumType<half>
+{
+    using type = float;
+};
+
+template <>
+struct SumAccumType<bfloat>
+{
+    using type = float;
+};
+
+template <>
+struct SumAccumType<short>
+{
+    using type = int;
+};
+
+template <>
+struct SumAccumType<char>
+{
+    using type = int;
+};
+
+template <>
+struct SumAccumType<uchar>
+{
+    using type = int;
+};
+
+template <typename AccumT>
+METAL_FUNC void threadgroupReduceSum(threadgroup AccumT* sharedData,
+                                     uint li,
+                                     uint threadsPerThreadgroup)
+{
+    size_t size = static_cast<size_t>(threadsPerThreadgroup);
+    while (size > 1)
+    {
+        const uint stride = static_cast<uint>(size / 2);
+        if ((size & 1) != 0 && li == 0)
+        {
+            sharedData[0] += sharedData[size - 1];
+        }
+        size >>= 1;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (li < stride)
+        {
+            sharedData[li] += sharedData[li + stride];
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
 // -----------------------------------------------------------------
 // ATOMIC UTILS
 // -----------------------------------------------------------------
@@ -1650,20 +1714,171 @@ template<typename T, typename T2>
 }
 
 
-// ReduceTo - Naive Implementation
+// ReduceTo - Gather Implementation
 // -----------------------------------------------------------------
-template<typename T, typename T2>
-[[kernel]] void reduceTo(const device T* src       [[buffer(0)]],
-                         device       T* dst       [[buffer(1)]],
-                         const device T2* newShape [[buffer(2)]],
-                         constant T2& newShapeSize [[buffer(3)]],
-                         const constant T2* layout [[buffer(4)]],
-                         uint index [[thread_position_in_grid]])
+template<typename T>
+[[kernel]] void reduceToContiguousInner(const device T* src      [[buffer(0)]],
+                                        device       T* dst      [[buffer(1)]],
+                                        constant size_t& reduceExtent [[buffer(2)]],
+                                        constant size_t& dstSize      [[buffer(3)]],
+                                        constant size_t& srcOffset    [[buffer(4)]],
+                                        uint li  [[thread_position_in_threadgroup]],
+                                        uint tgi [[threadgroup_position_in_grid]],
+                                        uint threadsPerThreadgroup [[threads_per_threadgroup]])
 {
-    size_t originalIndex = translateLogicalIndex(index, newShape, layoutShape(layout), newShapeSize, layoutRank(layout));
-    atomic_fetch_add_explicit((device atomic<T>*)&(dst[originalIndex]), src[physicalIndex(index, layout)], memory_order_relaxed);
+    if (tgi >= dstSize)
+    {
+        return;
+    }
 
-    // NOTE: Metal Framework supports add and sub operations for only atomic_float, atomic_uint and atomic_int.
+    using AccumT = typename SumAccumType<T>::type;
+    const size_t MAX_THREADS = 1024;
+    threadgroup AccumT sharedData[MAX_THREADS];
+    const size_t baseOffset = srcOffset + static_cast<size_t>(tgi) * reduceExtent;
+
+    AccumT local = static_cast<AccumT>(0);
+    for (size_t i = static_cast<size_t>(li); i < reduceExtent; i += static_cast<size_t>(threadsPerThreadgroup))
+    {
+        local += static_cast<AccumT>(src[baseOffset + i]);
+    }
+
+    sharedData[li] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroupReduceSum(sharedData, li, threadsPerThreadgroup);
+
+    if (li == 0)
+    {
+        dst[tgi] = static_cast<T>(static_cast<AccumT>(dst[tgi]) + sharedData[0]);
+    }
+}
+
+template<typename T, typename TVec>
+[[kernel]] void reduceToContiguousInnerVec(const device TVec* src [[buffer(0)]],
+                                           device       T* dst    [[buffer(1)]],
+                                           constant size_t& vecCountPerOutput [[buffer(2)]],
+                                           constant size_t& dstSize           [[buffer(3)]],
+                                           constant size_t& srcVecOffset      [[buffer(4)]],
+                                           uint li  [[thread_position_in_threadgroup]],
+                                           uint tgi [[threadgroup_position_in_grid]],
+                                           uint threadsPerThreadgroup [[threads_per_threadgroup]])
+{
+    if (tgi >= dstSize)
+    {
+        return;
+    }
+
+    using AccumT = typename SumAccumType<T>::type;
+    const size_t MAX_THREADS = 1024;
+    threadgroup AccumT sharedData[MAX_THREADS];
+    const size_t baseOffset = srcVecOffset + static_cast<size_t>(tgi) * vecCountPerOutput;
+
+    AccumT local = static_cast<AccumT>(0);
+    for (size_t i = static_cast<size_t>(li); i < vecCountPerOutput; i += static_cast<size_t>(threadsPerThreadgroup))
+    {
+        TVec v = src[baseOffset + i];
+        local += static_cast<AccumT>(v[0]) + static_cast<AccumT>(v[1])
+              +  static_cast<AccumT>(v[2]) + static_cast<AccumT>(v[3]);
+    }
+
+    sharedData[li] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroupReduceSum(sharedData, li, threadsPerThreadgroup);
+
+    if (li == 0)
+    {
+        dst[tgi] = static_cast<T>(static_cast<AccumT>(dst[tgi]) + sharedData[0]);
+    }
+}
+
+template<typename T>
+[[kernel]] void reduceToContiguousOuter(const device T* src      [[buffer(0)]],
+                                        device       T* dst      [[buffer(1)]],
+                                        constant size_t& outerExtent [[buffer(2)]],
+                                        constant size_t& innerExtent [[buffer(3)]],
+                                        constant size_t& srcOffset   [[buffer(4)]],
+                                        uint dstIndex [[thread_position_in_grid]])
+{
+    using AccumT = typename SumAccumType<T>::type;
+
+    AccumT acc = static_cast<AccumT>(dst[dstIndex]);
+    size_t srcIndex = srcOffset + static_cast<size_t>(dstIndex);
+    for (size_t outer = 0; outer < outerExtent; ++outer)
+    {
+        acc += static_cast<AccumT>(src[srcIndex]);
+        srcIndex += innerExtent;
+    }
+
+    dst[dstIndex] = static_cast<T>(acc);
+}
+
+template<typename T>
+[[kernel]] void reduceTo(const device T* src      [[buffer(0)]],
+                         device       T* dst      [[buffer(1)]],
+                         const constant size_t* plan [[buffer(2)]],
+                         uint dstIndex [[thread_position_in_grid]])
+{
+    using AccumT = typename SumAccumType<T>::type;
+
+    const size_t dstRank = plan[0];
+    const size_t reducedRank = plan[1];
+    const size_t reduceElementCount = plan[2];
+    size_t baseOffset = plan[3];
+    const constant size_t* dstShape = plan + 4;
+    const constant size_t* keptStrides = dstShape + dstRank;
+    const constant size_t* reducedShapes = keptStrides + dstRank;
+    const constant size_t* reducedStrides = reducedShapes + reducedRank;
+
+    size_t logicalIndex = static_cast<size_t>(dstIndex);
+    for (int64_t i = static_cast<int64_t>(dstRank) - 1; i >= 0; --i)
+    {
+        size_t coord = logicalIndex % dstShape[static_cast<size_t>(i)];
+        logicalIndex /= dstShape[static_cast<size_t>(i)];
+        baseOffset += coord * keptStrides[static_cast<size_t>(i)];
+    }
+
+    AccumT acc = static_cast<AccumT>(dst[dstIndex]);
+    if (reduceElementCount == 0)
+    {
+        dst[dstIndex] = static_cast<T>(acc);
+        return;
+    }
+
+    if (reducedRank == 0)
+    {
+        dst[dstIndex] = static_cast<T>(acc + static_cast<AccumT>(src[baseOffset]));
+        return;
+    }
+
+    thread size_t reducedCoords[AIX_METAL_MAX_TENSOR_DIMS];
+    for (size_t i = 0; i < reducedRank; ++i)
+    {
+        reducedCoords[i] = 0;
+    }
+
+    size_t srcIndex = baseOffset;
+    for (size_t r = 0; r < reduceElementCount; ++r)
+    {
+        acc += static_cast<AccumT>(src[srcIndex]);
+        if (r + 1 == reduceElementCount)
+        {
+            break;
+        }
+
+        for (int64_t k = static_cast<int64_t>(reducedRank) - 1; k >= 0; --k)
+        {
+            const size_t kk = static_cast<size_t>(k);
+            srcIndex += reducedStrides[kk];
+            if (++reducedCoords[kk] < reducedShapes[kk])
+            {
+                break;
+            }
+
+            srcIndex -= reducedShapes[kk] * reducedStrides[kk];
+            reducedCoords[kk] = 0;
+        }
+    }
+
+    dst[dstIndex] = static_cast<T>(acc);
 }
 
 
@@ -2627,32 +2842,79 @@ SpecializeContiguous("ui8",  uchar , size_t);
 
 // ReduceTo
 // -----------------------------------------------------------------
-#define SpecializeReduceTo(tname, type1, type2)  \
+#define SpecializeReduceTo(tname, type)  \
     template [[ host_name("reduceTo_" tname) ]]  \
-    [[kernel]] void reduceTo(const device type1* src       [[buffer(0)]], \
-                             device       type1* dst       [[buffer(1)]], \
-                             const device type2* newShape  [[buffer(2)]], \
-                             constant type2& newShapeSize  [[buffer(3)]], \
-                             const constant type2* layout  [[buffer(4)]], \
+    [[kernel]] void reduceTo(const device type* src      [[buffer(0)]], \
+                             device       type* dst      [[buffer(1)]], \
+                             const constant size_t* plan [[buffer(2)]], \
                              uint index [[thread_position_in_grid]])
 
-#define ImplementSpecializedReduceTo(tname, type1, type2)  \
-    template <> [[ host_name("reduceTo_" tname) ]]  \
-    [[kernel]] void reduceTo<type1,type2>(const device type1* src       [[buffer(0)]], \
-                                          device       type1* dst       [[buffer(1)]], \
-                                          const device type2* newShape  [[buffer(2)]], \
-                                          constant type2& newShapeSize  [[buffer(3)]], \
-                                          const constant type2* layout  [[buffer(4)]], \
-                                          uint index [[thread_position_in_grid]]) { }
+#define SpecializeReduceToContiguousInner(tname, type)  \
+    template [[ host_name("reduceToContiguousInner_" tname) ]]  \
+    [[kernel]] void reduceToContiguousInner(const device type* src      [[buffer(0)]],   \
+                                            device       type* dst      [[buffer(1)]],   \
+                                            constant size_t& reduceExtent [[buffer(2)]], \
+                                            constant size_t& dstSize      [[buffer(3)]], \
+                                            constant size_t& srcOffset    [[buffer(4)]], \
+                                            uint li  [[thread_position_in_threadgroup]], \
+                                            uint tgi [[threadgroup_position_in_grid]],   \
+                                            uint threadsPerThreadgroup [[threads_per_threadgroup]])
 
-SpecializeReduceTo("f32",  float , size_t);
-SpecializeReduceTo("i32",  int   , size_t);
-ImplementSpecializedReduceTo("f16",  half  , size_t);
-ImplementSpecializedReduceTo("bf16", bfloat, size_t);
-ImplementSpecializedReduceTo("i64",  long  , size_t);
-ImplementSpecializedReduceTo("i16",  short , size_t);
-ImplementSpecializedReduceTo("i8",   char  , size_t);
-ImplementSpecializedReduceTo("ui8",  uchar , size_t);
+#define SpecializeReduceToContiguousInnerVec(tname, vectype, scalartype)  \
+    template [[ host_name("reduceToContiguousInnerVec_" tname) ]]  \
+    [[kernel]] void reduceToContiguousInnerVec(const device vectype*    src [[buffer(0)]], \
+                                               device       scalartype* dst [[buffer(1)]], \
+                                               constant size_t& vecCountPerOutput [[buffer(2)]], \
+                                               constant size_t& dstSize           [[buffer(3)]], \
+                                               constant size_t& srcVecOffset      [[buffer(4)]], \
+                                               uint li  [[thread_position_in_threadgroup]], \
+                                               uint tgi [[threadgroup_position_in_grid]],   \
+                                               uint threadsPerThreadgroup [[threads_per_threadgroup]])
+
+#define SpecializeReduceToContiguousOuter(tname, type)  \
+    template [[ host_name("reduceToContiguousOuter_" tname) ]]  \
+    [[kernel]] void reduceToContiguousOuter(const device type* src      [[buffer(0)]],  \
+                                            device       type* dst      [[buffer(1)]],  \
+                                            constant size_t& outerExtent [[buffer(2)]], \
+                                            constant size_t& innerExtent [[buffer(3)]], \
+                                            constant size_t& srcOffset   [[buffer(4)]], \
+                                            uint index [[thread_position_in_grid]])
+
+SpecializeReduceTo("f32",  float);
+SpecializeReduceTo("f16",  half);
+SpecializeReduceTo("bf16", bfloat);
+SpecializeReduceTo("i64",  long);
+SpecializeReduceTo("i32",  int);
+SpecializeReduceTo("i16",  short);
+SpecializeReduceTo("i8",   char);
+SpecializeReduceTo("ui8",  uchar);
+
+SpecializeReduceToContiguousInner("f32",  float);
+SpecializeReduceToContiguousInner("f16",  half);
+SpecializeReduceToContiguousInner("bf16", bfloat);
+SpecializeReduceToContiguousInner("i64",  long);
+SpecializeReduceToContiguousInner("i32",  int);
+SpecializeReduceToContiguousInner("i16",  short);
+SpecializeReduceToContiguousInner("i8",   char);
+SpecializeReduceToContiguousInner("ui8",  uchar);
+
+SpecializeReduceToContiguousInnerVec("f32",  float4,  float);
+SpecializeReduceToContiguousInnerVec("f16",  half4,   half);
+SpecializeReduceToContiguousInnerVec("bf16", bfloat4, bfloat);
+SpecializeReduceToContiguousInnerVec("i64",  long4,   long);
+SpecializeReduceToContiguousInnerVec("i32",  int4,    int);
+SpecializeReduceToContiguousInnerVec("i16",  short4,  short);
+SpecializeReduceToContiguousInnerVec("i8",   char4,   char);
+SpecializeReduceToContiguousInnerVec("ui8",  uchar4,  uchar);
+
+SpecializeReduceToContiguousOuter("f32",  float);
+SpecializeReduceToContiguousOuter("f16",  half);
+SpecializeReduceToContiguousOuter("bf16", bfloat);
+SpecializeReduceToContiguousOuter("i64",  long);
+SpecializeReduceToContiguousOuter("i32",  int);
+SpecializeReduceToContiguousOuter("i16",  short);
+SpecializeReduceToContiguousOuter("i8",   char);
+SpecializeReduceToContiguousOuter("ui8",  uchar);
 
 
 // MaxTo
