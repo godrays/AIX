@@ -1640,6 +1640,46 @@ bool testReduceTo(Device* testDevice)
 }
 
 
+bool testMaxTo(Device* testDevice)
+{
+    for (size_t i=0; i<aix::DataTypeCount; ++i)
+    {
+        auto dtype = static_cast<DataType>(i);
+        // Apple Metal Framework does not support kFloat64 data type.
+        if (testDevice->type() == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+
+        auto shape    = createRandomShape(1, 5);
+        auto newShape = createRandomShape(1, 5);
+        if (!TensorValue::checkBroadcastTo(shape, newShape)) return true;
+
+        aix::DeviceCPU  refDevice;
+
+        auto srcTensor    = aix::randn(newShape).to(dtype).value();
+        auto cpuResult    = aix::TensorValue(shape, &refDevice).to(dtype);
+        auto deviceResult = aix::TensorValue(shape, testDevice).to(dtype);
+
+        refDevice.fillMin(cpuResult.deviceParams());
+        testDevice->fillMin(deviceResult.deviceParams());
+        refDevice.maxTo(srcTensor.deviceParams(),   cpuResult.deviceParams());
+        testDevice->maxTo(srcTensor.deviceParams(), deviceResult.deviceParams());
+        testDevice->synchronize();
+
+        if (!verifyResults(cpuResult, deviceResult))
+        {
+            #ifdef DEBUG_LOG
+            std::cout << "----------------------" << std::endl;
+            std::cout << "Source" << std::endl << srcTensor << std::endl;
+            std::cout << "Expected Result" << std::endl << cpuResult << std::endl;
+            std::cout << "DeviceCPU Result" << std::endl << deviceResult << std::endl;
+            #endif
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
 TEST_CASE("DeviceMetal stride add parity with transposed source")
 {
     aix::DeviceCPU refDevice;
@@ -1706,6 +1746,26 @@ TEST_CASE("DeviceMetal stride reduceTo parity with broadcast source")
 
     auto expected = cpuSrc.reduceTo({1, 3});
     auto actual = metalSrc.reduceTo({1, 3});
+    device->synchronize();
+
+    CheckVectorApproxValues(actual, expected);
+}
+
+
+TEST_CASE("DeviceMetal stride maxTo parity with broadcast source")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuSrc = TensorValue({1.0f, 4.0f, 2.0f}, {1, 3}, &refDevice).broadcastTo({2, 3});
+    auto metalSrc = TensorValue({1.0f, 4.0f, 2.0f}, {1, 3}, device.get()).broadcastTo({2, 3});
+
+    CHECK_FALSE(cpuSrc.isContiguous());
+    CHECK_FALSE(metalSrc.isContiguous());
+
+    auto expected = cpuSrc.max(0, true);
+    auto actual = metalSrc.max(0, true);
     device->synchronize();
 
     CheckVectorApproxValues(actual, expected);
@@ -2954,6 +3014,25 @@ TEST_CASE("DeviceCPU Tests - reduceTo")
         {
             auto device2 = aix::createDevice(deviceType);
             CHECK(testReduceTo(&*device2));
+        }
+    }
+}
+
+
+TEST_CASE("DeviceCPU Tests - maxTo")
+{
+    // For each available devices, tests add operation.
+    for (auto deviceType : testDeviceTypes)
+    {
+        // Check if the devices is available.
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;      // Skip if the device is not available.
+
+        // Create a new device per test
+        for (size_t i=0; i<100; ++i)
+        {
+            auto device2 = aix::createDevice(deviceType);
+            CHECK(testMaxTo(&*device2));
         }
     }
 }

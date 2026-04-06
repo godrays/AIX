@@ -1517,6 +1517,34 @@ struct ReductionMaxOp
 };
 
 
+template <typename T>
+METAL_FUNC void threadgroupReduceMax(threadgroup T* sharedData,
+                                     uint li,
+                                     uint threadsPerThreadgroup)
+{
+    ReductionMaxOp<T> reduceOp;
+    size_t size = static_cast<size_t>(threadsPerThreadgroup);
+    while (size > 1)
+    {
+        const uint stride = static_cast<uint>(size / 2);
+        if ((size & 1) != 0 && li == 0)
+        {
+            sharedData[0] = reduceOp(sharedData[0], sharedData[size - 1]);
+        }
+        size >>= 1;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (li < stride)
+        {
+            sharedData[li] = reduceOp(sharedData[li], sharedData[li + stride]);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+
 // Sum - Naive Implementation
 // -----------------------------------------------------------------
 template<typename T>
@@ -1882,18 +1910,173 @@ template<typename T>
 }
 
 
-// MaxTo - Naive Implementation
+// MaxTo - Gather Implementation
 // -----------------------------------------------------------------
-template<typename T, typename T2>
-[[kernel]] void maxTo(const device T* src       [[buffer(0)]],
-                      device       T* dst       [[buffer(1)]],
-                      const device T2* newShape [[buffer(2)]],
-                      constant T2& newShapeSize [[buffer(3)]],
-                      const constant T2* layout [[buffer(4)]],
-                      uint index [[thread_position_in_grid]])
+template<typename T>
+[[kernel]] void maxToContiguousInner(const device T* src      [[buffer(0)]],
+                                     device       T* dst      [[buffer(1)]],
+                                     constant size_t& reduceExtent [[buffer(2)]],
+                                     constant size_t& dstSize      [[buffer(3)]],
+                                     constant size_t& srcOffset    [[buffer(4)]],
+                                     uint li  [[thread_position_in_threadgroup]],
+                                     uint tgi [[threadgroup_position_in_grid]],
+                                     uint threadsPerThreadgroup [[threads_per_threadgroup]])
 {
-    size_t originalIndex = translateLogicalIndex(index, newShape, layoutShape(layout), newShapeSize, layoutRank(layout));
-    aix_atomic_fetch_max_explicit((device aix_atomic<T>*)&(dst[originalIndex]), src[physicalIndex(index, layout)], memory_order_relaxed);
+    if (tgi >= dstSize)
+    {
+        return;
+    }
+
+    const size_t MAX_THREADS = 1024;
+    threadgroup T sharedData[MAX_THREADS];
+    ReductionMaxOp<T> reduceOp;
+    const size_t baseOffset = srcOffset + static_cast<size_t>(tgi) * reduceExtent;
+
+    T local = ReductionMaxIdentity<T>{}();
+    for (size_t i = static_cast<size_t>(li); i < reduceExtent; i += static_cast<size_t>(threadsPerThreadgroup))
+    {
+        local = reduceOp(local, src[baseOffset + i]);
+    }
+
+    sharedData[li] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroupReduceMax(sharedData, li, threadsPerThreadgroup);
+
+    if (li == 0)
+    {
+        dst[tgi] = reduceOp(dst[tgi], sharedData[0]);
+    }
+}
+
+template<typename T, typename TVec>
+[[kernel]] void maxToContiguousInnerVec(const device TVec* src [[buffer(0)]],
+                                        device       T* dst    [[buffer(1)]],
+                                        constant size_t& vecCountPerOutput [[buffer(2)]],
+                                        constant size_t& dstSize           [[buffer(3)]],
+                                        constant size_t& srcVecOffset      [[buffer(4)]],
+                                        uint li  [[thread_position_in_threadgroup]],
+                                        uint tgi [[threadgroup_position_in_grid]],
+                                        uint threadsPerThreadgroup [[threads_per_threadgroup]])
+{
+    if (tgi >= dstSize)
+    {
+        return;
+    }
+
+    const size_t MAX_THREADS = 1024;
+    threadgroup T sharedData[MAX_THREADS];
+    ReductionMaxOp<T> reduceOp;
+    const size_t baseOffset = srcVecOffset + static_cast<size_t>(tgi) * vecCountPerOutput;
+
+    T local = ReductionMaxIdentity<T>{}();
+    for (size_t i = static_cast<size_t>(li); i < vecCountPerOutput; i += static_cast<size_t>(threadsPerThreadgroup))
+    {
+        TVec v = src[baseOffset + i];
+        local = reduceOp(local, v[0]);
+        local = reduceOp(local, v[1]);
+        local = reduceOp(local, v[2]);
+        local = reduceOp(local, v[3]);
+    }
+
+    sharedData[li] = local;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroupReduceMax(sharedData, li, threadsPerThreadgroup);
+
+    if (li == 0)
+    {
+        dst[tgi] = reduceOp(dst[tgi], sharedData[0]);
+    }
+}
+
+template<typename T>
+[[kernel]] void maxToContiguousOuter(const device T* src      [[buffer(0)]],
+                                     device       T* dst      [[buffer(1)]],
+                                     constant size_t& outerExtent [[buffer(2)]],
+                                     constant size_t& innerExtent [[buffer(3)]],
+                                     constant size_t& srcOffset   [[buffer(4)]],
+                                     uint dstIndex [[thread_position_in_grid]])
+{
+    ReductionMaxOp<T> reduceOp;
+
+    T acc = dst[dstIndex];
+    size_t srcIndex = srcOffset + static_cast<size_t>(dstIndex);
+    for (size_t outer = 0; outer < outerExtent; ++outer)
+    {
+        acc = reduceOp(acc, src[srcIndex]);
+        srcIndex += innerExtent;
+    }
+
+    dst[dstIndex] = acc;
+}
+
+template<typename T>
+[[kernel]] void maxTo(const device T* src      [[buffer(0)]],
+                      device       T* dst      [[buffer(1)]],
+                      const constant size_t* plan [[buffer(2)]],
+                      uint dstIndex [[thread_position_in_grid]])
+{
+    ReductionMaxOp<T> reduceOp;
+
+    const size_t dstRank = plan[0];
+    const size_t reducedRank = plan[1];
+    const size_t reduceElementCount = plan[2];
+    size_t baseOffset = plan[3];
+    const constant size_t* dstShape = plan + 4;
+    const constant size_t* keptStrides = dstShape + dstRank;
+    const constant size_t* reducedShapes = keptStrides + dstRank;
+    const constant size_t* reducedStrides = reducedShapes + reducedRank;
+
+    size_t logicalIndex = static_cast<size_t>(dstIndex);
+    for (int64_t i = static_cast<int64_t>(dstRank) - 1; i >= 0; --i)
+    {
+        size_t coord = logicalIndex % dstShape[static_cast<size_t>(i)];
+        logicalIndex /= dstShape[static_cast<size_t>(i)];
+        baseOffset += coord * keptStrides[static_cast<size_t>(i)];
+    }
+
+    T acc = dst[dstIndex];
+    if (reduceElementCount == 0)
+    {
+        dst[dstIndex] = acc;
+        return;
+    }
+
+    if (reducedRank == 0)
+    {
+        dst[dstIndex] = reduceOp(acc, src[baseOffset]);
+        return;
+    }
+
+    thread size_t reducedCoords[AIX_METAL_MAX_TENSOR_DIMS];
+    for (size_t i = 0; i < reducedRank; ++i)
+    {
+        reducedCoords[i] = 0;
+    }
+
+    size_t srcIndex = baseOffset;
+    for (size_t r = 0; r < reduceElementCount; ++r)
+    {
+        acc = reduceOp(acc, src[srcIndex]);
+        if (r + 1 == reduceElementCount)
+        {
+            break;
+        }
+
+        for (int64_t k = static_cast<int64_t>(reducedRank) - 1; k >= 0; --k)
+        {
+            const size_t kk = static_cast<size_t>(k);
+            srcIndex += reducedStrides[kk];
+            if (++reducedCoords[kk] < reducedShapes[kk])
+            {
+                break;
+            }
+
+            srcIndex -= reducedShapes[kk] * reducedStrides[kk];
+            reducedCoords[kk] = 0;
+        }
+    }
+
+    dst[dstIndex] = acc;
 }
 
 
@@ -2919,32 +3102,79 @@ SpecializeReduceToContiguousOuter("ui8",  uchar);
 
 // MaxTo
 // -----------------------------------------------------------------
-#define SpecializeMaxTo(tname, type1, type2)  \
+#define SpecializeMaxTo(tname, type)  \
     template [[ host_name("maxTo_" tname) ]]  \
-    [[kernel]] void maxTo(const device type1* src       [[buffer(0)]], \
-                          device       type1* dst       [[buffer(1)]], \
-                          const device type2* newShape  [[buffer(2)]], \
-                          constant type2& newShapeSize  [[buffer(3)]], \
-                          const constant type2* layout  [[buffer(4)]], \
+    [[kernel]] void maxTo(const device type* src      [[buffer(0)]], \
+                          device       type* dst      [[buffer(1)]], \
+                          const constant size_t* plan [[buffer(2)]], \
                           uint index [[thread_position_in_grid]])
 
-#define ImplementSpecializedMaxTo(tname, type1, type2)  \
-    template <> [[ host_name("maxTo_" tname) ]]  \
-    [[kernel]] void maxTo<type1,type2>(const device type1* src       [[buffer(0)]], \
-                                       device       type1* dst       [[buffer(1)]], \
-                                       const device type2* newShape  [[buffer(2)]], \
-                                       constant type2& newShapeSize  [[buffer(3)]], \
-                                       const constant type2* layout  [[buffer(4)]], \
-                                       uint index [[thread_position_in_grid]]) { }
+#define SpecializeMaxToContiguousInner(tname, type)  \
+    template [[ host_name("maxToContiguousInner_" tname) ]]  \
+    [[kernel]] void maxToContiguousInner(const device type* src      [[buffer(0)]], \
+                                         device       type* dst      [[buffer(1)]], \
+                                         constant size_t& reduceExtent [[buffer(2)]], \
+                                         constant size_t& dstSize      [[buffer(3)]], \
+                                         constant size_t& srcOffset    [[buffer(4)]], \
+                                         uint li  [[thread_position_in_threadgroup]], \
+                                         uint tgi [[threadgroup_position_in_grid]], \
+                                         uint threadsPerThreadgroup [[threads_per_threadgroup]])
 
-SpecializeMaxTo("f32",  float , size_t);
-SpecializeMaxTo("f16",  half  , size_t);
-SpecializeMaxTo("i32",  int   , size_t);
-SpecializeMaxTo("i16",  short , size_t);
-SpecializeMaxTo("i8",   char  , size_t);
-SpecializeMaxTo("ui8",  uchar , size_t);
-ImplementSpecializedMaxTo("bf16", bfloat, size_t);
-ImplementSpecializedMaxTo("i64",  long  , size_t);
+#define SpecializeMaxToContiguousInnerVec(tname, vectype, scalartype)  \
+    template [[ host_name("maxToContiguousInnerVec_" tname) ]]  \
+    [[kernel]] void maxToContiguousInnerVec(const device vectype* src [[buffer(0)]], \
+                                            device       scalartype* dst [[buffer(1)]], \
+                                            constant size_t& vecCountPerOutput [[buffer(2)]], \
+                                            constant size_t& dstSize           [[buffer(3)]], \
+                                            constant size_t& srcVecOffset      [[buffer(4)]], \
+                                            uint li  [[thread_position_in_threadgroup]], \
+                                            uint tgi [[threadgroup_position_in_grid]], \
+                                            uint threadsPerThreadgroup [[threads_per_threadgroup]])
+
+#define SpecializeMaxToContiguousOuter(tname, type)  \
+    template [[ host_name("maxToContiguousOuter_" tname) ]]  \
+    [[kernel]] void maxToContiguousOuter(const device type* src      [[buffer(0)]], \
+                                         device       type* dst      [[buffer(1)]], \
+                                         constant size_t& outerExtent [[buffer(2)]], \
+                                         constant size_t& innerExtent [[buffer(3)]], \
+                                         constant size_t& srcOffset   [[buffer(4)]], \
+                                         uint index [[thread_position_in_grid]])
+
+SpecializeMaxTo("f32",  float);
+SpecializeMaxTo("f16",  half);
+SpecializeMaxTo("bf16", bfloat);
+SpecializeMaxTo("i64",  long);
+SpecializeMaxTo("i32",  int);
+SpecializeMaxTo("i16",  short);
+SpecializeMaxTo("i8",   char);
+SpecializeMaxTo("ui8",  uchar);
+
+SpecializeMaxToContiguousInner("f32",  float);
+SpecializeMaxToContiguousInner("f16",  half);
+SpecializeMaxToContiguousInner("bf16", bfloat);
+SpecializeMaxToContiguousInner("i64",  long);
+SpecializeMaxToContiguousInner("i32",  int);
+SpecializeMaxToContiguousInner("i16",  short);
+SpecializeMaxToContiguousInner("i8",   char);
+SpecializeMaxToContiguousInner("ui8",  uchar);
+
+SpecializeMaxToContiguousInnerVec("f32",  float4,  float);
+SpecializeMaxToContiguousInnerVec("f16",  half4,   half);
+SpecializeMaxToContiguousInnerVec("bf16", bfloat4, bfloat);
+SpecializeMaxToContiguousInnerVec("i64",  long4,   long);
+SpecializeMaxToContiguousInnerVec("i32",  int4,    int);
+SpecializeMaxToContiguousInnerVec("i16",  short4,  short);
+SpecializeMaxToContiguousInnerVec("i8",   char4,   char);
+SpecializeMaxToContiguousInnerVec("ui8",  uchar4,  uchar);
+
+SpecializeMaxToContiguousOuter("f32",  float);
+SpecializeMaxToContiguousOuter("f16",  half);
+SpecializeMaxToContiguousOuter("bf16", bfloat);
+SpecializeMaxToContiguousOuter("i64",  long);
+SpecializeMaxToContiguousOuter("i32",  int);
+SpecializeMaxToContiguousOuter("i16",  short);
+SpecializeMaxToContiguousOuter("i8",   char);
+SpecializeMaxToContiguousOuter("ui8",  uchar);
 
 
 // SliceSet

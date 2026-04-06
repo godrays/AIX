@@ -293,6 +293,9 @@ protected:
     MTL::ComputePipelineState*   m_compFuncPSOReduceToContiguousInnerVec[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOReduceToContiguousOuter[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMaxTo[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOMaxToContiguousInner[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOMaxToContiguousInnerVec[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOMaxToContiguousOuter[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOSliceSet[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOTril[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOTriu[aix::DataTypeCount]{nullptr};
@@ -312,6 +315,22 @@ protected:
     size_t   m_currentWorkingSetSize{0};
     MTL::Event*  m_event{nullptr};
     uint64_t     m_eventValue{0};
+
+private:
+    struct ReductionRoute
+    {
+        bool valid{false};
+        bool useInnerContiguous{false};
+        bool useInnerVectorized{false};
+        bool useOuterContiguous{false};
+        size_t reduceExtent{1};
+        size_t outerExtent{1};
+        std::vector<size_t> plan{};
+    };
+
+    ReductionRoute buildReductionRoute(const DeviceTensorParams& src, const DeviceTensorParams& dst) const;
+
+    size_t selectReductionThreads(const MTL::ComputePipelineState* pso, size_t reductionExtent) const;
 };
 
 }   // namespace

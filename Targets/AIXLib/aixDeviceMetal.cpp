@@ -101,7 +101,10 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
                                                                           isNull ? nullKernelName : "reduceToContiguousInnerVec_" + dtypeStr);
         m_compFuncPSOReduceToContiguousOuter[i] = createComputeFuncPSO(defaultLibrary,
                                                                        isNull ? nullKernelName : "reduceToContiguousOuter_" + dtypeStr);
-        m_compFuncPSOMaxTo[i]       = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "maxTo_" + dtypeStr);
+        m_compFuncPSOMaxTo[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "maxTo_" + dtypeStr);
+        m_compFuncPSOMaxToContiguousInner[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "maxToContiguousInner_" + dtypeStr);
+        m_compFuncPSOMaxToContiguousInnerVec[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "maxToContiguousInnerVec_" + dtypeStr);
+        m_compFuncPSOMaxToContiguousOuter[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "maxToContiguousOuter_" + dtypeStr);
         m_compFuncPSOSliceSet[i]    = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "sliceSet_" + dtypeStr);
         m_compFuncPSOTril[i]        = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "tril_" + dtypeStr);
         m_compFuncPSOTriu[i]        = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "triu_" + dtypeStr);
@@ -208,6 +211,9 @@ DeviceMetal::~DeviceMetal()
         m_compFuncPSOReduceToContiguousInnerVec[i]->release();
         m_compFuncPSOReduceToContiguousOuter[i]->release();
         m_compFuncPSOMaxTo[i]->release();
+        m_compFuncPSOMaxToContiguousInner[i]->release();
+        m_compFuncPSOMaxToContiguousInnerVec[i]->release();
+        m_compFuncPSOMaxToContiguousOuter[i]->release();
         m_compFuncPSOSliceSet[i]->release();
         m_compFuncPSOTril[i]->release();
         m_compFuncPSOTriu[i]->release();
@@ -773,145 +779,7 @@ void DeviceMetal::reduceTo(const DeviceTensorParams& src, const DeviceTensorPara
     if (!isDeviceBuffer(dst.data))
         throw std::invalid_argument("DeviceMetal::reduceTo() result must have GPU memory.");
 
-    struct ReduceRoute
-    {
-        bool valid{false};
-        bool useInnerContiguous{false};
-        bool useInnerVectorized{false};
-        bool useOuterContiguous{false};
-        size_t reduceExtent{1};
-        size_t outerExtent{1};
-        std::vector<size_t> plan{};
-    };
-
-    auto buildRoute = [&]() -> ReduceRoute
-    {
-        ReduceRoute route;
-        constexpr size_t kMaxDims = 16;
-        const size_t srcRank = src.shape.size();
-        const size_t dstRank = dst.shape.size();
-
-        if (srcRank > kMaxDims || dstRank > kMaxDims)
-        {
-            return route;
-        }
-
-        std::vector<int64_t> dstToSrc(dstRank, -1);
-        std::vector<bool> srcReduced(srcRank, false);
-
-        int64_t j = static_cast<int64_t>(dstRank) - 1;
-        for (int64_t i = static_cast<int64_t>(srcRank) - 1; i >= 0; --i)
-        {
-            if (j >= 0 && src.shape[static_cast<size_t>(i)] == dst.shape[static_cast<size_t>(j)])
-            {
-                dstToSrc[static_cast<size_t>(j)] = i;
-                --j;
-                continue;
-            }
-
-            if (j >= 0 && dst.shape[static_cast<size_t>(j)] == 1)
-            {
-                srcReduced[static_cast<size_t>(i)] = true;
-                --j;
-                continue;
-            }
-
-            if (j >= 0)
-            {
-                return route;
-            }
-
-            srcReduced[static_cast<size_t>(i)] = true;
-        }
-
-        while (j >= 0)
-        {
-            if (dst.shape[static_cast<size_t>(j)] != 1)
-            {
-                return route;
-            }
-            --j;
-        }
-
-        route.valid = true;
-
-        bool innerContiguous = true;
-        bool outerContiguous = true;
-        bool seenReduced = false;
-        bool seenKept = false;
-        size_t reducedRank = 0;
-
-        for (size_t i = 0; i < srcRank; ++i)
-        {
-            if (srcReduced[i])
-            {
-                route.reduceExtent *= src.shape[i];
-                ++reducedRank;
-                seenReduced = true;
-                if (seenKept) outerContiguous = false;
-            }
-            else
-            {
-                seenKept = true;
-                if (seenReduced) innerContiguous = false;
-            }
-        }
-
-        if (src.isContiguous && dst.isContiguous)
-        {
-            if (innerContiguous)
-            {
-                route.useInnerContiguous = true;
-                route.useInnerVectorized = (src.offset % VECTOR_TYPE_COMPONENT_COUNT == 0) &&
-                                           (route.reduceExtent % VECTOR_TYPE_COMPONENT_COUNT == 0);
-                return route;
-            }
-
-            if (outerContiguous)
-            {
-                route.useOuterContiguous = true;
-                route.outerExtent = route.reduceExtent;
-                return route;
-            }
-        }
-
-        route.plan.reserve(4 + dstRank + dstRank + reducedRank + reducedRank);
-        route.plan.push_back(dstRank);
-        route.plan.push_back(reducedRank);
-        route.plan.push_back(route.reduceExtent);
-        route.plan.push_back(src.offset);
-
-        for (size_t i = 0; i < dstRank; ++i)
-        {
-            route.plan.push_back(dst.shape[i]);
-        }
-
-        for (size_t i = 0; i < dstRank; ++i)
-        {
-            auto srcDim = dstToSrc[i];
-            route.plan.push_back(srcDim >= 0 ? src.strides[static_cast<size_t>(srcDim)] : 0);
-        }
-
-        for (size_t i = 0; i < srcRank; ++i)
-        {
-            if (srcReduced[i])
-            {
-                route.plan.push_back(src.shape[i]);
-            }
-        }
-
-        for (size_t i = 0; i < srcRank; ++i)
-        {
-            if (srcReduced[i])
-            {
-                route.plan.push_back(src.strides[i]);
-            }
-        }
-
-        return route;
-    };
-
-    auto route = buildRoute();
+    auto route = buildReductionRoute(src, dst);
     if (!route.valid)
     {
         synchronize();
@@ -922,27 +790,6 @@ void DeviceMetal::reduceTo(const DeviceTensorParams& src, const DeviceTensorPara
     auto iDType = static_cast<size_t>(src.dtype);
     auto bufSrc = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
     auto bufDst = m_allocMap[dst.data];
-
-    auto selectReductionThreads = [&](const MTL::ComputePipelineState* pso, size_t reductionExtent) -> NS::UInteger
-    {
-        size_t hwLimit = std::min<size_t>(m_maxThreadsPerThreadgroup, pso->maxTotalThreadsPerThreadgroup());
-        if (reductionExtent == 0) reductionExtent = 1;
-        size_t desired = std::min(reductionExtent, hwLimit);
-        size_t simdWidth = std::max<size_t>(1, pso->threadExecutionWidth());
-
-        if (desired <= simdWidth)
-        {
-            return static_cast<NS::UInteger>(desired);
-        }
-
-        size_t threads = simdWidth;
-        while ((threads << 1) <= desired)
-        {
-            threads <<= 1;
-        }
-
-        return static_cast<NS::UInteger>(std::min(threads, hwLimit));
-    };
 
     if (route.useInnerVectorized)
     {
@@ -1033,8 +880,13 @@ void DeviceMetal::maxTo(const DeviceTensorParams& src, const DeviceTensorParams&
     {
         throw std::invalid_argument("DeviceMetal::maxTo() source and result data types must match.");
     }
-    // NOTE: Only certain data types are supported due to limitation of Metal Framework atomics.
-    if (!(src.dtype == DataType::kFloat32 || src.dtype == DataType::kInt32))
+
+    // Result buffer has to be allocated in advance and has to be a GPU memory.
+    if (!isDeviceBuffer(dst.data))
+        throw std::invalid_argument("DeviceMetal::maxTo() result must have GPU memory.");
+
+    auto route = buildReductionRoute(src, dst);
+    if (!route.valid)
     {
         synchronize();
         defaultDevice.maxTo(src, dst);
@@ -1042,7 +894,78 @@ void DeviceMetal::maxTo(const DeviceTensorParams& src, const DeviceTensorParams&
     }
 
     auto iDType = static_cast<size_t>(src.dtype);
-    translation(src, dst, m_compFuncPSOMaxTo[iDType], "maxTo_" + toString(src.dtype));
+    auto bufSrc = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
+    auto bufDst = m_allocMap[dst.data];
+
+    if (route.useInnerVectorized)
+    {
+        auto pso = m_compFuncPSOMaxToContiguousInnerVec[iDType];
+        size_t vecCountPerOutput = route.reduceExtent / VECTOR_TYPE_COMPONENT_COUNT;
+        size_t srcVecOffset = src.offset / VECTOR_TYPE_COMPONENT_COUNT;
+        auto threads = selectReductionThreads(pso, vecCountPerOutput);
+
+        m_compEncoder->setComputePipelineState(pso);
+        m_compEncoder->setBuffer(bufSrc, 0, 0);
+        m_compEncoder->setBuffer(bufDst, 0, 1);
+        m_compEncoder->setBytes(&vecCountPerOutput, sizeof(vecCountPerOutput), 2);
+        m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
+        m_compEncoder->setBytes(&srcVecOffset, sizeof(srcVecOffset), 4);
+        m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
+
+        freeTemporaryBuffer(bufSrc);
+        commitBatchQueue();
+        return;
+    }
+
+    if (route.useInnerContiguous)
+    {
+        auto pso = m_compFuncPSOMaxToContiguousInner[iDType];
+        auto threads = selectReductionThreads(pso, route.reduceExtent);
+
+        m_compEncoder->setComputePipelineState(pso);
+        m_compEncoder->setBuffer(bufSrc, 0, 0);
+        m_compEncoder->setBuffer(bufDst, 0, 1);
+        m_compEncoder->setBytes(&route.reduceExtent, sizeof(route.reduceExtent), 2);
+        m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
+        m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
+        m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
+
+        freeTemporaryBuffer(bufSrc);
+        commitBatchQueue();
+        return;
+    }
+
+    if (route.useOuterContiguous)
+    {
+        auto pso = m_compFuncPSOMaxToContiguousOuter[iDType];
+        auto innerExtent = dst.size;
+
+        m_compEncoder->setComputePipelineState(pso);
+        m_compEncoder->setBuffer(bufSrc, 0, 0);
+        m_compEncoder->setBuffer(bufDst, 0, 1);
+        m_compEncoder->setBytes(&route.outerExtent, sizeof(route.outerExtent), 2);
+        m_compEncoder->setBytes(&innerExtent, sizeof(innerExtent), 3);
+        m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
+
+        NS::UInteger w = std::min(innerExtent, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
+        m_compEncoder->dispatchThreads({innerExtent, 1, 1}, {w, 1, 1});
+
+        freeTemporaryBuffer(bufSrc);
+        commitBatchQueue();
+        return;
+    }
+
+    auto pso = m_compFuncPSOMaxTo[iDType];
+    m_compEncoder->setComputePipelineState(pso);
+    m_compEncoder->setBuffer(bufSrc, 0, 0);
+    m_compEncoder->setBuffer(bufDst, 0, 1);
+    m_compEncoder->setBytes(route.plan.data(), route.plan.size() * sizeof(size_t), 2);
+
+    NS::UInteger w = std::min(dst.size, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
+    m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});
+
+    freeTemporaryBuffer(bufSrc);
+    commitBatchQueue();
 }
 
 void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
@@ -2097,6 +2020,156 @@ std::pair<size_t, size_t> DeviceMetal::fuseKernelCacheStats() const
 {
     if (m_kernelGen) return {m_kernelGen->cacheHits(), m_kernelGen->cacheMisses()};
     return {0, 0};
+}
+
+DeviceMetal::ReductionRoute DeviceMetal::buildReductionRoute(const DeviceTensorParams& src,
+                                                             const DeviceTensorParams& dst) const
+{
+    ReductionRoute route;
+    constexpr size_t kMaxDims = 16;
+    const size_t srcRank = src.shape.size();
+    const size_t dstRank = dst.shape.size();
+
+    if (srcRank > kMaxDims || dstRank > kMaxDims)
+    {
+        return route;
+    }
+
+    std::vector<int64_t> dstToSrc(dstRank, -1);
+    std::vector<bool> srcReduced(srcRank, false);
+
+    int64_t j = static_cast<int64_t>(dstRank) - 1;
+    for (int64_t i = static_cast<int64_t>(srcRank) - 1; i >= 0; --i)
+    {
+        if (j >= 0 && src.shape[static_cast<size_t>(i)] == dst.shape[static_cast<size_t>(j)])
+        {
+            dstToSrc[static_cast<size_t>(j)] = i;
+            --j;
+            continue;
+        }
+
+        if (j >= 0 && dst.shape[static_cast<size_t>(j)] == 1)
+        {
+            srcReduced[static_cast<size_t>(i)] = true;
+            --j;
+            continue;
+        }
+
+        if (j >= 0)
+        {
+            return route;
+        }
+
+        srcReduced[static_cast<size_t>(i)] = true;
+    }
+
+    while (j >= 0)
+    {
+        if (dst.shape[static_cast<size_t>(j)] != 1)
+        {
+            return route;
+        }
+        --j;
+    }
+
+    route.valid = true;
+
+    bool innerContiguous = true;
+    bool outerContiguous = true;
+    bool seenReduced = false;
+    bool seenKept = false;
+    size_t reducedRank = 0;
+
+    for (size_t i = 0; i < srcRank; ++i)
+    {
+        if (srcReduced[i])
+        {
+            route.reduceExtent *= src.shape[i];
+            ++reducedRank;
+            seenReduced = true;
+            if (seenKept) outerContiguous = false;
+        }
+        else
+        {
+            seenKept = true;
+            if (seenReduced) innerContiguous = false;
+        }
+    }
+
+    if (src.isContiguous && dst.isContiguous)
+    {
+        if (innerContiguous)
+        {
+            route.useInnerContiguous = true;
+            route.useInnerVectorized = (src.offset % VECTOR_TYPE_COMPONENT_COUNT == 0) &&
+                                       (route.reduceExtent % VECTOR_TYPE_COMPONENT_COUNT == 0);
+            return route;
+        }
+
+        if (outerContiguous)
+        {
+            route.useOuterContiguous = true;
+            route.outerExtent = route.reduceExtent;
+            return route;
+        }
+    }
+
+    route.plan.reserve(4 + dstRank + dstRank + reducedRank + reducedRank);
+    route.plan.push_back(dstRank);
+    route.plan.push_back(reducedRank);
+    route.plan.push_back(route.reduceExtent);
+    route.plan.push_back(src.offset);
+
+    for (size_t i = 0; i < dstRank; ++i)
+    {
+        route.plan.push_back(dst.shape[i]);
+    }
+
+    for (size_t i = 0; i < dstRank; ++i)
+    {
+        auto srcDim = dstToSrc[i];
+        route.plan.push_back(srcDim >= 0 ? src.strides[static_cast<size_t>(srcDim)] : 0);
+    }
+
+    for (size_t i = 0; i < srcRank; ++i)
+    {
+        if (srcReduced[i])
+        {
+            route.plan.push_back(src.shape[i]);
+        }
+    }
+
+    for (size_t i = 0; i < srcRank; ++i)
+    {
+        if (srcReduced[i])
+        {
+            route.plan.push_back(src.strides[i]);
+        }
+    }
+
+    return route;
+}
+
+size_t DeviceMetal::selectReductionThreads(const MTL::ComputePipelineState* pso,
+                                           size_t reductionExtent) const
+{
+    size_t hwLimit = std::min<size_t>(m_maxThreadsPerThreadgroup, pso->maxTotalThreadsPerThreadgroup());
+    if (reductionExtent == 0) reductionExtent = 1;
+    size_t desired = std::min(reductionExtent, hwLimit);
+    size_t simdWidth = std::max<size_t>(1, pso->threadExecutionWidth());
+
+    if (desired <= simdWidth)
+    {
+        return desired;
+    }
+
+    size_t threads = simdWidth;
+    while ((threads << 1) <= desired)
+    {
+        threads <<= 1;
+    }
+
+    return std::min(threads, hwLimit);
 }
 
 }   // namespace
