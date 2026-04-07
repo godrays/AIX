@@ -81,3 +81,37 @@ TEST_CASE("Adam optimizer test")
     CHECK(u.grad().item<float>()  == Approx(0.00182182));
     // Note: Results are consistent with those from PyTorch.
 }
+
+
+TEST_CASE("Optimizer - NoGradGuard does not change trainable filter")
+{
+    auto trainable = tensor(2.0f, { .m_requireGrad=true });
+    auto frozen = tensor(3.0f, { .m_requireGrad=false });
+    optim::SGD optimizer({trainable, frozen}, 0.1f);
+
+    {
+        NoGradGuard guard;
+        auto noGradOutput = trainable + frozen;
+
+        CHECK(noGradOutput.isRequireGrad() == false);
+        CHECK(noGradOutput.value().item<float>() == Approx(5.0f));
+    }
+
+    CHECK(trainable.isRequireGrad() == true);
+    CHECK(frozen.isRequireGrad() == false);
+
+    const float trainableBeforeStep = trainable.value().item<float>();
+    const float frozenBeforeStep = frozen.value().item<float>();
+
+    optimizer.zeroGrad();
+
+    auto loss = trainable * trainable + frozen;
+    CHECK(loss.isRequireGrad() == true);
+
+    loss.backward();
+    optimizer.step();
+
+    CHECK(trainable.value().item<float>() != Approx(trainableBeforeStep));
+    CHECK(trainable.value().item<float>() == Approx(1.6f));
+    CHECK(frozen.value().item<float>() == Approx(frozenBeforeStep));
+}

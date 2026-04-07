@@ -14,6 +14,9 @@
 // External includes
 #include <doctest/doctest.h>
 // System includes
+#include <future>
+#include <stdexcept>
+#include <thread>
 
 using namespace aix;
 
@@ -1068,16 +1071,18 @@ TEST_CASE("Auto Grad - transpose matmul backward parity")
     auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
     if (!device) return;
 
-    auto cpuLhs = aix::tensor({1.0f, 2.0f,
-                               3.0f, 4.0f,
-                               5.0f, 6.0f}, aix::Shape{3, 2}, { .m_requireGrad=true }).transpose(0, 1);
+    auto cpuLhsBase = aix::tensor({1.0f, 2.0f,
+                                   3.0f, 4.0f,
+                                   5.0f, 6.0f}, aix::Shape{3, 2}, { .m_requireGrad=true });
+    auto cpuLhs = cpuLhsBase.transpose(0, 1);
     auto cpuRhs = aix::tensor({7.0f, 8.0f, 9.0f, 10.0f,
                                11.0f, 12.0f, 13.0f, 14.0f,
                                15.0f, 16.0f, 17.0f, 18.0f}, aix::Shape{3, 4}, { .m_requireGrad=true });
-    auto metalLhs = aix::tensor({1.0f, 2.0f,
-                                 3.0f, 4.0f,
-                                 5.0f, 6.0f}, aix::Shape{3, 2},
-                                { .m_requireGrad=true, .m_device=device.get() }).transpose(0, 1);
+    auto metalLhsBase = aix::tensor({1.0f, 2.0f,
+                                     3.0f, 4.0f,
+                                     5.0f, 6.0f}, aix::Shape{3, 2},
+                                    { .m_requireGrad=true, .m_device=device.get() });
+    auto metalLhs = metalLhsBase.transpose(0, 1);
     auto metalRhs = aix::tensor({7.0f, 8.0f, 9.0f, 10.0f,
                                  11.0f, 12.0f, 13.0f, 14.0f,
                                  15.0f, 16.0f, 17.0f, 18.0f}, aix::Shape{3, 4},
@@ -1094,7 +1099,7 @@ TEST_CASE("Auto Grad - transpose matmul backward parity")
     device->synchronize();
 
     CheckVectorApproxValues(metalLoss, cpuLoss);
-    CheckVectorApproxValues(metalLhs.grad(), cpuLhs.grad());
+    CheckVectorApproxValues(metalLhsBase.grad(), cpuLhsBase.grad());
     CheckVectorApproxValues(metalRhs.grad(), cpuRhs.grad());
 }
 
@@ -2635,7 +2640,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto t = ts.indexSelect(0, is);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{});
+        CHECK(t.shape() == Shape{});
         CheckVectorApproxValues(ts.grad(), aix::Tensor(1.0, ts.grad().shape()).value());
     }
 
@@ -2643,7 +2648,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto t = t1.indexSelect(0, is);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{1});
+        CHECK(t.shape() == Shape{1});
         CheckVectorApproxValues(t1.grad(), aix::Tensor(1.0, t1.grad().shape()).value());
     }
 
@@ -2651,7 +2656,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto t = ts.indexSelect(0, i1);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{});
+        CHECK(t.shape() == Shape{});
         CheckVectorApproxValues(ts.grad(), aix::Tensor(1.0, ts.grad().shape()).value());
     }
 
@@ -2659,7 +2664,7 @@ TEST_CASE("Auto Grad - indexSelect")
     {
         auto t = t1.indexSelect(0, i1);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{1});
+        CHECK(t.shape() == Shape{1});
         CheckVectorApproxValues(t1.grad(), aix::Tensor(1.0, t1.grad().shape()).value());
     }
 
@@ -2670,7 +2675,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{1,3});
+        CHECK(t.shape() == Shape{1,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          0.0, 0.0, 0.0,
                                                          0.0, 0.0, 0.0,}, t33.grad().shape()).value());
@@ -2681,7 +2686,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{1,3});
+        CHECK(t.shape() == Shape{1,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 0.0,
                                                          1.0, 1.0, 1.0,
                                                          0.0, 0.0, 0.0,}, t33.grad().shape()).value());
@@ -2692,7 +2697,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({2.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{1,3});
+        CHECK(t.shape() == Shape{1,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 0.0,
                                                          0.0, 0.0, 0.0,
                                                          1.0, 1.0, 1.0,}, t33.grad().shape()).value());
@@ -2703,7 +2708,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,3});
+        CHECK(t.shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
                                                          0.0, 0.0, 0.0,}, t33.grad().shape()).value());
@@ -2714,7 +2719,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 2.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,3});
+        CHECK(t.shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 0.0,
                                                          1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,}, t33.grad().shape()).value());
@@ -2725,7 +2730,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0, 2.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,3});
+        CHECK(t.shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          0.0, 0.0, 0.0,
                                                          1.0, 1.0, 1.0,}, t33.grad().shape()).value());
@@ -2736,7 +2741,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({2.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,3});
+        CHECK(t.shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          0.0, 0.0, 0.0,
                                                          1.0, 1.0, 1.0,}, t33.grad().shape()).value());
@@ -2747,7 +2752,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,3});
+        CHECK(t.shape() == Shape{2,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 0.0,
                                                          2.0, 2.0, 2.0,
                                                          0.0, 0.0, 0.0,}, t33.grad().shape()).value());
@@ -2759,7 +2764,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0, 1.0, 2.0}, Shape{3}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,3});
+        CHECK(t.shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,}, t33.grad().shape()).value());
@@ -2770,7 +2775,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({2.0, 1.0, 0.0}, Shape{3}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,3});
+        CHECK(t.shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,}, t33.grad().shape()).value());
@@ -2783,7 +2788,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,1});
+        CHECK(t.shape() == Shape{3,1});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 0.0, 0.0,
                                                          1.0, 0.0, 0.0,
                                                          1.0, 0.0, 0.0,}, t33.grad().shape()).value());
@@ -2794,7 +2799,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,1});
+        CHECK(t.shape() == Shape{3,1});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 1.0, 0.0,
                                                          0.0, 1.0, 0.0,
                                                          0.0, 1.0, 0.0,}, t33.grad().shape()).value());
@@ -2805,7 +2810,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({2.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,1});
+        CHECK(t.shape() == Shape{3,1});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 0.0, 1.0,
                                                          0.0, 0.0, 1.0,
                                                          0.0, 0.0, 1.0,}, t33.grad().shape()).value());
@@ -2816,7 +2821,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,2});
+        CHECK(t.shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 0.0,
                                                          1.0, 1.0, 0.0,
                                                          1.0, 1.0, 0.0,}, t33.grad().shape()).value());
@@ -2827,7 +2832,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 2.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,2});
+        CHECK(t.shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 1.0, 1.0,
                                                          0.0, 1.0, 1.0,
                                                          0.0, 1.0, 1.0,}, t33.grad().shape()).value());
@@ -2838,7 +2843,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0, 2.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,2});
+        CHECK(t.shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 0.0, 1.0,
                                                          1.0, 0.0, 1.0,
                                                          1.0, 0.0, 1.0,}, t33.grad().shape()).value());
@@ -2849,7 +2854,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({2.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,2});
+        CHECK(t.shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 0.0, 1.0,
                                                          1.0, 0.0, 1.0,
                                                          1.0, 0.0, 1.0,}, t33.grad().shape()).value());
@@ -2860,7 +2865,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,2});
+        CHECK(t.shape() == Shape{3,2});
         CheckVectorApproxValues(t33.grad(), aix::tensor({0.0, 2.0, 0.0,
                                                          0.0, 2.0, 0.0,
                                                          0.0, 2.0, 0.0,}, t33.grad().shape()).value());
@@ -2871,7 +2876,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0, 1.0, 2.0}, Shape{3}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,3});
+        CHECK(t.shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,}, t33.grad().shape()).value());
@@ -2882,7 +2887,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({2.0, 1.0, 0.0}, Shape{3}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,3});
+        CHECK(t.shape() == Shape{3,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,
                                                          1.0, 1.0, 1.0,}, t33.grad().shape()).value());
@@ -2893,7 +2898,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({2.0, 1.0, 0.0, 2.0, 0.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{5,3});
+        CHECK(t.shape() == Shape{5,3});
         CheckVectorApproxValues(t33.grad(), aix::tensor({2.0, 2.0, 2.0,
                                                          1.0, 1.0, 1.0,
                                                          2.0, 2.0, 2.0,}, t33.grad().shape()).value());
@@ -2904,7 +2909,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({2.0, 1.0, 0.0, 2.0, 0.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t33.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{3,5});
+        CHECK(t.shape() == Shape{3,5});
         CheckVectorApproxValues(t33.grad(), aix::tensor({2.0, 1.0, 2.0,
                                                          2.0, 1.0, 2.0,
                                                          2.0, 1.0, 2.0,}, t33.grad().shape()).value());
@@ -2917,7 +2922,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{1,2,2});
+        CHECK(t.shape() == Shape{1,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 0.0,
                                                           0.0, 0.0,
                                                           1.0, 1.0,
@@ -2929,7 +2934,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,1,2});
+        CHECK(t.shape() == Shape{2,1,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 0.0,
                                                           1.0, 1.0,
                                                           0.0, 0.0,
@@ -2941,7 +2946,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0}, Shape{1}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(2, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,2,1});
+        CHECK(t.shape() == Shape{2,2,1});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 1.0,
                                                           0.0, 1.0,
                                                           0.0, 1.0,
@@ -2953,7 +2958,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,2,2});
+        CHECK(t.shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({1.0, 1.0,
                                                           1.0, 1.0,
                                                           1.0, 1.0,
@@ -2965,7 +2970,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,2,2});
+        CHECK(t.shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({1.0, 1.0,
                                                           1.0, 1.0,
                                                           1.0, 1.0,
@@ -2977,7 +2982,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 0.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(2, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,2,2});
+        CHECK(t.shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({1.0, 1.0,
                                                           1.0, 1.0,
                                                           1.0, 1.0,
@@ -2991,7 +2996,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,2,2});
+        CHECK(t.shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 0.0,
                                                           0.0, 0.0,
                                                           2.0, 2.0,
@@ -3003,7 +3008,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,2,2});
+        CHECK(t.shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 0.0,
                                                           2.0, 2.0,
                                                           0.0, 0.0,
@@ -3015,7 +3020,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({1.0, 1.0}, Shape{2}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(2, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,2,2});
+        CHECK(t.shape() == Shape{2,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({0.0, 2.0,
                                                           0.0, 2.0,
                                                           0.0, 2.0,
@@ -3029,7 +3034,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0, 1.0, 1.0, 0.0, 1.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(0, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{5,2,2});
+        CHECK(t.shape() == Shape{5,2,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({2.0, 2.0,
                                                           2.0, 2.0,
                                                           3.0, 3.0,
@@ -3041,7 +3046,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0, 1.0, 1.0, 0.0, 1.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(1, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,5,2});
+        CHECK(t.shape() == Shape{2,5,2});
         CheckVectorApproxValues(t222.grad(), aix::tensor({2.0, 2.0,
                                                           3.0, 3.0,
                                                           2.0, 2.0,
@@ -3053,7 +3058,7 @@ TEST_CASE("Auto Grad - indexSelect")
         auto indices  = aix::tensor({0.0, 1.0, 1.0, 0.0, 1.0}, Shape{5}, aix::dtype(aix::DataType::kInt32));
         auto t = t222.indexSelect(2, indices);
         t.backward(onesLike(t));
-        CHECK(t.grad().shape() == Shape{2,2,5});
+        CHECK(t.shape() == Shape{2,2,5});
         CheckVectorApproxValues(t222.grad(), aix::tensor({2.0, 3.0,
                                                           2.0, 3.0,
                                                           2.0, 3.0,
@@ -3159,7 +3164,8 @@ TEST_CASE("Auto Grad - permute()")
         auto t = a.permute({0,1});
         t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,1});
-        CheckVectorApproxValues(a.grad(), tensor({1.0,1.0}, a.shape()).value());
+        DOCTEST_CHECK_THROWS_AS(a.grad(), std::runtime_error);
+        CheckVectorApproxValues(t12.grad(), tensor({1.0,1.0}, t12.shape()).value());
     }
 
     SUBCASE("s{2,1} p{-2,-1}")
@@ -3168,7 +3174,8 @@ TEST_CASE("Auto Grad - permute()")
         auto t = a.permute({-2,-1});
         t.backward(onesLike(t));
         CHECK(t.shape() == Shape{2,1});
-        CheckVectorApproxValues(a.grad(), tensor({1.0,1.0}, a.shape()).value());
+        DOCTEST_CHECK_THROWS_AS(a.grad(), std::runtime_error);
+        CheckVectorApproxValues(t12.grad(), tensor({1.0,1.0}, t12.shape()).value());
     }
 
     SUBCASE("s{2,1} p{-1,-2}")
@@ -3177,7 +3184,8 @@ TEST_CASE("Auto Grad - permute()")
         auto t = a.permute({-1,-2});
         t.backward(onesLike(t));
         CHECK(t.shape() == Shape{1,2});
-        CheckVectorApproxValues(a.grad(), tensor({1.0,1.0}, a.shape()).value());
+        DOCTEST_CHECK_THROWS_AS(a.grad(), std::runtime_error);
+        CheckVectorApproxValues(t12.grad(), tensor({1.0,1.0}, t12.shape()).value());
     }
 
     SUBCASE("s{3,2} p{0,1}")
@@ -3548,7 +3556,281 @@ TEST_CASE("Auto Grad - permute()")
 }
 
 
-TEST_CASE("Auto Grad - inference mode (no grad graph built)")
+TEST_CASE("Auto Grad - NoGradGuard - state restoration")
+{
+    SUBCASE("default-enabled state")
+    {
+        CHECK(aix::isGradEnabled() == true);
+    }
+
+    SUBCASE("single-scope disablement")
+    {
+        CHECK(aix::isGradEnabled() == true);
+
+        {
+            aix::NoGradGuard guard;
+            CHECK(aix::isGradEnabled() == false);
+        }
+
+        CHECK(aix::isGradEnabled() == true);
+    }
+
+    SUBCASE("nested guard restoration")
+    {
+        CHECK(aix::isGradEnabled() == true);
+
+        {
+            aix::NoGradGuard outerGuard;
+            CHECK(aix::isGradEnabled() == false);
+
+            {
+                aix::NoGradGuard innerGuard;
+                CHECK(aix::isGradEnabled() == false);
+            }
+
+            CHECK(aix::isGradEnabled() == false);
+        }
+
+        CHECK(aix::isGradEnabled() == true);
+    }
+
+    SUBCASE("exception-safety restoration")
+    {
+        CHECK(aix::isGradEnabled() == true);
+
+        try
+        {
+            aix::NoGradGuard guard;
+            CHECK(aix::isGradEnabled() == false);
+            throw std::runtime_error("test exception");
+        }
+        catch (const std::runtime_error&)
+        {
+        }
+
+        CHECK(aix::isGradEnabled() == true);
+    }
+}
+
+
+TEST_CASE("Auto Grad - NoGradGuard - common ops suppress graph")
+{
+    SUBCASE("reshape uses common makeResult path")
+    {
+        auto x = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f}, aix::Shape{2, 2}, { .m_requireGrad=true });
+
+        auto tracked = x.reshape({4, 1});
+        CHECK(tracked.isRequireGrad() == true);
+
+        {
+            aix::NoGradGuard guard;
+            auto suppressed = x.reshape({4, 1});
+            CHECK(suppressed.isRequireGrad() == false);
+        }
+
+        auto restored = x.reshape({4, 1});
+        CHECK(restored.isRequireGrad() == true);
+    }
+
+    SUBCASE("scalar helper arithmetic uses common makeResult path")
+    {
+        auto x = aix::tensor({1.0f, 2.0f}, aix::Shape{2}, { .m_requireGrad=true });
+
+        auto tracked = 2.0f * x;
+        CHECK(tracked.isRequireGrad() == true);
+
+        {
+            aix::NoGradGuard guard;
+            auto suppressed = 2.0f * x;
+            CHECK(suppressed.isRequireGrad() == false);
+        }
+
+        auto restored = 2.0f * x;
+        CHECK(restored.isRequireGrad() == true);
+    }
+}
+
+
+TEST_CASE("Auto Grad - NoGradGuard - backward requires autograd history")
+{
+    SUBCASE("scalar derived result under NoGradGuard is rejected by backward()")
+    {
+        auto x = aix::tensor({1.0f, 2.0f}, aix::Shape{2}, { .m_requireGrad=true });
+
+        aix::Tensor result;
+        {
+            aix::NoGradGuard guard;
+            result = x.sum();
+        }
+
+        CHECK(result.isRequireGrad() == false);
+
+        try
+        {
+            result.backward();
+            FAIL("Expected backward() to throw for graphless derived tensor");
+        }
+        catch (const std::runtime_error& e)
+        {
+            CHECK(std::string(e.what()).find("no autograd history") != std::string::npos);
+        }
+    }
+
+    SUBCASE("non-scalar derived result under NoGradGuard is rejected by backward(onesLike(result))")
+    {
+        auto x = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f}, aix::Shape{2, 2}, { .m_requireGrad=true });
+
+        aix::Tensor result;
+        {
+            aix::NoGradGuard guard;
+            result = x.reshape({4, 1});
+        }
+
+        CHECK(result.isRequireGrad() == false);
+
+        try
+        {
+            result.backward(onesLike(result));
+            FAIL("Expected backward(const Tensor&) to throw for graphless derived tensor");
+        }
+        catch (const std::runtime_error& e)
+        {
+            CHECK(std::string(e.what()).find("no autograd history") != std::string::npos);
+        }
+    }
+
+    SUBCASE("explicit requireGrad leaf still supports backward and populates its own grad")
+    {
+        auto leaf = aix::tensor(3.0f, { .m_requireGrad=true });
+
+        leaf.backward();
+
+        CHECK(leaf.grad().item<float>() == doctest::Approx(1.0f));
+    }
+}
+
+
+TEST_CASE("Auto Grad - NoGradGuard - explicit leaf semantics")
+{
+    SUBCASE("leaf creation keeps explicit requireGrad under NoGradGuard")
+    {
+        aix::NoGradGuard guard;
+
+        auto leaf = aix::tensor({1.0f, 2.0f}, aix::Shape{2}, { .m_requireGrad=true });
+
+        CHECK(leaf.isRequireGrad() == true);
+    }
+
+    SUBCASE("derived result from explicit leaf is still suppressed under NoGradGuard")
+    {
+        aix::NoGradGuard guard;
+
+        auto leaf = aix::tensor({1.0f, 2.0f}, aix::Shape{2}, { .m_requireGrad=true });
+        auto derived = leaf + 2.0f;
+
+        CHECK(leaf.isRequireGrad() == true);
+        CHECK(derived.isRequireGrad() == false);
+    }
+
+    SUBCASE("retainGrad remains active after requireGrad(false) on recorded non-leaf")
+    {
+        auto leaf = aix::tensor({1.0f, 2.0f}, aix::Shape{2}, { .m_requireGrad=true });
+        auto recorded = leaf + 2.0f;
+
+        recorded.retainGrad();
+        recorded.requireGrad(false);
+        recorded.backward(onesLike(recorded));
+
+        CHECK(recorded.isRequireGrad() == false);
+        CHECK(recorded.grad().shape() == aix::Shape{2});
+        CheckVectorApproxValues(recorded.grad(), aix::tensor({1.0f, 1.0f}, aix::Shape{2}).value());
+    }
+}
+
+
+TEST_CASE("Auto Grad - NoGradGuard - cat path obeys grad mode")
+{
+    SUBCASE("cat outside guard still propagates gradients")
+    {
+        auto left = aix::tensor({1.0f, 2.0f}, aix::Shape{2}, { .m_requireGrad=true });
+        auto right = aix::tensor({3.0f, 4.0f}, aix::Shape{2}, { .m_requireGrad=true });
+
+        auto result = aix::cat({left, right}, 0);
+        CHECK(result.isRequireGrad() == true);
+
+        result.sum().backward();
+
+        CheckVectorApproxValues(left.grad(), aix::tensor({1.0f, 1.0f}, left.grad().shape()).value());
+        CheckVectorApproxValues(right.grad(), aix::tensor({1.0f, 1.0f}, right.grad().shape()).value());
+    }
+
+    SUBCASE("cat inside guard suppresses autograd history")
+    {
+        auto left = aix::tensor({1.0f, 2.0f}, aix::Shape{2}, { .m_requireGrad=true });
+        auto right = aix::tensor({3.0f, 4.0f}, aix::Shape{2}, { .m_requireGrad=true });
+
+        aix::Tensor result;
+        {
+            aix::NoGradGuard guard;
+            result = aix::cat({left, right}, 0);
+        }
+
+        CHECK(result.isRequireGrad() == false);
+
+        try
+        {
+            result.sum().backward();
+            FAIL("Expected backward() to throw for graphless cat result");
+        }
+        catch (const std::runtime_error& e)
+        {
+            CHECK(std::string(e.what()).find("no autograd history") != std::string::npos);
+        }
+    }
+}
+
+
+TEST_CASE("Auto Grad - NoGradGuard - thread isolation")
+{
+    CHECK(aix::isGradEnabled() == true);
+
+    std::promise<void> threadAEnteredGuard;
+    std::shared_future<void> threadAEnteredGuardSignal = threadAEnteredGuard.get_future().share();
+    std::promise<void> allowThreadAExit;
+    std::shared_future<void> allowThreadAExitSignal = allowThreadAExit.get_future().share();
+    std::promise<void> threadBObserved;
+    std::future<void> threadBObservedSignal = threadBObserved.get_future();
+    std::promise<bool> threadAObservation;
+    std::future<bool> threadAObservationResult = threadAObservation.get_future();
+    std::promise<bool> threadBObservation;
+    std::future<bool> threadBObservationResult = threadBObservation.get_future();
+
+    std::thread threadA([&]() {
+        aix::NoGradGuard guard;
+        threadAObservation.set_value(aix::isGradEnabled());
+        threadAEnteredGuard.set_value();
+        allowThreadAExitSignal.wait();
+    });
+
+    std::thread threadB([&]() {
+        threadAEnteredGuardSignal.wait();
+        threadBObservation.set_value(aix::isGradEnabled());
+        threadBObserved.set_value();
+    });
+
+    threadBObservedSignal.wait();
+    allowThreadAExit.set_value();
+
+    threadA.join();
+    threadB.join();
+
+    CHECK(threadAObservationResult.get() == false);
+    CHECK(threadBObservationResult.get() == true);
+    CHECK(aix::isGradEnabled() == true);
+}
+
+
+TEST_CASE("Auto Grad - non-trainable leaves do not build graphs")
 {
     SUBCASE("forward correctness without requires_grad")
     {
@@ -3564,19 +3846,16 @@ TEST_CASE("Auto Grad - inference mode (no grad graph built)")
         CHECK(f.value().item<float>() == doctest::Approx(25.0f));
     }
 
-    SUBCASE("backward on inference tensor is safe no-op")
+    SUBCASE("backward on non-trainable leaf is safe no-op")
     {
-        aix::Shape shape{2, 2};
-        auto a = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f}, shape);
-        auto b = aix::tensor({5.0f, 6.0f, 7.0f, 8.0f}, shape);
+        auto leaf = aix::tensor(36.0f);
 
-        auto c = (a + b).sum();
-        c.backward();
+        leaf.backward();
 
-        CHECK(c.value().item<float>() == doctest::Approx(36.0f));
+        CHECK(leaf.value().item<float>() == doctest::Approx(36.0f));
     }
 
-    SUBCASE("inference tensor has no backward graph")
+    SUBCASE("non-trainable result has no backward graph")
     {
         aix::Shape shape{2, 2};
         auto a = aix::tensor({1.0f, 2.0f, 3.0f, 4.0f}, shape);

@@ -10,6 +10,7 @@
 // Project includes
 #include "Utils.hpp"
 #include <aix.hpp>
+#include <aixDevices.hpp>
 // External includes
 #include <doctest/doctest.h>
 // System includes
@@ -90,6 +91,250 @@ TEST_CASE("Model Forward Test - XOR")
     CheckVectorApproxValues(tm.m_w2.grad(), tensor({0.455419, 0.530338, 0.604638, 0.678252, 0.751116, 0.82317, 0.894358, 0.964627, 1.03393, 1.10222}, tm.m_w2.grad().shape()).value());
     CheckVectorApproxValues(tm.m_b2.grad(), tensor({0.99766, 0.978054, 0.975065, 0.938763}, tm.m_b2.grad().shape()).value());
     // Note: Results are consistent with those from PyTorch.
+}
+
+
+TEST_CASE("Model - NoGradGuard keeps trainable parameters trainable")
+{
+    class TinyLinearModel : public aix::nn::Module
+    {
+    public:
+        TinyLinearModel()
+        {
+            m_w = aix::tensor({1.0f, 2.0f}, aix::Shape{2, 1}, { .m_requireGrad=true });
+            m_b = aix::tensor({0.5f}, aix::Shape{1, 1}, { .m_requireGrad=true });
+
+            registerParameter("m_w", m_w);
+            registerParameter("m_b", m_b);
+        }
+
+        Tensor forward(Tensor x) const final
+        {
+            return aix::matmul(x, m_w) + m_b;
+        }
+
+        Tensor m_w;
+        Tensor m_b;
+    };
+
+    TinyLinearModel model;
+    auto input = aix::tensor({2.0f, 3.0f}, aix::Shape{1, 2});
+
+    const size_t learnableParametersBefore = model.learnableParameters();
+    CHECK(learnableParametersBefore == 3);
+
+    model.m_w.zeroGrad();
+    model.m_b.zeroGrad();
+
+    aix::Tensor noGradOutput;
+    {
+        aix::NoGradGuard guard;
+        noGradOutput = model.forward(input);
+
+        CHECK(noGradOutput.value().shape() == aix::Shape{1, 1});
+        CHECK(noGradOutput.isRequireGrad() == false);
+        CheckVectorApproxValues(noGradOutput, aix::tensor({8.5f}, noGradOutput.value().shape()));
+
+        CHECK(model.learnableParameters() == learnableParametersBefore);
+        CheckVectorApproxValues(model.m_w.grad(), aix::tensor({0.0f, 0.0f}, model.m_w.grad().shape()).value());
+        CheckVectorApproxValues(model.m_b.grad(), aix::tensor({0.0f}, model.m_b.grad().shape()).value());
+    }
+
+    auto trainOutput = model.forward(input);
+    CHECK(trainOutput.isRequireGrad() == true);
+
+    trainOutput.backward(aix::onesLike(trainOutput));
+
+    CHECK(model.learnableParameters() == learnableParametersBefore);
+    CHECK(model.m_w.isRequireGrad() == true);
+    CHECK(model.m_b.isRequireGrad() == true);
+    CheckVectorApproxValues(model.m_w.grad(), aix::tensor({2.0f, 3.0f}, model.m_w.grad().shape()).value());
+    CheckVectorApproxValues(model.m_b.grad(), aix::tensor({1.0f}, model.m_b.grad().shape()).value());
+}
+
+
+TEST_CASE("Model - to(device) supports frozen parameters")
+{
+    class FrozenParameterModel : public aix::nn::Module
+    {
+    public:
+        FrozenParameterModel()
+        {
+            m_trainable = aix::tensor({1.0f, 2.0f}, aix::Shape{2, 1}, { .m_requireGrad=true });
+            m_frozen = aix::tensor({3.0f, 4.0f}, aix::Shape{2, 1}, { .m_requireGrad=false });
+
+            registerParameter("m_trainable", m_trainable);
+            registerParameter("m_frozen", m_frozen);
+        }
+
+        Tensor forward(Tensor x) const final
+        {
+            return aix::matmul(x, m_trainable + m_frozen);
+        }
+
+        Tensor m_trainable;
+        Tensor m_frozen;
+    };
+
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    FrozenParameterModel model;
+
+    CHECK(model.m_trainable.isRequireGrad() == true);
+    CHECK(model.m_frozen.isRequireGrad() == false);
+
+    model.to(device);
+    device->synchronize();
+
+    auto input = aix::tensor({1.0f, 1.0f}, aix::Shape{1, 2}, { .m_device=device.get() });
+    auto output = model.forward(input);
+    device->synchronize();
+
+    CHECK(model.m_trainable.isRequireGrad() == true);
+    CHECK(model.m_frozen.isRequireGrad() == false);
+    CHECK(output.value().shape() == aix::Shape{1, 1});
+    CheckVectorApproxValues(output, aix::tensor({10.0f}, output.value().shape(), { .m_device=device.get() }));
+}
+
+
+TEST_CASE("Model - to(dtype) supports frozen parameters")
+{
+    class FrozenParameterModel : public aix::nn::Module
+    {
+    public:
+        FrozenParameterModel()
+        {
+            m_trainable = aix::tensor({1.0f, 2.0f}, aix::Shape{2, 1}, { .m_requireGrad=true });
+            m_frozen = aix::tensor({3.0f, 4.0f}, aix::Shape{2, 1}, { .m_requireGrad=false });
+
+            registerParameter("m_trainable", m_trainable);
+            registerParameter("m_frozen", m_frozen);
+        }
+
+        Tensor forward(Tensor x) const final
+        {
+            return aix::matmul(x, m_trainable + m_frozen);
+        }
+
+        Tensor m_trainable;
+        Tensor m_frozen;
+    };
+
+    FrozenParameterModel model;
+
+    CHECK(model.m_trainable.isRequireGrad() == true);
+    CHECK(model.m_frozen.isRequireGrad() == false);
+
+    model.to(aix::DataType::kFloat64);
+
+    CHECK(model.m_trainable.isRequireGrad() == true);
+    CHECK(model.m_frozen.isRequireGrad() == false);
+    CHECK(model.m_trainable.value().dataType() == aix::DataType::kFloat64);
+    CHECK(model.m_frozen.value().dataType() == aix::DataType::kFloat64);
+
+}
+
+
+TEST_CASE("Model - learnableParameters ignores grad mode")
+{
+    class FrozenParameterModel : public aix::nn::Module
+    {
+    public:
+        FrozenParameterModel()
+        {
+            m_trainable = aix::tensor({1.0f, 2.0f}, aix::Shape{2, 1}, { .m_requireGrad=true });
+            m_bias = aix::tensor({0.5f}, aix::Shape{1, 1}, { .m_requireGrad=true });
+            m_frozen = aix::tensor({3.0f, 4.0f}, aix::Shape{2, 1}, { .m_requireGrad=false });
+
+            registerParameter("m_trainable", m_trainable);
+            registerParameter("m_bias", m_bias);
+            registerParameter("m_frozen", m_frozen);
+        }
+
+        Tensor forward(Tensor x) const final
+        {
+            return aix::matmul(x, m_trainable + m_frozen) + m_bias;
+        }
+
+        Tensor m_trainable;
+        Tensor m_bias;
+        Tensor m_frozen;
+    };
+
+    FrozenParameterModel model;
+    const size_t learnableParametersBefore = model.learnableParameters();
+
+    CHECK(learnableParametersBefore == 3);
+
+    {
+        aix::NoGradGuard guard;
+        CHECK(model.learnableParameters() == learnableParametersBefore);
+    }
+
+    CHECK(model.learnableParameters() == learnableParametersBefore);
+}
+
+
+TEST_CASE("Model - NoGradGuard teacher student flow")
+{
+    class TeacherModel : public aix::nn::Module
+    {
+    public:
+        TeacherModel()
+        {
+            m_w = aix::tensor(2.0f, { .m_requireGrad=true });
+            registerParameter("m_w", m_w);
+        }
+
+        Tensor forward(Tensor x) const final
+        {
+            return x * m_w;
+        }
+
+        Tensor m_w;
+    };
+
+    class StudentModel : public aix::nn::Module
+    {
+    public:
+        StudentModel()
+        {
+            m_w = aix::tensor(1.0f, { .m_requireGrad=true });
+            registerParameter("m_w", m_w);
+        }
+
+        Tensor forward(Tensor x) const final
+        {
+            return x * m_w;
+        }
+
+        Tensor m_w;
+    };
+
+    TeacherModel teacher;
+    StudentModel student;
+    auto input = aix::tensor(3.0f);
+
+    teacher.m_w.zeroGrad();
+    student.m_w.zeroGrad();
+
+    aix::Tensor teacherOutput;
+    {
+        aix::NoGradGuard guard;
+        teacherOutput = teacher.forward(input);
+    }
+
+    auto studentOutput = student.forward(input);
+    auto loss = (studentOutput - teacherOutput) * (studentOutput - teacherOutput);
+
+    CHECK(teacherOutput.isRequireGrad() == false);
+
+    loss.backward();
+
+    CHECK(teacher.m_w.grad().item<float>() == doctest::Approx(0.0f));
+    CHECK(student.m_w.grad().item<float>() != doctest::Approx(0.0f));
+    CHECK(student.m_w.grad().item<float>() == doctest::Approx(-18.0f));
 }
 
 

@@ -118,6 +118,68 @@ static DataType promoteDataTypeToFloat(DataType dtype)
 // Forward declarations
 class Tensor;
 
+namespace detail
+{
+
+struct GradState
+{
+    bool m_enabled{true};
+};
+
+inline GradState& currentGradState() noexcept
+{
+    thread_local GradState state;
+    return state;
+}
+
+inline bool shouldRecordAutograd(bool anyInputRequiresGrad) noexcept
+{
+    return currentGradState().m_enabled && anyInputRequiresGrad;
+}
+
+class GradModeGuard
+{
+public:
+    explicit GradModeGuard(bool enabled) noexcept : m_previousEnabled(currentGradState().m_enabled)
+    {
+        currentGradState().m_enabled = enabled;
+    }
+
+    ~GradModeGuard() noexcept
+    {
+        currentGradState().m_enabled = m_previousEnabled;
+    }
+
+    GradModeGuard(const GradModeGuard&) = delete;
+    GradModeGuard& operator=(const GradModeGuard&) = delete;
+
+private:
+    bool m_previousEnabled{true};
+};
+
+} // namespace detail
+
+inline bool isGradEnabled() noexcept
+{
+    return detail::currentGradState().m_enabled;
+}
+
+class NoGradGuard
+{
+public:
+    NoGradGuard() noexcept : m_guard(false)
+    {
+    }
+
+    ~NoGradGuard() noexcept = default;
+
+    NoGradGuard(const NoGradGuard&) = delete;
+    NoGradGuard& operator=(const NoGradGuard&) = delete;
+
+private:
+    detail::GradModeGuard m_guard;
+};
+
 // Tensor Index, Shape and Stride Types
 using Index  = std::vector<size_t>;
 using SIndex = std::vector<ssize_t>;
@@ -1779,6 +1841,7 @@ public:
     TensorValue  m_value;
     bool  m_requireGrad;
     bool  m_retainGrad{false};
+    bool  m_isLeaf{true};
     std::vector<std::shared_ptr<TensorNode>> m_inputs;
     SIndex m_dims;
     size_t m_dim0{0};
@@ -1857,6 +1920,7 @@ public:
     void backward()
     {
         validateImplicitBackwardSeed();
+        validateBackwardHistory();
         if (shape().empty())
         {
             m_data->backward(TensorValue{1, device(), dataType()});
@@ -1868,6 +1932,7 @@ public:
     void backward(const Tensor & grad)
     {
         validateExplicitBackwardSeed(grad);
+        validateBackwardHistory();
         m_data->backward(grad.value());
     }
 
@@ -1895,7 +1960,7 @@ public:
     inline void retainGrad() const              { m_data->m_retainGrad = true; m_data->grad().fill(0); }
     inline const Tensor& requireGrad(bool state) const
     {
-        m_data->m_requireGrad = m_data->m_retainGrad = state;
+        m_data->m_requireGrad = state;
         return *this;
     }
 
@@ -2165,6 +2230,7 @@ public:
             auto it = std::find(orgDims.begin(), orgDims.end(), i);
             dims[i] = std::distance(orgDims.begin(), it);
         }
+
         node->m_inputs[0]->backward(seed.permute(dims));
     }
 
@@ -2256,7 +2322,9 @@ public:
         auto lhs = broadcastTo(bcShape).to(promotedDType);
         auto rhs = other.broadcastTo(bcShape).to(promotedDType);
 
-        auto result = makeResult(lhs.m_data->m_value + rhs.m_data->m_value, isRequireGrad() || other.isRequireGrad());
+        auto result = makeResult(lhs.m_data->m_value + rhs.m_data->m_value,
+                                 isRequireGrad() || other.isRequireGrad(),
+                                 !lhs.m_data->m_isLeaf || !rhs.m_data->m_isLeaf);
         result.m_data->setBackward({ lhs.m_data, rhs.m_data }, addBackwardFunc);
         return result;
     }
@@ -2269,7 +2337,9 @@ public:
         auto lhs = broadcastTo(bcShape).to(promotedDType);
         auto rhs = other.broadcastTo(bcShape).to(promotedDType);
 
-        auto result = makeResult(lhs.m_data->m_value - rhs.m_data->m_value, isRequireGrad() || other.isRequireGrad());
+        auto result = makeResult(lhs.m_data->m_value - rhs.m_data->m_value,
+                                 isRequireGrad() || other.isRequireGrad(),
+                                 !lhs.m_data->m_isLeaf || !rhs.m_data->m_isLeaf);
         result.m_data->setBackward({ lhs.m_data, rhs.m_data }, subBackwardFunc);
         return result;
     }
@@ -2282,7 +2352,9 @@ public:
         auto lhs = broadcastTo(bcShape).to(promotedDType);
         auto rhs = other.broadcastTo(bcShape).to(promotedDType);
 
-        auto result = makeResult(lhs.m_data->m_value * rhs.m_data->m_value, isRequireGrad() || other.isRequireGrad());
+        auto result = makeResult(lhs.m_data->m_value * rhs.m_data->m_value,
+                                 isRequireGrad() || other.isRequireGrad(),
+                                 !lhs.m_data->m_isLeaf || !rhs.m_data->m_isLeaf);
         result.m_data->setBackward({ lhs.m_data, rhs.m_data }, mulBackwardFunc);
         return result;
     }
@@ -2295,7 +2367,9 @@ public:
         auto lhs = broadcastTo(bcShape).to(promotedDType);
         auto rhs = other.broadcastTo(bcShape).to(promotedDType);
 
-        auto result = makeResult(lhs.m_data->m_value / rhs.m_data->m_value, isRequireGrad() || other.isRequireGrad());
+        auto result = makeResult(lhs.m_data->m_value / rhs.m_data->m_value,
+                                 isRequireGrad() || other.isRequireGrad(),
+                                 !lhs.m_data->m_isLeaf || !rhs.m_data->m_isLeaf);
         result.m_data->setBackward({ lhs.m_data, rhs.m_data }, divBackwardFunc);
         return result;
     }
@@ -2465,7 +2539,7 @@ public:
     {
         TensorOptions opt{ .m_dtype=dataType(), .m_device=device() };
         Tensor expTensor = Tensor(exp, Shape{}, opt).broadcastTo(shape());
-        auto result = makeResult(m_data->m_value.pow(expTensor.m_data->m_value), isRequireGrad());
+        auto result = makeResult(m_data->m_value.pow(expTensor.m_data->m_value), isRequireGrad(), !m_data->m_isLeaf);
         result.m_data->setBackward({ m_data, expTensor.m_data }, powBackwardFunc);
         return result;
     }
@@ -2477,7 +2551,9 @@ public:
         auto lhs = broadcastTo(bcShape).to(promotedDType);
         auto rhs = other.broadcastTo(bcShape).to(promotedDType);
 
-        auto result = makeResult(lhs.m_data->m_value.pow(rhs.m_data->m_value), isRequireGrad() || other.isRequireGrad());
+        auto result = makeResult(lhs.m_data->m_value.pow(rhs.m_data->m_value),
+                                 isRequireGrad() || other.isRequireGrad(),
+                                 !lhs.m_data->m_isLeaf || !rhs.m_data->m_isLeaf);
         result.m_data->setBackward({ lhs.m_data, rhs.m_data }, powBackwardFunc);
         return result;
     }
@@ -2488,7 +2564,9 @@ public:
         auto lhs = to(promotedDType);
         auto rhs = other.to(promotedDType);
 
-        auto result = makeResult(lhs.m_data->m_value.matmul(rhs.m_data->m_value), isRequireGrad() || rhs.isRequireGrad());
+        auto result = makeResult(lhs.m_data->m_value.matmul(rhs.m_data->m_value),
+                                 isRequireGrad() || rhs.isRequireGrad(),
+                                 !lhs.m_data->m_isLeaf || !rhs.m_data->m_isLeaf);
         result.m_data->setBackward({ lhs.m_data, rhs.m_data }, matmulBackwardFunc);
         return result;
     }
@@ -2623,7 +2701,7 @@ public:
             throw std::invalid_argument("Dimension is out of range for indexSelect operation.");
         }
 
-        auto result = makeResult(m_data->m_value.indexSelect(dim, indices.value()), isRequireGrad());
+        auto result = makeResult(m_data->m_value.indexSelect(dim, indices.value()), isRequireGrad(), !m_data->m_isLeaf);
         result.m_data->setBackward({ m_data }, indexSelectBackwardFunc);
         result.m_data->m_dim0 = dim;
         result.m_data->m_indices = indices.value();
@@ -2652,7 +2730,8 @@ public:
             throw std::invalid_argument("Dimension is out of range for cat() operation.");
         }
 
-        bool requireGrad = tensor.isRequireGrad();
+        bool anyInputRequiresGrad = tensor.isRequireGrad();
+        bool anyInputIsNonLeaf = !tensor.m_data->m_isLeaf;
         DataType promotedDType = tensor.dataType();
         // Tensor shapes must be the same.
         for (size_t i=0; i<tensors.size()-1; ++i)
@@ -2670,30 +2749,30 @@ public:
             {
                 throw std::invalid_argument("Tensor devices must be the same for the cat() operation.");
             }
-            requireGrad |= tensors[i+1].isRequireGrad();
+            anyInputRequiresGrad |= tensors[i+1].isRequireGrad();
+            anyInputIsNonLeaf |= !tensors[i+1].m_data->m_isLeaf;
             promotedDType = promoteDataType(promotedDType, tensors[i+1].dataType());
         }
+
+        const bool recordAutograd = detail::shouldRecordAutograd(anyInputRequiresGrad);
 
         auto newShape = tensor.shape();
         for (size_t i=1; i<tensors.size(); ++i)
             newShape[dim] += tensors[i].shape()[dim];
 
         size_t dimSize = 0;
-        Tensor result(newShape, { .m_requireGrad=requireGrad, .m_dtype=promotedDType, .m_device=tensor.device() });
+        Tensor result(newShape, { .m_requireGrad=recordAutograd, .m_dtype=promotedDType, .m_device=tensor.device() });
+        result.m_data->m_isLeaf = !anyInputRequiresGrad && !anyInputIsNonLeaf;
+        std::vector<std::shared_ptr<TensorNode>> inputs;
+        inputs.reserve(tensors.size());
         for (size_t i=0; i<tensors.size(); ++i)
         {
             result.value().sliceSet(tensors[i].to(promotedDType).value(), dim, dimSize, dimSize + tensors[i].shape()[dim], 1, true);
-            if (requireGrad)
-            {
-                result.m_data->m_inputs.emplace_back(tensors[i].m_data);
-            }
+            inputs.emplace_back(tensors[i].m_data);
             dimSize += tensors[i].shape()[dim];
         }
         result.m_data->m_dim0 = dim;
-        if (requireGrad)
-        {
-            result.m_data->m_backwardFunc = catBackwardFunc;
-        }
+        result.m_data->setBackward(std::move(inputs), catBackwardFunc);
         return result;
     }
 
@@ -2701,10 +2780,17 @@ public:
     inline friend std::ostream & operator<<(std::ostream& os, const Tensor& tensor);
 
 protected:
-    static Tensor makeResult(TensorValue value, bool requireGrad)
+    Tensor makeResult(TensorValue value, bool anyInputRequiresGrad) const
     {
+        return makeResult(std::move(value), anyInputRequiresGrad, !m_data->m_isLeaf);
+    }
+
+    static Tensor makeResult(TensorValue value, bool anyInputRequiresGrad, bool anyInputIsNonLeaf)
+    {
+        const bool recordAutograd = detail::shouldRecordAutograd(anyInputRequiresGrad);
         Tensor result;
-        result.m_data = std::make_shared<TensorNode>(std::move(value), requireGrad);
+        result.m_data = std::make_shared<TensorNode>(std::move(value), recordAutograd);
+        result.m_data->m_isLeaf = !anyInputRequiresGrad && !anyInputIsNonLeaf;
         result.m_data->m_backwardFunc = defaultBackward;
         return result;
     }
@@ -2716,7 +2802,8 @@ protected:
 
     inline void validateRetainGradientState() const
     {
-        if (!m_data->m_requireGrad && !m_data->m_retainGrad)
+        if ((!m_data->m_isLeaf && !m_data->m_retainGrad) ||
+            (m_data->m_isLeaf && !m_data->m_requireGrad && !m_data->m_retainGrad))
         {
             throw std::runtime_error("Gradients for non-leaf tensors won’t be populated during automatic gradient"
                                      " calculation. Use .retainGrad() on the non-leaf tensor if needed, or access"
@@ -2729,6 +2816,14 @@ protected:
         if (value().size() != 1)
         {
             throw std::invalid_argument("backward() requires a scalar or one-element tensor. Use backward(const Tensor&) for non-scalar outputs.");
+        }
+    }
+
+    inline void validateBackwardHistory() const
+    {
+        if (!m_data->m_isLeaf && m_data->m_inputs.empty())
+        {
+            throw std::runtime_error("backward() failed: tensor has no autograd history.");
         }
     }
 

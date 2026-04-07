@@ -68,7 +68,10 @@ public:
         for (auto & [paramName, param] : parameters())
         {
             param.value() = param.value().to(&device);
-            param.grad() = param.grad().to(&device);
+            if (param.isRequireGrad())
+            {
+                param.grad() = param.grad().to(&device);
+            }
         }
     }
 
@@ -76,9 +79,9 @@ public:
     {
         for (auto & [paramName, param] : parameters())
         {
+            param.value() = param.value().to(newDtype);
             if (param.isRequireGrad())
             {
-                param.value() = param.value().to(newDtype);
                 param.grad() = param.grad().to(newDtype);
             }
         }
