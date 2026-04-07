@@ -739,17 +739,17 @@ public:
 
     TensorValue& operator-=(float scalar)
     {
-        return *this -= TensorValue{scalar, m_shape, m_device, m_dType};
+        return *this -= TensorValue{scalar, m_shape, m_device, promoteDataTypeToFloat(m_dType)};
     }
 
     TensorValue& operator*=(float scalar)
     {
-        return *this *= TensorValue{scalar, m_shape, m_device, m_dType};
+        return *this *= TensorValue{scalar, m_shape, m_device, promoteDataTypeToFloat(m_dType)};
     }
 
     TensorValue& operator/=(float scalar)
     {
-        return *this /= TensorValue{scalar, m_shape, m_device, m_dType};
+        return *this /= TensorValue{scalar, m_shape, m_device, promoteDataTypeToFloat(m_dType)};
     }
 
     friend TensorValue operator+(float scalar, const TensorValue & tensor)

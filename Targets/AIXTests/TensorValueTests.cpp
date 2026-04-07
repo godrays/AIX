@@ -2051,6 +2051,46 @@ TEST_CASE("TensorValue - Scalar OP TensorValue - Data Type")
 }
 
 
+TEST_CASE("TensorValue - Compound Assignment OP Scalar - Data Type")
+{
+    Shape shape{4};
+    std::initializer_list<float> testData{1, 2, 3, 4};
+
+    for (size_t i=0; i<aix::DataTypeCount; ++i)
+    {
+        auto testDType = static_cast<DataType>(i);
+
+        SUBCASE("AddAssign")
+        {
+            auto x = TensorValue(testData, shape, &testDevice, testDType);
+            x += 2.0f;
+            CHECK(x.dataType() == testDType);
+        }
+
+        SUBCASE("SubAssign")
+        {
+            auto x = TensorValue(testData, shape, &testDevice, testDType);
+            x -= 2.0f;
+            CHECK(x.dataType() == testDType);
+        }
+
+        SUBCASE("MulAssign")
+        {
+            auto x = TensorValue(testData, shape, &testDevice, testDType);
+            x *= 2.0f;
+            CHECK(x.dataType() == testDType);
+        }
+
+        SUBCASE("DivAssign")
+        {
+            auto x = TensorValue(testData, shape, &testDevice, testDType);
+            x /= 2.0f;
+            CHECK(x.dataType() == testDType);
+        }
+    }
+}
+
+
 TEST_CASE("TensorValue - Squeeze")
 {
     std::initializer_list<float> data = {1.0, 2.0, 3.0, 4.0};
