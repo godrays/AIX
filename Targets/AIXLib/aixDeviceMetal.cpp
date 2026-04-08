@@ -1391,7 +1391,7 @@ void DeviceMetal::synchronize()
 void DeviceMetal::flushPendingFusedWork()
 {
     m_fuseEngine->flush();
-    if (m_currentBatchSize > 0)
+    if (m_currentBatchSize >= DISPATCH_BATCH_COMMIT_THRESHOLD)
     {
         commit();
     }
