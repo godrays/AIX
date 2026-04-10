@@ -871,7 +871,11 @@ void FuseEngine::flush()
     if (flushing) return;
     flushing = true;
 
-    auto dag = buildDag(m_pendingOps);
+    Dag dag;
+    if (m_config.deadResultElimination)
+    {
+        dag = buildDag(m_pendingOps);
+    }
 
     std::vector<bool> isDead(m_pendingOps.size(), false);
     size_t deadCount = 0;
@@ -946,92 +950,103 @@ void FuseEngine::flush()
 
         if (!liveOps.empty())
         {
-            if (!m_deferredFills.empty())
+            if (liveOps.size() < 3)
             {
                 for (const auto& op : liveOps)
                 {
-                    if (op.input0.data)
+                    m_callbacks.emitSingle(op);
+                }
+            }
+            else
+            {
+                if (!m_deferredFills.empty())
+                {
+                    for (const auto& op : liveOps)
                     {
-                        auto it = m_deferredFills.find(op.input0.data);
-                        if (it != m_deferredFills.end())
+                        if (op.input0.data)
                         {
-                            m_callbacks.emitSingle(it->second);
-                            m_emittedFillBuffers.insert(it->first);
-                            m_deferredFills.erase(it);
+                            auto it = m_deferredFills.find(op.input0.data);
+                            if (it != m_deferredFills.end())
+                            {
+                                m_callbacks.emitSingle(it->second);
+                                m_emittedFillBuffers.insert(it->first);
+                                m_deferredFills.erase(it);
+                            }
+                        }
+                        if (op.hasInput1 && op.input1.data)
+                        {
+                            auto it = m_deferredFills.find(op.input1.data);
+                            if (it != m_deferredFills.end())
+                            {
+                                m_callbacks.emitSingle(it->second);
+                                m_emittedFillBuffers.insert(it->first);
+                                m_deferredFills.erase(it);
+                            }
                         }
                     }
-                    if (op.hasInput1 && op.input1.data)
+                }
+
+                auto liveDag = buildDag(liveOps);
+                auto result = analyzeFusion(liveOps, liveDag, m_config, m_liveBuffers);
+
+                size_t totalFusedOps = 0;
+                size_t fillsAbsorbed = 0;
+                for (auto& subgraph : result.subgraphs)
+                {
+                    m_callbacks.emitFused(subgraph);
+                    totalFusedOps += subgraph.ops.size();
+                    for (const auto& op : subgraph.ops)
                     {
-                        auto it = m_deferredFills.find(op.input1.data);
-                        if (it != m_deferredFills.end())
+                        if ((op.type != OpType::Fill && op.scalarIndex0 != SIZE_MAX) || op.scalarIndex1 != SIZE_MAX)
                         {
-                            m_callbacks.emitSingle(it->second);
-                            m_emittedFillBuffers.insert(it->first);
-                            m_deferredFills.erase(it);
+                            ++fillsAbsorbed;
                         }
                     }
                 }
-            }
 
-            auto liveDag = buildDag(liveOps);
-            auto result = analyzeFusion(liveOps, liveDag, m_config, m_liveBuffers);
-
-            size_t totalFusedOps = 0;
-            size_t fillsAbsorbed = 0;
-            for (auto& subgraph : result.subgraphs)
-            {
-                m_callbacks.emitFused(subgraph);
-                totalFusedOps += subgraph.ops.size();
-                for (const auto& op : subgraph.ops)
+                std::sort(result.fallbackIndices.begin(), result.fallbackIndices.end());
+                result.fallbackIndices.erase(std::unique(result.fallbackIndices.begin(), result.fallbackIndices.end()),
+                                             result.fallbackIndices.end());
+                for (size_t idx : result.fallbackIndices)
                 {
-                    if ((op.type != OpType::Fill && op.scalarIndex0 != SIZE_MAX) || op.scalarIndex1 != SIZE_MAX)
+                    m_callbacks.emitSingle(liveOps[idx]);
+                }
+
+                for (const auto& fill : result.nonInPlaceAbsorbedFills)
+                {
+                    if (fill.output.data && !m_emittedFillBuffers.contains(fill.output.data))
                     {
-                        ++fillsAbsorbed;
+                        m_deferredFills[fill.output.data] = fill;
                     }
                 }
-            }
-            std::sort(result.fallbackIndices.begin(), result.fallbackIndices.end());
-            result.fallbackIndices.erase(std::unique(result.fallbackIndices.begin(), result.fallbackIndices.end()),
-                                         result.fallbackIndices.end());
-            for (size_t idx : result.fallbackIndices)
-            {
-                m_callbacks.emitSingle(liveOps[idx]);
-            }
 
-            for (const auto& fill : result.nonInPlaceAbsorbedFills)
-            {
-                if (fill.output.data && !m_emittedFillBuffers.contains(fill.output.data))
+                if (m_config.diagnostics)
                 {
-                    m_deferredFills[fill.output.data] = fill;
-                }
-            }
+                    m_diagnostics->fusibleSubgraphs = result.subgraphs.size();
+                    m_diagnostics->fusedOps = totalFusedOps;
+                    m_diagnostics->fallbackOps = result.fallbackIndices.size();
+                    m_diagnostics->dispatchesSaved = (totalFusedOps + result.fallbackIndices.size())
+                                                      - (result.subgraphs.size() + result.fallbackIndices.size());
+                    m_diagnostics->fillsAbsorbed = fillsAbsorbed;
 
-            if (m_config.diagnostics)
-            {
-                m_diagnostics->fusibleSubgraphs = result.subgraphs.size();
-                m_diagnostics->fusedOps = totalFusedOps;
-                m_diagnostics->fallbackOps = result.fallbackIndices.size();
-                m_diagnostics->dispatchesSaved = (totalFusedOps + result.fallbackIndices.size())
-                                                  - (result.subgraphs.size() + result.fallbackIndices.size());
-                m_diagnostics->fillsAbsorbed = fillsAbsorbed;
-
-                std::ostringstream subgraphSummary;
-                subgraphSummary << result.subgraphs.size() << " subgraphs";
-                if (!result.subgraphs.empty())
-                {
-                    subgraphSummary << " (";
-                    for (size_t i = 0; i < result.subgraphs.size(); ++i)
+                    std::ostringstream subgraphSummary;
+                    subgraphSummary << result.subgraphs.size() << " subgraphs";
+                    if (!result.subgraphs.empty())
                     {
-                        if (i > 0) subgraphSummary << ", ";
-                        subgraphSummary << result.subgraphs[i].ops.size() << " ops";
+                        subgraphSummary << " (";
+                        for (size_t i = 0; i < result.subgraphs.size(); ++i)
+                        {
+                            if (i > 0) subgraphSummary << ", ";
+                            subgraphSummary << result.subgraphs[i].ops.size() << " ops";
+                        }
+                        subgraphSummary << ")";
                     }
-                    subgraphSummary << ")";
-                }
-                m_diagnostics->subgraphSummary = subgraphSummary.str();
+                    m_diagnostics->subgraphSummary = subgraphSummary.str();
 
-                std::ostringstream fallbackSummary;
-                fallbackSummary << result.fallbackIndices.size() << " individual ops";
-                m_diagnostics->fallbackSummary = fallbackSummary.str();
+                    std::ostringstream fallbackSummary;
+                    fallbackSummary << result.fallbackIndices.size() << " individual ops";
+                    m_diagnostics->fallbackSummary = fallbackSummary.str();
+                }
             }
         }
     }

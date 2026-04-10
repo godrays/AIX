@@ -1874,15 +1874,16 @@ void DeviceMetal::emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph)
     {
         return;
     }
-    auto allocMapCopy = m_allocMap;
+
     std::vector<std::pair<MTL::Buffer*, const void*>> uploadTemps;
 
-    auto ensureDeviceBuffer = [&](const void* ptr, size_t size, size_t dtypeSize) -> MTL::Buffer* {
-        auto it = allocMapCopy.find(ptr);
-        if (it != allocMapCopy.end()) return it->second;
+    auto ensureDeviceBuffer = [&](const void* ptr, size_t size, size_t dtypeSize) -> MTL::Buffer*
+    {
+        auto it = m_allocMap.find(ptr);
+        if (it != m_allocMap.end()) return it->second;
         auto buf = getReadOnlyMTLBuffer(ptr, size, dtypeSize);
-        allocMapCopy[buf->contents()] = buf;
-        allocMapCopy[ptr] = buf;
+        m_allocMap[buf->contents()] = buf;
+        m_allocMap[ptr] = buf;
         uploadTemps.emplace_back(buf, ptr);
         return buf;
     };
@@ -1896,7 +1897,7 @@ void DeviceMetal::emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph)
         ensureDeviceBuffer(buf.data, buf.size, aix::Device::dataTypeSize(buf.dtype));
     }
 
-    m_kernelGen->encodeFusedDispatch(m_compEncoder, pso, subgraph, allocMapCopy);
+    m_kernelGen->encodeFusedDispatch(m_compEncoder, pso, subgraph, m_allocMap);
 
     for (auto& [buf, ptr] : uploadTemps)
     {
