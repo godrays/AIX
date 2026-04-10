@@ -92,7 +92,6 @@ struct FuseConfig
     bool   elementwiseFusion      = true;
     bool   multiOutputKernels     = true;
     bool   absorbFills            = true;
-    bool   deadResultElimination  = true;
     bool   diagnostics            = false;
     size_t flushThreshold         = 200;        // Pending ops before fusion planning runs.
     size_t maxBufferSlots         = 0;
@@ -145,13 +144,11 @@ struct FusedSubgraphDescriptor
 struct FlushDiagnostics
 {
     size_t opsRecorded = 0;
-    size_t opsAfterDeadElim = 0;
     size_t fusibleSubgraphs = 0;
     size_t fusedOps = 0;
     size_t fallbackOps = 0;
     size_t dispatchesSaved = 0;
     size_t fillsAbsorbed = 0;
-    size_t deadResultsEliminated = 0;
     size_t kernelCacheHits = 0;
     size_t kernelCacheMisses = 0;
     std::string subgraphSummary;

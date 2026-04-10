@@ -871,123 +871,52 @@ void FuseEngine::flush()
     if (flushing) return;
     flushing = true;
 
-    Dag dag;
-    if (m_config.deadResultElimination)
-    {
-        dag = buildDag(m_pendingOps);
-    }
-
-    std::vector<bool> isDead(m_pendingOps.size(), false);
-    size_t deadCount = 0;
-    if (m_config.deadResultElimination && !m_pendingOps.empty())
-    {
-        std::unordered_set<void*> consumedBuffers;
-        for (const auto& op : m_pendingOps)
-        {
-            if (op.input0.data) consumedBuffers.insert(op.input0.data);
-            if (op.hasInput1 && op.input1.data) consumedBuffers.insert(op.input1.data);
-        }
-        for (void* buf : m_externalLiveBuffers)
-        {
-            consumedBuffers.insert(buf);
-        }
-        for (void* buf : m_liveBuffers)
-        {
-            consumedBuffers.insert(buf);
-        }
-
-        for (size_t i = 0; i < m_pendingOps.size(); ++i)
-        {
-            if (m_pendingOps[i].output.data && !consumedBuffers.contains(m_pendingOps[i].output.data))
-            {
-                isDead[i] = true;
-                ++deadCount;
-            }
-        }
-
-        bool changed = true;
-        while (changed)
-        {
-            changed = false;
-            for (size_t i = 0; i < m_pendingOps.size(); ++i)
-            {
-                if (isDead[i]) continue;
-                void* outPtr = m_pendingOps[i].output.data;
-                if (!outPtr) continue;
-                if (!dag.nodes[i].consumers.empty())
-                {
-                    bool allConsumersDead = true;
-                    for (size_t c : dag.nodes[i].consumers)
-                    {
-                        if (!isDead[c]) { allConsumersDead = false; break; }
-                    }
-                    if (allConsumersDead)
-                    {
-                        isDead[i] = true;
-                        ++deadCount;
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-
     if (m_config.diagnostics)
     {
         m_diagnostics.emplace();
         m_diagnostics->opsRecorded = m_pendingOps.size();
-        m_diagnostics->opsAfterDeadElim = m_pendingOps.size() - deadCount;
-        m_diagnostics->deadResultsEliminated = deadCount;
     }
 
     if (m_config.elementwiseFusion && !m_pendingOps.empty())
     {
-        std::vector<OpRecord> liveOps;
-        for (size_t i = 0; i < m_pendingOps.size(); ++i)
+        if (m_pendingOps.size() < 3)
         {
-            if (!isDead[i]) liveOps.push_back(m_pendingOps[i]);
-        }
-
-        if (!liveOps.empty())
-        {
-            if (liveOps.size() < 3)
+            for (const auto& op : m_pendingOps)
             {
-                for (const auto& op : liveOps)
-                {
-                    m_callbacks.emitSingle(op);
-                }
+                m_callbacks.emitSingle(op);
             }
-            else
+        }
+        else
+        {
+            if (!m_deferredFills.empty())
             {
-                if (!m_deferredFills.empty())
+                for (const auto& op : m_pendingOps)
                 {
-                    for (const auto& op : liveOps)
+                    if (op.input0.data)
                     {
-                        if (op.input0.data)
+                        auto it = m_deferredFills.find(op.input0.data);
+                        if (it != m_deferredFills.end())
                         {
-                            auto it = m_deferredFills.find(op.input0.data);
-                            if (it != m_deferredFills.end())
-                            {
-                                m_callbacks.emitSingle(it->second);
-                                m_emittedFillBuffers.insert(it->first);
-                                m_deferredFills.erase(it);
-                            }
+                            m_callbacks.emitSingle(it->second);
+                            m_emittedFillBuffers.insert(it->first);
+                            m_deferredFills.erase(it);
                         }
-                        if (op.hasInput1 && op.input1.data)
+                    }
+                    if (op.hasInput1 && op.input1.data)
+                    {
+                        auto it = m_deferredFills.find(op.input1.data);
+                        if (it != m_deferredFills.end())
                         {
-                            auto it = m_deferredFills.find(op.input1.data);
-                            if (it != m_deferredFills.end())
-                            {
-                                m_callbacks.emitSingle(it->second);
-                                m_emittedFillBuffers.insert(it->first);
-                                m_deferredFills.erase(it);
-                            }
+                            m_callbacks.emitSingle(it->second);
+                            m_emittedFillBuffers.insert(it->first);
+                            m_deferredFills.erase(it);
                         }
                     }
                 }
+            }
 
-                auto liveDag = buildDag(liveOps);
-                auto result = analyzeFusion(liveOps, liveDag, m_config, m_liveBuffers);
+            auto liveDag = buildDag(m_pendingOps);
+            auto result = analyzeFusion(m_pendingOps, liveDag, m_config, m_liveBuffers);
 
                 size_t totalFusedOps = 0;
                 size_t fillsAbsorbed = 0;
@@ -1009,7 +938,7 @@ void FuseEngine::flush()
                                              result.fallbackIndices.end());
                 for (size_t idx : result.fallbackIndices)
                 {
-                    m_callbacks.emitSingle(liveOps[idx]);
+                    m_callbacks.emitSingle(m_pendingOps[idx]);
                 }
 
                 for (const auto& fill : result.nonInPlaceAbsorbedFills)
@@ -1047,30 +976,24 @@ void FuseEngine::flush()
                     fallbackSummary << result.fallbackIndices.size() << " individual ops";
                     m_diagnostics->fallbackSummary = fallbackSummary.str();
                 }
-            }
         }
     }
     else
     {
-        for (size_t i = 0; i < m_pendingOps.size(); ++i)
+        for (const auto& op : m_pendingOps)
         {
-            if (!isDead[i]) m_callbacks.emitSingle(m_pendingOps[i]);
+            m_callbacks.emitSingle(op);
         }
 
         if (m_config.diagnostics)
         {
-            size_t liveCount = 0;
-            for (size_t i = 0; i < m_pendingOps.size(); ++i)
-            {
-                if (!isDead[i]) ++liveCount;
-            }
             m_diagnostics->fusibleSubgraphs = 0;
             m_diagnostics->fusedOps = 0;
-            m_diagnostics->fallbackOps = liveCount;
+            m_diagnostics->fallbackOps = m_pendingOps.size();
             m_diagnostics->dispatchesSaved = 0;
             m_diagnostics->fillsAbsorbed = 0;
             m_diagnostics->subgraphSummary = "0 subgraphs (fusion disabled)";
-            m_diagnostics->fallbackSummary = std::to_string(liveCount) + " individual ops";
+            m_diagnostics->fallbackSummary = std::to_string(m_pendingOps.size()) + " individual ops";
         }
     }
 

@@ -124,7 +124,6 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     aix::fuse::FuseConfig config;
     config.elementwiseFusion = true;
     config.multiOutputKernels = true;
-    config.deadResultElimination = true;
     config.absorbFills = true;
     config.flushThreshold = 200;                // Pending ops before fusion planning runs.
     config.maxBufferSlots = 31;                 // There is no method to query the limit in the Metal API.
