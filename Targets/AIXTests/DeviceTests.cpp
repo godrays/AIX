@@ -2299,6 +2299,34 @@ TEST_CASE("DeviceMetal stride matmul parity with transposed rhs operand")
 }
 
 
+TEST_CASE("DeviceMetal stride matmul parity with M=1 transposed rhs operand")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    auto cpuLhs = TensorValue({1.0f, 2.0f, 3.0f, 4.0f}, {1, 4}, &refDevice);
+    auto cpuRhs = TensorValue({1.0f, 5.0f, 9.0f,
+                               2.0f, 6.0f, 10.0f,
+                               3.0f, 7.0f, 11.0f,
+                               4.0f, 8.0f, 12.0f}, {3, 4}, &refDevice).transpose(0, 1);
+    auto metalLhs = TensorValue({1.0f, 2.0f, 3.0f, 4.0f}, {1, 4}, device.get());
+    auto metalRhs = TensorValue({1.0f, 5.0f, 9.0f,
+                                 2.0f, 6.0f, 10.0f,
+                                 3.0f, 7.0f, 11.0f,
+                                 4.0f, 8.0f, 12.0f}, {3, 4}, device.get()).transpose(0, 1);
+
+    CHECK_FALSE(cpuRhs.isContiguous());
+    CHECK_FALSE(metalRhs.isContiguous());
+
+    auto expected = cpuLhs.matmul(cpuRhs);
+    auto actual = metalLhs.matmul(metalRhs);
+    device->synchronize();
+
+    CHECK(verifyResults(expected, actual, EPSILON_MATMUL_F32_METAL));
+}
+
+
 TEST_CASE("DeviceMetal stride matmul parity with transposed lhs and rhs operands")
 {
     aix::DeviceCPU refDevice;

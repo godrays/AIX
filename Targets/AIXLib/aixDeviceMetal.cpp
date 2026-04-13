@@ -84,6 +84,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
         m_compFuncPSOArgmaxReduce[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxReduce_" + dtypeStr);
         m_compFuncPSOArgmaxTo[i]     = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxTo_" + dtypeStr);
         m_compFuncPSOMatMulStrided[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulStrided_" + dtypeStr);
+        m_compFuncPSOMatMulStridedM1[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName: "matrixMulStridedM1_" + dtypeStr);
         m_compFuncPSOMatMulStridedTiled1616[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulStridedTiled_16_16_" + dtypeStr);
         m_compFuncPSOMatMulTiledBC6464888[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiledBC_64_64_8_8_8_" + dtypeStr);
         m_compFuncPSOMatMulTiled32x32[i]  = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulTiled_32_32_" + dtypeStr);
@@ -196,6 +197,8 @@ DeviceMetal::~DeviceMetal()
         m_compFuncPSOArgmaxInit[i]->release();
         m_compFuncPSOArgmaxReduce[i]->release();
         m_compFuncPSOArgmaxTo[i]->release();
+        m_compFuncPSOMatMulStrided[i]->release();
+        m_compFuncPSOMatMulStridedM1[i]->release();
         m_compFuncPSOMatMulTiledBC6464888[i]->release();
         m_compFuncPSOMatMulTiled32x32[i]->release();
         m_compFuncPSOMatMulTiled32x64[i]->release();
@@ -590,11 +593,13 @@ void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& 
     // HEURISTIC FOR KERNEL SELECTION
     // The tiled kernel is insanely fast for large matrices but carries minor overhead
     // for very small matrices. If dimensions are tiny, the Level 1 kernel is preferred.
-    const bool useTiled = M >= 16 && N >= 16 && K >= 16;
+    const bool useStridedM1 = M == 1;
+    const bool useTiled = !useStridedM1 && M >= 16 && N >= 16 && K >= 16;
 
     // Select the appropriate Pipeline State Object, compute kernel.
-    auto compFuncPSO = useTiled ? m_compFuncPSOMatMulStridedTiled1616[iDType]
-                                : m_compFuncPSOMatMulStrided[iDType];
+    auto compFuncPSO = useStridedM1 ? m_compFuncPSOMatMulStridedM1[iDType]
+                                    : (useTiled ? m_compFuncPSOMatMulStridedTiled1616[iDType]
+                                                : m_compFuncPSOMatMulStrided[iDType]);
 
     m_compEncoder->setComputePipelineState(compFuncPSO);
 
@@ -608,7 +613,17 @@ void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& 
     const auto boundLayoutA = bindTensorLayout(a, {.bufferIndex=5});
     const auto boundLayoutB = bindTensorLayout(b, {.bufferIndex=6});
 
-    if (useTiled)
+    if (useStridedM1)
+    {
+        constexpr NS::UInteger simdWidth = 32;
+        constexpr NS::UInteger simdgroupsPerThreadgroup = 4;
+        constexpr NS::UInteger outputColumnsPerSimdgroup = 4;
+        constexpr NS::UInteger threadgroupColumns = simdgroupsPerThreadgroup * outputColumnsPerSimdgroup;
+        assert(simdWidth * simdgroupsPerThreadgroup <= compFuncPSO->maxTotalThreadsPerThreadgroup());
+        NS::UInteger tgX = (N + threadgroupColumns - 1) / threadgroupColumns;
+        m_compEncoder->dispatchThreadgroups({tgX, 1, 1}, {simdWidth, simdgroupsPerThreadgroup, 1});
+    }
+    else if (useTiled)
     {
         // Tiled threadgroup dispatch.
         constexpr NS::UInteger TILE_SIZE = 16;

@@ -1109,6 +1109,85 @@ template<typename T>
     result[gid.y * matBSize.cols + gid.x] = sum;
 }
 
+template<typename T, uint TN>
+[[kernel, max_total_threads_per_threadgroup(128)]] void matrixMulStridedM1(const device T* inA,
+                                                                           const device T* inB,
+                                                                           device T* result,
+                                                                           constant MatrixSize& matASize,
+                                                                           constant MatrixSize& matBSize,
+                                                                           const constant size_t* layoutA,
+                                                                           const constant size_t* layoutB,
+                                                                           uint3 tgid [[threadgroup_position_in_grid]],
+                                                                           uint simdGroupId [[simdgroup_index_in_threadgroup]],
+                                                                           uint simdLaneId [[thread_index_in_simdgroup]])
+{
+    if (matASize.rows != 1)
+    {
+        return;
+    }
+
+    const constant size_t* stridesA = layoutStrides(layoutA);
+    const constant size_t* stridesB = layoutStrides(layoutB);
+    const size_t startA = layoutOffset(layoutA);
+    const size_t startB = layoutOffset(layoutB);
+    const size_t strideA_k = stridesA[1];
+    const size_t strideB_k = stridesB[0];
+    const size_t strideB_n = stridesB[1];
+    const uint colBase = static_cast<uint>(tgid.x * (TN * 4) + simdGroupId * TN);
+
+    if (colBase >= matBSize.cols)
+    {
+        return;
+    }
+
+    constexpr uint SIMDGROUP_WIDTH = 32;
+    constexpr uint SIMDGROUPS_PER_THREADGROUP = 4;
+    threadgroup T partialSums[SIMDGROUPS_PER_THREADGROUP][TN][SIMDGROUP_WIDTH];
+
+    T sums[TN] = {0};
+    for (size_t k = simdLaneId; k < matASize.cols; k += 32)
+    {
+        const T aVal = inA[startA + k * strideA_k];
+        const size_t bRowOffset = startB + k * strideB_k + colBase * strideB_n;
+        #pragma unroll
+        for (uint tn = 0; tn < TN; ++tn)
+        {
+            const uint outCol = colBase + tn;
+            if (outCol < matBSize.cols)
+            {
+                sums[tn] += aVal * inB[bRowOffset + tn * strideB_n];
+            }
+        }
+    }
+
+    #pragma unroll
+    for (uint tn = 0; tn < TN; ++tn)
+    {
+        partialSums[simdGroupId][tn][simdLaneId] = sums[tn];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simdLaneId == 0)
+    {
+        #pragma unroll
+        for (uint tn = 0; tn < TN; ++tn)
+        {
+            T reducedSum = 0;
+            #pragma unroll
+            for (uint lane = 0; lane < SIMDGROUP_WIDTH; ++lane)
+            {
+                reducedSum += partialSums[simdGroupId][tn][lane];
+            }
+
+            const uint outCol = colBase + tn;
+            if (outCol < matBSize.cols)
+            {
+                result[outCol] = reducedSum;
+            }
+        }
+    }
+}
+
 template<typename T, uint N>
 [[kernel]] void matrixMulStridedTiled(const device T* inA,
                                       const device T* inB,
@@ -2748,6 +2827,29 @@ SpecializeMatrixMulStrided("i32",  int);
 SpecializeMatrixMulStrided("i16",  short);
 SpecializeMatrixMulStrided("i8",   char);
 SpecializeMatrixMulStrided("ui8",  uchar);
+
+#define SpecializeMatrixMulStridedM1(tname, tn, type) \
+    template [[ host_name("matrixMulStridedM1_" tname) ]] \
+    [[kernel]] void matrixMulStridedM1<type, tn>(const device type* inA, \
+                                                 const device type* inB, \
+                                                 device type* result, \
+                                                 constant MatrixSize& matASize, \
+                                                 constant MatrixSize& matBSize, \
+                                                 const constant size_t* layoutA, \
+                                                 const constant size_t* layoutB, \
+                                                 uint3 tgid [[threadgroup_position_in_grid]], \
+                                                 uint simdGroupId [[simdgroup_index_in_threadgroup]], \
+                                                 uint simdLaneId [[thread_index_in_simdgroup]])
+
+// This fast path relies on simd_sum(), which Metal does not support for every scalar type.
+SpecializeMatrixMulStridedM1("f32",  4, float);
+SpecializeMatrixMulStridedM1("f16",  4, half);
+SpecializeMatrixMulStridedM1("bf16", 4, bfloat);
+SpecializeMatrixMulStridedM1("i64",  4, long);
+SpecializeMatrixMulStridedM1("i32",  4, int);
+SpecializeMatrixMulStridedM1("i16",  4, short);
+SpecializeMatrixMulStridedM1("i8",   4, char);
+SpecializeMatrixMulStridedM1("ui8",  4, uchar);
 
 #define SpecializeMatrixMulStridedTiled(tname, n, type) \
     template [[ host_name("matrixMulStridedTiled_" #n "_" #n "_" tname) ]] \
