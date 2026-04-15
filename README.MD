@@ -7,7 +7,7 @@
 AIX is designed for high readability while leveraging device acceleration for efficient computations. It supports a wide range of ML and DL tasks, focusing on performance and scalability for both research and production environments.
 
 Key features include:
-- Single-header framework with no external dependencies
+- No external dependencies
 - Auto differentiation
 - Dynamic computation graphs
 - Multi-dimension tensor support
@@ -284,8 +284,8 @@ If you find the library useful in your research, please consider citing it and u
 
 ```
 @software{AIX2024,
+   title = {{AIX}: A lean C++ machine learning framework},
    author = {Arkin Terli},
-   title = {{AIX}: Single-header Machine Learning Library},
    url = {https://github.com/godrays/aix},
    version = {0.1.0},
    year = {2024},
