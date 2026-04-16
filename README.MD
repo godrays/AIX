@@ -13,6 +13,7 @@ Key features include:
 - Multi-dimension tensor support
 - Auto tensor shape alignment (broadcasting)
 - Auto data type conversion and promotion
+- Kernel fusion for tensor operations
 - Plug-and-play hardware acceleration
 - Extensible API for custom operations and layers
 - Save/Load model parameters
