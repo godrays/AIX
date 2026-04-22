@@ -1889,35 +1889,61 @@ void DeviceMetal::emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph)
         return;
     }
 
-    std::vector<std::pair<MTL::Buffer*, const void*>> uploadTemps;
+    struct UploadTemp
+    {
+        MTL::Buffer* buffer;
+        const void*  ptr;
+        bool         keepOnDevice;
+    };
 
-    auto ensureDeviceBuffer = [&](const void* ptr, size_t size, size_t dtypeSize) -> MTL::Buffer*
+    std::vector<UploadTemp> uploadTemps;
+
+    auto ensureDeviceBuffer = [&](const void* ptr, size_t size, size_t dtypeSize, bool keepOnDevice) -> MTL::Buffer*
     {
         auto it = m_allocMap.find(ptr);
-        if (it != m_allocMap.end()) return it->second;
+        if (it != m_allocMap.end())
+        {
+            return it->second;
+        }
+
         auto buf = getReadOnlyMTLBuffer(ptr, size, dtypeSize);
         m_allocMap[buf->contents()] = buf;
         m_allocMap[ptr] = buf;
-        uploadTemps.emplace_back(buf, ptr);
+        uploadTemps.push_back({buf, ptr, keepOnDevice});
         return buf;
     };
 
     for (const auto& buf : subgraph.inputBuffers)
     {
-        ensureDeviceBuffer(buf.data, buf.size, aix::Device::dataTypeSize(buf.dtype));
+        ensureDeviceBuffer(buf.data, buf.size, aix::Device::dataTypeSize(buf.dtype), false);
     }
     for (const auto& buf : subgraph.outputBuffers)
     {
-        ensureDeviceBuffer(buf.data, buf.size, aix::Device::dataTypeSize(buf.dtype));
+        ensureDeviceBuffer(buf.data, buf.size, aix::Device::dataTypeSize(buf.dtype), true);
     }
 
     m_kernelGen->encodeFusedDispatch(m_compEncoder, pso, subgraph, m_allocMap);
 
-    for (auto& [buf, ptr] : uploadTemps)
+    for (const auto& buf : subgraph.outputBuffers)
     {
-        if (!isDeviceBuffer(ptr))
+        auto it = m_allocMap.find(buf.data);
+        if (it != m_allocMap.end())
         {
-            freeTemporaryBuffer(buf);
+            m_allocMap[buf.data] = it->second;
+        }
+    }
+
+    for (const auto& uploadTemp : uploadTemps)
+    {
+        if (!uploadTemp.keepOnDevice)
+        {
+            auto it = m_allocMap.find(uploadTemp.ptr);
+            if (it != m_allocMap.end() && it->second == uploadTemp.buffer)
+            {
+                m_allocMap.erase(it);
+            }
+
+            freeTemporaryBuffer(uploadTemp.buffer);
         }
     }
 
