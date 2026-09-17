@@ -1433,7 +1433,7 @@ void DeviceMetal::commitBatchQueue()
 MTL::Buffer* DeviceMetal::newBuffer(size_t size)
 {
     assert(size > 0);
-    size_t asize = size < vm_page_size ? align(size, ALLOCATION_BYTE_ALIGNMENT_SIZE) : align(size, vm_page_size);
+    size_t asize = size < vm_page_size ? align(size, ALLOCATOR_ALIGNMENT_SIZE) : align(size, vm_page_size);
 
     m_currentWorkingSetSize += asize;
     // Reduce memory footprint if the current working set size exceeds the limit.

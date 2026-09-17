@@ -1679,6 +1679,41 @@ bool testMaxTo(Device* testDevice)
 }
 
 
+TEST_CASE("DeviceMetal small buffers reuse allocator-sized cache entries after completion")
+{
+    for (size_t size : {1, 7, 8, 9, 16, 31, 32, 33, 63, 64, 65, 127, 128, 129, 4095, 4096, 4097})
+    {
+        CAPTURE(size);
+        auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+        if (!device) return;
+        void* retired = nullptr;
+        auto result = [&]()
+        {
+            TensorValue input(4.0f, {size}, device.get());
+            retired = input.data();
+            return input.sqrt();
+        }();
+
+        // Pending work must retain its storage until command-buffer completion.
+        TensorValue other(9.0f, {size}, device.get());
+        CHECK(other.data() != retired);
+        device->synchronize();
+
+        // The completed input is the only freed buffer in this device's cache.
+        TensorValue reused(16.0f, {size}, device.get());
+        CHECK(reused.data() == retired);
+        auto reusedResult = reused.sqrt();
+        device->synchronize();
+        for (size_t i = 0; i < size; ++i)
+        {
+            CHECK(result.data<float>()[i] == doctest::Approx(2.0f));
+            CHECK(other.data<float>()[i] == doctest::Approx(9.0f));
+            CHECK(reusedResult.data<float>()[i] == doctest::Approx(4.0f));
+        }
+    }
+}
+
+
 TEST_CASE("DeviceMetal stride add parity with transposed source")
 {
     aix::DeviceCPU refDevice;
