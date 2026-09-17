@@ -10,6 +10,7 @@
 // Project includes
 #include "Utils.hpp"
 #include <aix.hpp>
+#include <aixDevices.hpp>
 // External includes
 #include <doctest/doctest.h>
 // System includes
@@ -547,6 +548,74 @@ TEST_CASE("TensorValue - Sum with dim")
         CHECK_THROWS_AS({ t1.sum(-4, true);  }, std::invalid_argument);
     }
 
+}
+
+
+TEST_CASE("TensorValue - keepDim reductions avoid redundant allocations")
+{
+    class CountingDevice : public DeviceCPU
+    {
+    public:
+        void* allocate(size_t size, DataType dtype) override
+        {
+            ++m_allocations;
+            return DeviceCPU::allocate(size, dtype);
+        }
+
+        size_t m_allocations{0};
+    } device;
+
+    auto input = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, &device);
+
+    device.m_allocations = 0;
+    auto sum = input.sum(-1, true);
+    CHECK(device.m_allocations == 1);
+    CHECK(sum.shape() == Shape{2, 1});
+    CHECK(sum.storage() != input.storage());
+    CheckVectorApproxValues(sum, TensorValue({6.0f, 15.0f}, {2, 1}, &testDevice));
+
+    device.m_allocations = 0;
+    auto max = input.max(-1, true);
+    CHECK(device.m_allocations == 1);
+    CHECK(max.shape() == Shape{2, 1});
+    CHECK(max.storage() != input.storage());
+    CheckVectorApproxValues(max, TensorValue({3.0f, 6.0f}, {2, 1}, &testDevice));
+}
+
+
+TEST_CASE("TensorValue - keepDim singleton reductions preserve independent storage")
+{
+    auto check = [](Device* device)
+    {
+        auto input = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, device);
+        auto column = input.slice(1, 1, 2);
+        auto sum = column.sum(-1, true);
+        auto max = column.max(-1, true);
+        CHECK(sum.shape() == Shape{2, 1});
+        CHECK(max.shape() == Shape{2, 1});
+        CHECK(sum.storage() != input.storage());
+        CHECK(max.storage() != input.storage());
+        CHECK(sum.storageOffset() == 0);
+        CHECK(sum.isContiguous());
+        CheckVectorApproxValues(sum, TensorValue({2.0f, 5.0f}, {2, 1}, &testDevice));
+        CheckVectorApproxValues(max, TensorValue({2.0f, 5.0f}, {2, 1}, &testDevice));
+
+        sum.fill(0);
+        max.fill(0);
+        CheckVectorApproxValues(input, TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, &testDevice));
+    };
+
+    SUBCASE("CPU")
+    {
+        check(&testDevice);
+    }
+
+    SUBCASE("Metal")
+    {
+        auto device = createDevice(DeviceType::kGPU_METAL);
+        if (!device) return;
+        check(device.get());
+    }
 }
 
 

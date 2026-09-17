@@ -801,7 +801,10 @@ public:
         Shape resultShape = m_shape;
         resultShape[dim] = 1;
         auto result = reduceTo(resultShape);
-        return keepDim ? result : result.squeeze(dim);
+        if (!keepDim) return result.squeeze(dim);
+        // reduceTo shares the input storage when the shape is unchanged; preserve the independent result.
+        if (m_shape[dim] == 1) return TensorValue(result);
+        return result;
     }
 
     TensorValue mean() const
@@ -887,7 +890,8 @@ public:
         auto resDevParams = result.deviceParams();
         device()->fillMin(resDevParams);       // Initialize the tensor with the lowest value.
         device()->maxTo(deviceParams(), resDevParams);
-        return keepDim ? result : result.squeeze(dim);
+        if (!keepDim) return result.squeeze(dim);
+        return result;
     }
 
     TensorValue argmax() const
