@@ -1264,6 +1264,8 @@ bool testMatMul(Device* testDevice, size_t n, size_t inner, size_t m)
         // Compare true/cpu result with gpu result
         if (!verifyResults(cpuResult, deviceResult, epsilon))
         {
+            MESSAGE("MatMul mismatch: M=" << n << ", K=" << inner << ", N=" << m
+                    << ", data type=" << static_cast<size_t>(dtype));
             #ifdef DEBUG_LOG
             std::cout << "----------------------" << std::endl;
             std::cout << "MatA" << std::endl << matA << std::endl;
@@ -1676,6 +1678,116 @@ bool testMaxTo(Device* testDevice)
     }
 
     return true;
+}
+
+
+TEST_CASE("DeviceMetal single-row matmul preserves short reduction accuracy")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    // Exact inputs captured from the randomized MatMul failure. SIMD reassociation
+    // changed this seven-term dot product by two float32 ULPs (above the absolute tolerance).
+    const std::array<float, 7> a = {
+        0x1.32f94p+4f, 0x1.08d0ap+0f, 0x1.0e0d3p+4f, 0x1.3eea96p+4f,
+        0x1.e99304p+3f, 0x1.8826cap+3f, 0x1.048a8cp+2f
+    };
+    const std::array<float, 7> column = {
+        0x1.79e4a2p+3f, 0x1.0b7d5ap+3f, 0x1.ffab52p+3f, 0x1.349754p+3f,
+        0x1.0d287p+3f, 0x1.21d56cp+4f, 0x1.845fbp+3f
+    };
+    for (size_t k : {1, 3, 7, 15, 31, 32})
+    {
+        CAPTURE(k);
+        std::vector<float> input(k);
+        for (size_t i = 0; i < k; ++i)
+        {
+            input[i] = a[i % a.size()];
+        }
+        for (size_t n : {1, 4, 7, 8})
+        {
+            CAPTURE(n);
+            std::vector<float> b(k * n);
+            for (size_t i = 0; i < k; ++i)
+            {
+                std::fill_n(b.begin() + i * n, n, column[i % column.size()]);
+            }
+            TensorValue cpuA(input.data(), input.size(), DataType::kFloat32, {1, k}, &refDevice);
+            TensorValue cpuB(b.data(), b.size(), DataType::kFloat32, {k, n}, &refDevice);
+            auto metalA = cpuA.to(device.get());
+            auto metalB = cpuB.to(device.get());
+            auto expected = cpuA.matmul(cpuB);
+            auto actual = metalA.matmul(metalB);
+            device->synchronize();
+            for (size_t j = 0; j < n; ++j)
+            {
+                CHECK(std::abs(actual.data<float>()[j] - expected.data<float>()[j]) <= EPSILON_MATMUL_F32_METAL);
+            }
+        }
+    }
+}
+
+
+TEST_CASE("DeviceMetal single-row matmul float32 layout and reduction boundaries")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    const std::pair<size_t, size_t> dimensions[] = {
+        {1, 1}, {3, 3}, {7, 4}, {31, 5}, {32, 15}, {33, 16}, {63, 17},
+        {64, 31}, {65, 32}, {127, 33}, {128, 128}, {129, 129}, {768, 768}, {3072, 768}
+    };
+    for (const auto& [k, n] : dimensions)
+    {
+        for (size_t layout = 0; layout < 5; ++layout)
+        {
+            CAPTURE(k);
+            CAPTURE(n);
+            CAPTURE(layout);
+            const size_t columns = layout == 0 ? n : (layout == 1 ? k :
+                                   (layout == 2 ? n + 4 : (layout == 3 ? n + 1 : 2 * n + 2)));
+            const size_t rows = layout == 1 ? n : k;
+            std::vector<float> a(2 * k + 1);
+            std::vector<float> b(rows * columns);
+            for (size_t i = 0; i < a.size(); ++i)
+            {
+                a[i] = static_cast<float>(static_cast<int>((i * 7) % 29) - 14) / 17.0f;
+            }
+            for (size_t i = 0; i < b.size(); ++i)
+            {
+                b[i] = static_cast<float>(static_cast<int>((i * 13) % 47) - 23) / 31.0f;
+            }
+
+            auto makeInputs = [&](aix::Device* target)
+            {
+                TensorValue input(a.data(), a.size(), DataType::kFloat32, {1, a.size()}, target);
+                TensorValue weights(b.data(), b.size(), DataType::kFloat32, {rows, columns}, target);
+                auto inputView = layout < 2 ? input.slice(1, 0, k) : input.slice(1, 1, 2 * k + 1, 2);
+                auto weightView = [&]()
+                {
+                    if (layout == 1) return weights.transpose(0, 1);
+                    if (layout == 2) return weights.slice(1, 4, n + 4);
+                    if (layout == 3) return weights.slice(1, 1, n + 1);
+                    if (layout == 4) return weights.slice(1, 1, 2 * n + 1, 2);
+                    return weights.slice(1, 0, n);
+                }();
+                return std::pair{std::move(inputView), std::move(weightView)};
+            };
+
+            auto [cpuInput, cpuWeights] = makeInputs(&refDevice);
+            auto [metalInput, metalWeights] = makeInputs(device.get());
+            auto expected = cpuInput.matmul(cpuWeights);
+            auto actual = metalInput.matmul(metalWeights);
+            device->synchronize();
+            for (size_t i = 0; i < n; ++i)
+            {
+                CHECK(actual.data<float>()[i] == doctest::Approx(expected.data<float>()[i])
+                      .epsilon(EPSILON_MATMUL_F32_METAL).scale(1.0));
+            }
+        }
+    }
 }
 
 

@@ -1141,6 +1141,33 @@ template<typename T, uint TN>
     }
 
     constexpr uint SIMDGROUP_WIDTH = 32;
+
+    if constexpr (is_same<T, float>::value)
+    {
+        // Load four adjacent output columns together when every row is float4-aligned.
+        // Short dots retain the ordered reduction below, including aligned layouts.
+        if (TN == 4 && matASize.cols > SIMDGROUP_WIDTH && strideB_n == 1
+            && startB % 4 == 0 && strideB_k % 4 == 0 && colBase + 4 <= matBSize.cols)
+        {
+            float4 sums = 0;
+            const device float4* b = reinterpret_cast<const device float4*>(inB + startB + colBase);
+            for (size_t k = simdLaneId; k < matASize.cols; k += SIMDGROUP_WIDTH)
+            {
+                sums += inA[startA + k * strideA_k] * b[k * (strideB_k / 4)];
+            }
+            #pragma unroll
+            for (uint tn = 0; tn < TN; ++tn)
+            {
+                const float sum = simd_sum(sums[tn]);
+                if (simdLaneId == 0)
+                {
+                    result[colBase + tn] = sum;
+                }
+            }
+            return;
+        }
+    }
+
     constexpr uint SIMDGROUPS_PER_THREADGROUP = 4;
     threadgroup T partialSums[SIMDGROUPS_PER_THREADGROUP][TN][SIMDGROUP_WIDTH];
 
@@ -1158,6 +1185,34 @@ template<typename T, uint TN>
                 sums[tn] += aVal * inB[bRowOffset + tn * strideB_n];
             }
         }
+    }
+
+    if constexpr (is_same<T, float>::value)
+    {
+        #pragma unroll
+        for (uint tn = 0; tn < TN; ++tn)
+        {
+            float reducedSum = 0;
+            if (matASize.cols <= SIMDGROUP_WIDTH)
+            {
+                // One product per lane: preserve the original left-to-right sum.
+                // A tree reduction can exceed the CPU parity tolerance for short dots.
+                for (uint lane = 0; lane < matASize.cols; ++lane)
+                {
+                    reducedSum += simd_broadcast(sums[tn], lane);
+                }
+            }
+            else
+            {
+                reducedSum = simd_sum(sums[tn]);
+            }
+            const uint outCol = colBase + tn;
+            if (simdLaneId == 0 && outCol < matBSize.cols)
+            {
+                result[outCol] = reducedSum;
+            }
+        }
+        return;
     }
 
     #pragma unroll
@@ -2841,7 +2896,7 @@ SpecializeMatrixMulStrided("ui8",  uchar);
                                                  uint simdGroupId [[simdgroup_index_in_threadgroup]], \
                                                  uint simdLaneId [[thread_index_in_simdgroup]])
 
-// This fast path relies on simd_sum(), which Metal does not support for every scalar type.
+// Float32 uses SIMD reduction; other scalar types retain the shared-memory reduction.
 SpecializeMatrixMulStridedM1("f32",  4, float);
 SpecializeMatrixMulStridedM1("f16",  4, half);
 SpecializeMatrixMulStridedM1("bf16", 4, bfloat);
