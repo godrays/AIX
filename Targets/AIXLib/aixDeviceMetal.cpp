@@ -117,6 +117,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
 
     m_compFuncPSOArgmaxIndicesSet = createComputeFuncPSO(defaultLibrary, "argmaxIndicesSet");
     m_compFuncPSOArgmaxIndicesToSet = createComputeFuncPSO(defaultLibrary, "argmaxIndicesToSet");
+    defaultLibrary->release();
 
     m_cmdQueue = createCommandQueue();
     m_cmdBuffer = m_cmdQueue->commandBufferWithUnretainedReferences();
@@ -145,11 +146,6 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
 // Destructor
 DeviceMetal::~DeviceMetal()
 {
-    if (m_currentBatchSize > 0)
-    {
-        std::cerr << "WARNING: Queued tensor operations detected. Did you forget to call synchronize()?" << std::endl;
-    }
-
     // Flush lazy work and finish every submitted batch before releasing kernels or buffers.
     synchronize();
 
@@ -178,6 +174,7 @@ DeviceMetal::~DeviceMetal()
         m_compFuncPSODivStrided[i]->release();
         m_compFuncPSOUnary[i]->release();
         m_compFuncPSOUnaryStrided[i]->release();
+        m_compFuncPSOFillMin[i]->release();
         m_compFuncPSOSqrt[i]->release();
         m_compFuncPSOSqrtStrided[i]->release();
         m_compFuncPSOSin[i]->release();
@@ -199,6 +196,7 @@ DeviceMetal::~DeviceMetal()
         m_compFuncPSOArgmaxTo[i]->release();
         m_compFuncPSOMatMulStrided[i]->release();
         m_compFuncPSOMatMulStridedM1[i]->release();
+        m_compFuncPSOMatMulStridedTiled1616[i]->release();
         m_compFuncPSOMatMulTiledBC6464888[i]->release();
         m_compFuncPSOMatMulTiled32x32[i]->release();
         m_compFuncPSOMatMulTiled32x64[i]->release();
@@ -1396,11 +1394,19 @@ void DeviceMetal::synchronize()
     {
         commit();
     }
-    if (!m_committedCmdBuffer)
+    if (m_committedCmdBuffer)
     {
-        return;
+        m_committedCmdBuffer->waitUntilCompleted();
     }
-    m_committedCmdBuffer->waitUntilCompleted();
+    // Retirement can follow the last dispatch (or occur without any dispatch).
+    // All fused work and GPU work are now complete, so these buffers need no
+    // additional empty command buffer merely to reach the cache safely.
+    for (const auto& [buffer, pointer] : m_tempBuffers)
+    {
+        m_allocMap.erase(pointer);
+        m_bufferCache->recycle(buffer);
+    }
+    m_tempBuffers.clear();
 }
 
 void DeviceMetal::flushPendingFusedWork()
@@ -1515,16 +1521,15 @@ void DeviceMetal::clearContiguousTemps()
 
 MTL::Device* DeviceMetal::createMTLDevice(size_t deviceIndex) const
 {
-    try
-    {
-        return reinterpret_cast<MTL::Device*>(MTL::CopyAllDevices()->object(deviceIndex));
-    }
-    catch (...)
+    auto devices = NS::TransferPtr(MTL::CopyAllDevices());
+    if (!devices || deviceIndex >= devices->count())
     {
         throw std::invalid_argument("Device index is not supported.");
     }
 
-    return nullptr;
+    auto device = devices->object<MTL::Device>(deviceIndex);
+    device->retain(); // Keep the selected device alive after releasing the array.
+    return device;
 }
 
 
@@ -1564,7 +1569,7 @@ MTL::CommandQueue* DeviceMetal::createCommandQueue()
 MTL::ComputePipelineState* DeviceMetal::createComputeFuncPSO(MTL::Library* library, const std::string & kernelName)
 {
     auto funcName = NS::String::string(kernelName.c_str(), NS::ASCIIStringEncoding);
-    auto compFunc = library->newFunction(funcName);
+    auto compFunc = NS::TransferPtr(library->newFunction(funcName));
     if (!compFunc)
     {
         std::cerr << "Failed to find the compute function.\n";
@@ -1572,7 +1577,7 @@ MTL::ComputePipelineState* DeviceMetal::createComputeFuncPSO(MTL::Library* libra
     }
 
     NS::Error* error = nullptr;
-    auto compFuncPSO = m_compEncoder->createPipeline(m_mtlDevice, compFunc, &error);
+    auto compFuncPSO = m_compEncoder->createPipeline(m_mtlDevice, compFunc.get(), &error);
     if (!compFuncPSO)
     {
         std::cerr << "Failed to create the pipeline state object.\n";

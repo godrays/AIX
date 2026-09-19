@@ -13,6 +13,7 @@
 #include <aixFuse.hpp>
 #include <aixDeviceMetal.hpp>
 #include <aixDeviceMetalEncoder.hpp>
+#include <aixDeviceMetalCache.hpp>
 #include <aixDevices.hpp>
 // External includes
 #include <doctest/doctest.h>
@@ -2012,6 +2013,46 @@ TEST_CASE("DeviceMetal concurrent slice ranges preserve disjoint and overlapping
         device->synchronize();
         for (size_t i = 0; i < 40; i += 2) CHECK(storage.data<float>()[i] == 7.0f);
     }
+}
+
+
+TEST_CASE("DeviceMetal concurrent no-work synchronization drains retired allocations")
+{
+    class InspectableDevice : public aix::metal::DeviceMetal
+    {
+    public:
+        size_t pendingRetirements() const { return m_tempBuffers.size(); }
+        size_t mappedAllocations() const { return m_allocMap.size(); }
+        size_t cachedBytes() const { return m_bufferCache->size(); }
+    };
+
+    auto device = std::make_unique<InspectableDevice>();
+    for (size_t i = 0; i < 8; ++i)
+    {
+        {
+            TensorValue value(2.0f, {4096}, device.get());
+            device->synchronize();
+            CHECK(value.data<float>()[0] == 2.0f);
+        }
+        // The tensor is retired after synchronize, with no new GPU dispatch.
+        CHECK(device->pendingRetirements() > 0);
+        device->synchronize();
+        CHECK(device->pendingRetirements() == 0);
+        CHECK(device->mappedAllocations() == 0);
+        device->emptyCache();
+        CHECK(device->cachedBytes() == 0);
+    }
+    // Also cover allocations that have never been bound to a command encoder.
+    auto memory = device->allocate(4096);
+    device->deallocate(memory);
+    device->synchronize();
+    CHECK(device->pendingRetirements() == 0);
+    CHECK(device->mappedAllocations() == 0);
+    device->emptyCache();
+    CHECK(device->cachedBytes() == 0);
+    // Driver/shader-validation caches are not owned allocations and can remain
+    // in currentAllocatedSize after device teardown. Check our exact owners above.
+    device.reset();
 }
 
 
