@@ -56,6 +56,8 @@ METAL_FUNC size_t physicalIndex(size_t flatIndex, const constant size_t* layout)
     size_t rank = layoutRank(layout);
     for (int64_t dim = static_cast<int64_t>(rank) - 1; dim >= 0; --dim)
     {
+        // All remaining leading coordinates are zero once this index fits.
+        if (idx < shape[dim]) return ofs + idx * strides[dim];
         size_t dimIndex = idx % shape[dim];
         idx /= shape[dim];
         ofs += dimIndex * strides[dim];

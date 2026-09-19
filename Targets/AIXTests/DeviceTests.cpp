@@ -2075,6 +2075,40 @@ TEST_CASE("DeviceMetal concurrent slice ranges preserve disjoint and overlapping
 }
 
 
+TEST_CASE("DeviceMetal strided indexing preserves leading zero coordinates and broadcast offsets")
+{
+    aix::DeviceCPU reference;
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    for (size_t layout = 0; layout < 3; ++layout)
+    {
+        const Shape shape = layout == 0 ? Shape{257} : (layout == 1 ? Shape{1, 257} : Shape{2, 3, 5, 7});
+        const size_t count = layout < 2 ? 257 : 210;
+        std::vector<float> values(count);
+        for (size_t i = 0; i < count; ++i) values[i] = static_cast<float>(static_cast<int>(i % 97) - 48) / 4.0f;
+        auto evaluate = [&](Device* target)
+        {
+            TensorValue storage(values.data(), values.size(), DataType::kFloat32, shape, target);
+            auto view = layout == 0 ? storage.slice(0, 1, 256, 3)
+                : (layout == 1 ? storage.slice(1, 1, 256, 3) : storage.slice(2, 1, 5, 2).transpose(1, 3));
+            TensorValue scalar(2.0f, Shape{}, target);
+            auto broadcast = scalar.broadcastTo(view.shape());
+            auto divided = view / broadcast;
+            target->synchronize(); // Exercise the ordinary strided kernel separately.
+            auto fused = (divided + view) * broadcast - view;
+            target->synchronize(); // Also exercise generated strided address calculation.
+            return std::pair{std::move(divided), std::move(fused)};
+        };
+        auto expected = evaluate(&reference);
+        auto actual = evaluate(device.get());
+        for (size_t i = 0; i < actual.first.size(); ++i)
+        {
+            CHECK(actual.first.data<float>()[i] == expected.first.data<float>()[i]);
+            CHECK(actual.second.data<float>()[i] == expected.second.data<float>()[i]);
+        }
+    }
+}
+
+
 TEST_CASE("DeviceMetal concurrent no-work synchronization drains retired allocations")
 {
     class InspectableDevice : public aix::metal::DeviceMetal
