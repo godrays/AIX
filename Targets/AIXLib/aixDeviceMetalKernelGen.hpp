@@ -30,10 +30,12 @@ namespace MTL
 namespace aix::metal
 {
 
+class MetalComputeEncoder;
+
 class aixDeviceMetalKernelGen
 {
 public:
-    explicit aixDeviceMetalKernelGen(MTL::Device* device);
+    aixDeviceMetalKernelGen(MTL::Device* device, MetalComputeEncoder& encoder);
 
     ~aixDeviceMetalKernelGen();
 
@@ -43,7 +45,7 @@ public:
     MTL::ComputePipelineState* getOrCreatePSO(const aix::fuse::FusedSubgraphDescriptor& subgraph);
 
     void encodeFusedDispatch(
-        MTL::ComputeCommandEncoder* encoder,
+        MetalComputeEncoder* encoder,
         MTL::ComputePipelineState* pso,
         const aix::fuse::FusedSubgraphDescriptor& subgraph,
         const std::unordered_map<const void*, MTL::Buffer*>& allocMap);
@@ -58,6 +60,7 @@ private:
     std::string computeSignature(const aix::fuse::FusedSubgraphDescriptor& subgraph);
 
     MTL::Device*  m_device{nullptr};
+    MetalComputeEncoder& m_encoder;
     std::unordered_map<std::string, MTL::ComputePipelineState*>  m_kernelCache;
     size_t  m_cacheHits{0};
     size_t  m_cacheMisses{0};

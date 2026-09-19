@@ -9,6 +9,7 @@
 
 // Project includes
 #include "aixDeviceMetalKernelGen.hpp"
+#include "aixDeviceMetalEncoder.hpp"
 // External includes
 #include <Metal/Metal.hpp>
 // System includes
@@ -447,8 +448,8 @@ static std::string subgraphSignatureHash(const aix::fuse::FusedSubgraphDescripto
     return oss.str();
 }
 
-aixDeviceMetalKernelGen::aixDeviceMetalKernelGen(MTL::Device* device)
-    : m_device(device)
+aixDeviceMetalKernelGen::aixDeviceMetalKernelGen(MTL::Device* device, MetalComputeEncoder& encoder)
+    : m_device(device), m_encoder(encoder)
 {
 }
 
@@ -754,7 +755,7 @@ MTL::ComputePipelineState* aixDeviceMetalKernelGen::getOrCreatePSO(const aix::fu
     }
 
     error = nullptr;
-    auto pso = m_device->newComputePipelineState(function, &error);
+    auto pso = m_encoder.createPipeline(m_device, function, &error);
     function->release();
 
     if (!pso)
@@ -770,7 +771,7 @@ MTL::ComputePipelineState* aixDeviceMetalKernelGen::getOrCreatePSO(const aix::fu
 }
 
 void aixDeviceMetalKernelGen::encodeFusedDispatch(
-    MTL::ComputeCommandEncoder* encoder,
+    MetalComputeEncoder* encoder,
     MTL::ComputePipelineState* pso,
     const aix::fuse::FusedSubgraphDescriptor& subgraph,
     const std::unordered_map<const void*, MTL::Buffer*>& allocMap)

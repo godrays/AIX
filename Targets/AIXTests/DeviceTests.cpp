@@ -12,6 +12,7 @@
 #include <aix.hpp>
 #include <aixFuse.hpp>
 #include <aixDeviceMetal.hpp>
+#include <aixDeviceMetalEncoder.hpp>
 #include <aixDevices.hpp>
 // External includes
 #include <doctest/doctest.h>
@@ -1787,6 +1788,229 @@ TEST_CASE("DeviceMetal single-row matmul float32 layout and reduction boundaries
                       .epsilon(EPSILON_MATMUL_F32_METAL).scale(1.0));
             }
         }
+    }
+}
+
+
+TEST_CASE("DeviceMetal queued matmul dependencies survive batch boundaries and temporary retirement")
+{
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    std::vector<float> identity(64 * 64, 0.0f);
+    for (size_t i = 0; i < 64; ++i)
+    {
+        identity[i * 64 + i] = 1.0f;
+    }
+    TensorValue weights(identity.data(), identity.size(), DataType::kFloat32, {64, 64}, device.get());
+    TensorValue value(1.0f, {1, 64}, device.get());
+    TensorValue increment(0.25f, {1, 64}, device.get());
+    std::vector<TensorValue> saved;
+    std::vector<float> expected;
+    for (size_t i = 0; i < 256; ++i)
+    {
+        value = value.matmul(weights) + increment;
+        if (i % 17 == 0)
+        {
+            saved.push_back(value.matmul(weights));
+            expected.push_back(1.0f + (i + 1) * 0.25f);
+        }
+    }
+    device->synchronize();
+    // Repeat across an explicit completion boundary using the same device/fence.
+    value = value.matmul(weights) + increment;
+    device->synchronize();
+    for (size_t i = 0; i < 64; ++i)
+    {
+        CHECK(value.data<float>()[i] == 65.25f);
+        for (size_t j = 0; j < saved.size(); ++j)
+        {
+            CHECK(saved[j].data<float>()[i] == expected[j]);
+        }
+    }
+}
+
+
+TEST_CASE("DeviceMetal concurrent encoder tracks RAW WAR WAW and distinct overlapping heap buffers")
+{
+    auto pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
+    auto device = NS::TransferPtr(MTL::CreateSystemDefaultDevice());
+    auto queue = NS::TransferPtr(device->newCommandQueue());
+    auto fence = NS::TransferPtr(device->newFence());
+    auto options = NS::TransferPtr(MTL::CompileOptions::alloc()->init());
+    options->setFastMathEnabled(false);
+    NS::Error* error = nullptr;
+    const char* source = R"(
+        #include <metal_stdlib>
+        using namespace metal;
+        kernel void fillTest(device float* dst [[buffer(0)]], constant float& value [[buffer(1)]],
+                             uint i [[thread_position_in_grid]]) { dst[i] = value; }
+        kernel void copyTest(const device float* src [[buffer(0)]], device float* dst [[buffer(1)]],
+                             uint i [[thread_position_in_grid]]) { dst[i] = src[i]; }
+        kernel void addTest(device float* dst [[buffer(0)]], constant float& value [[buffer(1)]],
+                            uint i [[thread_position_in_grid]]) { dst[i] += value; }
+    )";
+    auto library = NS::TransferPtr(device->newLibrary(NS::String::string(source, NS::UTF8StringEncoding),
+                                                     options.get(), &error));
+    REQUIRE(library);
+    auto fillFunction = NS::TransferPtr(library->newFunction(NS::String::string("fillTest", NS::UTF8StringEncoding)));
+    auto copyFunction = NS::TransferPtr(library->newFunction(NS::String::string("copyTest", NS::UTF8StringEncoding)));
+    auto addFunction = NS::TransferPtr(library->newFunction(NS::String::string("addTest", NS::UTF8StringEncoding)));
+    aix::metal::MetalComputeEncoder encoder;
+    auto fill = NS::TransferPtr(encoder.createPipeline(device.get(), fillFunction.get(), &error));
+    auto copy = NS::TransferPtr(encoder.createPipeline(device.get(), copyFunction.get(), &error));
+    auto add = NS::TransferPtr(encoder.createPipeline(device.get(), addFunction.get(), &error));
+    // A PSO without registered reflection exercises the serialized fallback.
+    auto unknown = NS::TransferPtr(device->newComputePipelineState(copyFunction.get(), &error));
+    REQUIRE(fill);
+    REQUIRE(copy);
+    REQUIRE(add);
+    REQUIRE(unknown);
+
+    auto desc = NS::TransferPtr(MTL::HeapDescriptor::alloc()->init());
+    desc->setType(MTL::HeapTypePlacement);
+    desc->setStorageMode(MTL::StorageModeShared);
+    desc->setHazardTrackingMode(MTL::HazardTrackingModeUntracked);
+    desc->setSize(65536);
+    auto heap = NS::TransferPtr(device->newHeap(desc.get()));
+    REQUIRE(heap);
+    auto a = NS::TransferPtr(heap->newBuffer(16384, MTL::ResourceStorageModeShared, 0));
+    auto alias = NS::TransferPtr(heap->newBuffer(16384, MTL::ResourceStorageModeShared, 0));
+    auto disjoint = NS::TransferPtr(heap->newBuffer(16384, MTL::ResourceStorageModeShared, 16384));
+    auto saved = NS::TransferPtr(device->newBuffer(3 * 16384, MTL::ResourceStorageModeShared));
+    auto privateBuffer = NS::TransferPtr(device->newBuffer(16384, MTL::ResourceStorageModePrivate));
+    REQUIRE(a);
+    REQUIRE(alias);
+    REQUIRE(disjoint);
+    REQUIRE(saved);
+    REQUIRE(privateBuffer);
+    REQUIRE(a.get() != alias.get());
+
+    auto encodeFill = [&](MTL::Buffer* buffer, float value)
+    {
+        encoder.setComputePipelineState(fill.get());
+        encoder.setBuffer(buffer, 0, 0);
+        encoder.setBytes(&value, sizeof(value), 1);
+        encoder.dispatchThreads({4096, 1, 1}, {128, 1, 1});
+    };
+    auto encodeCopy = [&](MTL::Buffer* src, MTL::Buffer* dst, size_t offset, bool fallback = false)
+    {
+        encoder.setComputePipelineState(fallback ? unknown.get() : copy.get());
+        encoder.setBuffer(src, 0, 0);
+        encoder.setBuffer(dst, offset, 1);
+        encoder.dispatchThreads({4096, 1, 1}, {128, 1, 1});
+    };
+    for (size_t round = 0; round < 8; ++round)
+    {
+        // Repeated command boundaries retain the same fence and backing heap.
+        auto command = queue->commandBuffer();
+        encoder.reset(command->computeCommandEncoder(MTL::DispatchTypeConcurrent));
+        if (round) encoder.waitForFence(fence.get());
+        for (size_t i = 0; i < 64; ++i)
+        {
+            encodeFill(a.get(), 1.0f);
+            encodeFill(disjoint.get(), 2.0f);             // Independent heap allocation.
+            encodeCopy(alias.get(), saved.get(), 0);    // RAW through a distinct alias.
+            encodeFill(alias.get(), 7.0f);              // WAR: preserve the old read.
+            encodeCopy(a.get(), saved.get(), 16384);
+            encodeFill(a.get(), 9.0f);                  // WAW and WAR.
+            encoder.setComputePipelineState(add.get());
+            encoder.setBuffer(alias.get(), 0, 0);
+            const float increment = 1.0f;
+            encoder.setBytes(&increment, sizeof(increment), 1);
+            encoder.dispatchThreads({4096, 1, 1}, {128, 1, 1});
+            encodeCopy(a.get(), privateBuffer.get(), 0); // Unsupported memory fallback.
+            encodeCopy(privateBuffer.get(), saved.get(), 32768, true);
+        }
+        encoder.updateFence(fence.get());
+        encoder.endEncoding();
+        command->commit();
+        command->waitUntilCompleted();
+        REQUIRE(command->status() == MTL::CommandBufferStatusCompleted);
+        auto values = static_cast<float*>(saved->contents());
+        for (size_t i = 0; i < 4096; ++i)
+        {
+            CHECK(values[i] == 1.0f);
+            CHECK(values[4096 + i] == 7.0f);
+            CHECK(values[8192 + i] == 10.0f);
+            CHECK(static_cast<float*>(disjoint->contents())[i] == 2.0f);
+        }
+    }
+}
+
+
+TEST_CASE("DeviceMetal concurrent fused views reductions copies and pending destruction")
+{
+    for (size_t pass = 0; pass < 4; ++pass)
+    {
+        auto device = createDevice(DeviceType::kGPU_METAL);
+        TensorValue storage(1.0f, {16, 64}, device.get());
+        TensorValue increment(0.25f, {16, 64}, device.get());
+        std::vector<TensorValue> branches;
+        for (size_t i = 0; i < 96; ++i)
+        {
+            auto left = storage.slice(1, 0, 32);
+            auto right = storage.slice(1, 32, 64);
+            auto sum = (left + right).sum();
+            branches.push_back(sum);
+            // An in-place write follows reads from both aliases and a reduction.
+            storage += increment;
+            auto copied = storage.contiguous();
+            auto row = copied.slice(0, 0, 1);
+            storage.sliceSet(row, 0, 15, 16, 1, true);
+            if (i % 23 == 0) device->synchronize();
+        }
+        device->synchronize();
+        for (size_t i = 0; i < branches.size(); ++i)
+        {
+            CHECK(branches[i].item<float>() == 1024.0f * (1.0f + i * 0.25f));
+        }
+        // Destruction must finish pending fused work and submitted work, including
+        // temporary buffers retired while later batches reuse the allocator.
+        branches.clear();
+        for (size_t i = 0; i < 96; ++i)
+        {
+            storage = storage + increment;
+        }
+        std::array<float, 64 * 64> identity{};
+        for (size_t i = 0; i < 64; ++i) identity[i * 64 + i] = 1.0f;
+        TensorValue weights(identity.data(), identity.size(), DataType::kFloat32, {64, 64}, device.get());
+        storage = storage.matmul(weights); // Leave an actual dispatch pending at destruction.
+    }
+}
+
+
+TEST_CASE("DeviceMetal concurrent slice ranges preserve disjoint and overlapping view writes")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    for (size_t round = 0; round < 16; ++round)
+    {
+        TensorValue storage(-1.0f, {1, 80}, device.get());
+        auto view = storage.slice(1, 8, 72);
+        for (size_t head = 0; head < 4; ++head)
+        {
+            TensorValue values(static_cast<float>(head + 1), {1, 16}, device.get());
+            view.sliceSet(values, 1, head * 16, (head + 1) * 16, 1, true);
+        }
+        auto before = view.sum();
+        TensorValue replacement(9.0f, {1, 16}, device.get());
+        view.sliceSet(replacement, 1, 12, 28, 1, true);
+        auto after = view.sum();
+        device->synchronize();
+        CHECK(before.item<float>() == 160.0f);
+        CHECK(after.item<float>() == 276.0f);
+        for (size_t i = 0; i < 80; ++i)
+        {
+            float expected = -1.0f;
+            if (i >= 8 && i < 72) expected = static_cast<float>((i - 8) / 16 + 1);
+            if (i >= 20 && i < 36) expected = 9.0f;
+            CHECK(storage.data<float>()[i] == expected);
+        }
+        auto stepped = storage.slice(1, 0, 80, 2);
+        TensorValue sevens(7.0f, {1, 20}, device.get());
+        stepped.sliceSet(sevens, 1, 0, 20, 1, true);
+        device->synchronize();
+        for (size_t i = 0; i < 40; i += 2) CHECK(storage.data<float>()[i] == 7.0f);
     }
 }
 

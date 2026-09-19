@@ -37,7 +37,7 @@ namespace MTL
     class CommandBuffer;
     class ComputeCommandEncoder;
     class Device;
-    class Event;
+    class Fence;
     class Library;
     struct Size;
 }
@@ -56,6 +56,7 @@ namespace aix::metal
 class MetalAllocator;
 class MTLBufferCache;
 class aixDeviceMetalKernelGen;
+class MetalComputeEncoder;
 
 class DeviceMetal : public aix::Device
 {
@@ -243,7 +244,7 @@ protected:
     MTL::CommandQueue*     m_cmdQueue{nullptr};
     MTL::CommandBuffer*    m_cmdBuffer{nullptr};
     MTL::CommandBuffer*    m_committedCmdBuffer{nullptr};
-    MTL::ComputeCommandEncoder*  m_compEncoder{nullptr};
+    std::unique_ptr<MetalComputeEncoder> m_compEncoder;
     MTL::ComputePipelineState*   m_compFuncPSOAdd[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOAddStrided[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOSub[aix::DataTypeCount]{nullptr};
@@ -315,8 +316,7 @@ protected:
     size_t   m_maxThreadsPerThreadgroup{1024};
     size_t   m_maxWorkingSetSize{0};
     size_t   m_currentWorkingSetSize{0};
-    MTL::Event*  m_event{nullptr};
-    uint64_t     m_eventValue{0};
+    MTL::Fence*  m_fence{nullptr};
 
 private:
     struct ReductionRoute

@@ -14,6 +14,7 @@
 // Project includes
 #include "aixDeviceMetal.hpp"
 #include "aixDeviceMetalCache.hpp"
+#include "aixDeviceMetalEncoder.hpp"
 #include "aixDeviceMetalShaders.hpp"
 // External includes
 #include <Metal/Metal.hpp>
@@ -33,6 +34,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     m_maxWorkingSetSize = static_cast<size_t>(static_cast<double>(m_mtlDevice->recommendedMaxWorkingSetSize()) * 0.7);
     m_allocator = std::make_unique<MetalAllocator>(m_mtlDevice, ALLOCATOR_ALIGNMENT_SIZE);
     m_bufferCache = std::make_unique<MTLBufferCache>();
+    m_compEncoder = std::make_unique<MetalComputeEncoder>();
     auto defaultLibrary = createLibrary(shaders::aixDeviceMetalShaders);
     auto nullKernelName = "nullKernel";
 
@@ -118,8 +120,8 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
 
     m_cmdQueue = createCommandQueue();
     m_cmdBuffer = m_cmdQueue->commandBufferWithUnretainedReferences();
-    m_compEncoder = m_cmdBuffer->computeCommandEncoder();
-    m_event = m_mtlDevice->newEvent();
+    m_compEncoder->reset(m_cmdBuffer->computeCommandEncoder(MTL::DispatchTypeConcurrent));
+    m_fence = m_mtlDevice->newFence();
 
     // Setup fusion configuration.
     aix::fuse::FuseConfig config;
@@ -137,7 +139,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     callbacks.finishFlush = std::bind(&DeviceMetal::finishFlush, this);
     callbacks.getKernelCacheStats = std::bind(&DeviceMetal::getKernelCacheStats, this);
     m_fuseEngine = std::make_unique<aix::fuse::FuseEngine>(config, std::move(callbacks));
-    m_kernelGen = std::make_unique<aixDeviceMetalKernelGen>(m_mtlDevice);
+    m_kernelGen = std::make_unique<aixDeviceMetalKernelGen>(m_mtlDevice, *m_compEncoder);
 }
 
 // Destructor
@@ -148,10 +150,8 @@ DeviceMetal::~DeviceMetal()
         std::cerr << "WARNING: Queued tensor operations detected. Did you forget to call synchronize()?" << std::endl;
     }
 
-    if (m_committedCmdBuffer)
-    {
-        m_committedCmdBuffer->waitUntilCompleted();
-    }
+    // Flush lazy work and finish every submitted batch before releasing kernels or buffers.
+    synchronize();
 
     m_fuseEngine.reset();
     m_kernelGen.reset();
@@ -225,7 +225,7 @@ DeviceMetal::~DeviceMetal()
     m_compFuncPSOArgmaxIndicesSet->release();
     m_compFuncPSOArgmaxIndicesToSet->release();
 
-    m_event->release();
+    m_fence->release();
     m_cmdQueue->release();
     m_mtlDevice->release();
     m_pool->release();
@@ -1345,9 +1345,10 @@ void DeviceMetal::commit()
 {
     if (m_currentBatchSize == 0) return;
 
+    // All batches use one queue. Chain their compute passes while preserving
+    // visibility of writes to the allocator's untracked heap buffers.
+    m_compEncoder->updateFence(m_fence);
     m_compEncoder->endEncoding();
-    ++m_eventValue;
-    m_cmdBuffer->encodeSignalEvent(m_event, m_eventValue);
 
     m_cmdBuffer->addCompletedHandler([&,tempBuffers=m_tempBuffers](MTL::CommandBuffer* commandBuffer)
     {
@@ -1379,8 +1380,8 @@ void DeviceMetal::commit()
     m_committedCmdBuffer = m_cmdBuffer;
     // Create a new command buffer for the next batch.
     m_cmdBuffer = m_cmdQueue->commandBufferWithUnretainedReferences();
-    m_cmdBuffer->encodeWait(m_event, m_eventValue);
-    m_compEncoder = m_cmdBuffer->computeCommandEncoder();
+    m_compEncoder->reset(m_cmdBuffer->computeCommandEncoder(MTL::DispatchTypeConcurrent));
+    m_compEncoder->waitForFence(m_fence);
 
     // Update batch size metrics.
     m_maxBatchSize = std::max(m_currentBatchSize, m_maxBatchSize);
@@ -1571,7 +1572,7 @@ MTL::ComputePipelineState* DeviceMetal::createComputeFuncPSO(MTL::Library* libra
     }
 
     NS::Error* error = nullptr;
-    auto compFuncPSO = m_mtlDevice->newComputePipelineState(compFunc, &error);
+    auto compFuncPSO = m_compEncoder->createPipeline(m_mtlDevice, compFunc, &error);
     if (!compFuncPSO)
     {
         std::cerr << "Failed to create the pipeline state object.\n";
@@ -1922,7 +1923,7 @@ void DeviceMetal::emitFused(const aix::fuse::FusedSubgraphDescriptor& subgraph)
         ensureDeviceBuffer(buf.data, buf.size, aix::Device::dataTypeSize(buf.dtype), true);
     }
 
-    m_kernelGen->encodeFusedDispatch(m_compEncoder, pso, subgraph, m_allocMap);
+    m_kernelGen->encodeFusedDispatch(m_compEncoder.get(), pso, subgraph, m_allocMap);
 
     for (const auto& buf : subgraph.outputBuffers)
     {
