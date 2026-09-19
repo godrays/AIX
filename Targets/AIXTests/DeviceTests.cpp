@@ -1793,6 +1793,65 @@ TEST_CASE("DeviceMetal single-row matmul float32 layout and reduction boundaries
 }
 
 
+TEST_CASE("DeviceMetal single-row matmul projection and attention dispatch boundaries")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    const std::pair<size_t, size_t> dimensions[] = {
+        {31, 64}, {32, 64}, {33, 32}, {36, 5}, {36, 33}, {63, 64}, {64, 3}, {64, 4},
+        {64, 7}, {64, 31}, {64, 33}, {64, 107}, {64, 108}, {65, 64}, {68, 511}, {68, 512},
+        {96, 64}, {108, 64}, {127, 64}, {128, 64}, {129, 64}, {63, 512}, {64, 512},
+        {768, 511}, {768, 512}, {768, 513}, {768, 768}, {768, 2048}, {768, 2112},
+        {768, 2304}, {768, 3072}, {3072, 768}, {768, 50257}
+    };
+    for (const auto& [k, n] : dimensions)
+    {
+        for (size_t layout = 0; layout < 4; ++layout)
+        {
+            // Offset unit-stride vectors exercise the fast paths; stepped vectors
+            // and doubly strided matrices must remain on the general M1 kernel.
+            const bool transposed = layout == 1;
+            const size_t step = layout == 2 ? 2 : 1;
+            const size_t rows = transposed ? n : k;
+            const size_t columns = (transposed ? k : (layout == 3 ? 2 * n : n)) + 3;
+            CAPTURE(k);
+            CAPTURE(n);
+            CAPTURE(layout);
+            std::vector<float> a(k * step + 1);
+            std::vector<float> b(rows * columns);
+            for (size_t i = 0; i < a.size(); ++i)
+            {
+                a[i] = static_cast<float>(static_cast<int>((i * 17) % 67) - 33) / 131.0f;
+            }
+            for (size_t i = 0; i < b.size(); ++i)
+            {
+                b[i] = static_cast<float>(static_cast<int>((i * 29) % 97) - 48) / 193.0f;
+            }
+            auto makeInputs = [&](aix::Device* target)
+            {
+                TensorValue input(a.data(), a.size(), DataType::kFloat32, {1, a.size()}, target);
+                TensorValue weights(b.data(), b.size(), DataType::kFloat32, {rows, columns}, target);
+                auto inputView = input.slice(1, 1, k * step + 1, step);
+                auto weightView = transposed ? weights.slice(1, 1, k + 1).transpose(0, 1)
+                    : weights.slice(1, 1, (layout == 3 ? 2 * n : n) + 1, layout == 3 ? 2 : 1);
+                return std::pair{std::move(inputView), std::move(weightView)};
+            };
+            auto [cpuInput, cpuWeights] = makeInputs(&refDevice);
+            auto [metalInput, metalWeights] = makeInputs(device.get());
+            auto expected = cpuInput.matmul(cpuWeights);
+            auto actual = metalInput.matmul(metalWeights);
+            device->synchronize();
+            for (size_t i = 0; i < n; ++i)
+            {
+                CHECK(std::abs(actual.data<float>()[i] - expected.data<float>()[i]) <= EPSILON_MATMUL_F32_METAL);
+            }
+        }
+    }
+}
+
+
 TEST_CASE("DeviceMetal queued matmul dependencies survive batch boundaries and temporary retirement")
 {
     auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);

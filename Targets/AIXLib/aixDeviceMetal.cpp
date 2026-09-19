@@ -116,6 +116,11 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
     }
 
     m_compFuncPSOArgmaxIndicesSet = createComputeFuncPSO(defaultLibrary, "argmaxIndicesSet");
+    m_compFuncPSOMatMulRowM1[0] = createComputeFuncPSO(defaultLibrary, "matrixMulRowM1_4");
+    m_compFuncPSOMatMulRowM1[1] = createComputeFuncPSO(defaultLibrary, "matrixMulRowM1_16");
+    m_compFuncPSOMatMulRowM1[2] = createComputeFuncPSO(defaultLibrary, "matrixMulRowM1_small");
+    m_compFuncPSOMatMulColumnM1[0] = createComputeFuncPSO(defaultLibrary, "matrixMulColumnM1_small");
+    m_compFuncPSOMatMulColumnM1[1] = createComputeFuncPSO(defaultLibrary, "matrixMulColumnM1_large");
     m_compFuncPSOArgmaxIndicesToSet = createComputeFuncPSO(defaultLibrary, "argmaxIndicesToSet");
     defaultLibrary->release();
 
@@ -222,6 +227,14 @@ DeviceMetal::~DeviceMetal()
     }
     m_compFuncPSOArgmaxIndicesSet->release();
     m_compFuncPSOArgmaxIndicesToSet->release();
+    for (auto pso : m_compFuncPSOMatMulRowM1)
+    {
+        pso->release();
+    }
+    for (auto pso : m_compFuncPSOMatMulColumnM1)
+    {
+        pso->release();
+    }
 
     m_fence->release();
     m_cmdQueue->release();
@@ -594,10 +607,76 @@ void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& 
     const bool useStridedM1 = M == 1;
     const bool useTiled = !useStridedM1 && M >= 16 && N >= 16 && K >= 16;
 
+    if (useStridedM1)
+    {
+        // The specialized paths use 32-bit relative indices; offsets stay in the
+        // Metal buffer bindings. Also leave room for the column kernel's K step.
+        if (result.dtype == DataType::kFloat32 && a.strides[1] == 1 && b.strides[0] == 1
+            && K > 32 && K % 4 == 0 && N >= 4 && (K <= 64 || N >= 512)
+            && K <= UINT32_MAX - 127 && N <= UINT32_MAX
+            && b.strides[1] <= UINT32_MAX / N && K <= UINT32_MAX - N * b.strides[1])
+        {
+            const bool large = K > 64;
+            const uint32_t params[] = {static_cast<uint32_t>(K), static_cast<uint32_t>(N),
+                                       static_cast<uint32_t>(b.strides[1])};
+            auto pso = m_compFuncPSOMatMulColumnM1[large];
+            m_compEncoder->setComputePipelineState(pso);
+            m_compEncoder->setBuffer(buf1, a.offset * sizeof(float), 0);
+            m_compEncoder->setBuffer(buf2, b.offset * sizeof(float), 1);
+            m_compEncoder->setBuffer(bufResult, 0, 2);
+            m_compEncoder->setBytes(params, sizeof(params), 3);
+            const size_t groups = large ? 8 : 1;
+            assert(32 * groups <= pso->maxTotalThreadsPerThreadgroup());
+            m_compEncoder->dispatchThreadgroups({(N + 31) / 32, 1, 1}, {32, groups, 1});
+            freeTemporaryBuffer(buf1);
+            freeTemporaryBuffer(buf2);
+            commitBatchQueue();
+            return;
+        }
+        if (result.dtype == DataType::kFloat32 && a.strides[1] == 1 && b.strides[1] == 1
+            && K > 32 && ((K % 32 == 0 && N >= 512 && N % 64 == 0)
+                         || (K <= 128 && N >= 32 && N < 512 && N % 32 == 0))
+            && K <= UINT32_MAX && N <= UINT32_MAX
+            && b.strides[0] <= UINT32_MAX / K && N <= UINT32_MAX - K * b.strides[0])
+        {
+            const bool small = K <= 128 && N < 512;
+            const size_t groups = small ? 2 : (N >= 2048 && N % 256 == 0 ? 16 : 4);
+            const uint32_t params[] = {static_cast<uint32_t>(K), static_cast<uint32_t>(N),
+                                       static_cast<uint32_t>(b.strides[0])};
+            auto pso = m_compFuncPSOMatMulRowM1[small ? 2 : (groups == 16)];
+            m_compEncoder->setComputePipelineState(pso);
+            m_compEncoder->setBuffer(buf1, a.offset * sizeof(float), 0);
+            m_compEncoder->setBuffer(buf2, b.offset * sizeof(float), 1);
+            m_compEncoder->setBuffer(bufResult, 0, 2);
+            m_compEncoder->setBytes(params, sizeof(params), 3);
+            assert(32 * groups <= pso->maxTotalThreadsPerThreadgroup());
+            m_compEncoder->dispatchThreadgroups({N / (16 * groups), 1, 1}, {32, groups, 1});
+            freeTemporaryBuffer(buf1);
+            freeTemporaryBuffer(buf2);
+            commitBatchQueue();
+            return;
+        }
+        // A single row only needs its reduction/output extents and element strides.
+        const size_t groups = result.dtype == DataType::kFloat32 && K <= 128 && N <= 128 ? 1 : 4;
+        const size_t params[] = {K, N, a.offset, b.offset, a.strides[1], b.strides[0], b.strides[1], groups};
+        auto pso = m_compFuncPSOMatMulStridedM1[iDType];
+        m_compEncoder->setComputePipelineState(pso);
+        m_compEncoder->setBuffer(buf1, 0, 0);
+        m_compEncoder->setBuffer(buf2, 0, 1);
+        m_compEncoder->setBuffer(bufResult, 0, 2);
+        m_compEncoder->setBytes(params, sizeof(params), 3);
+        assert(128 <= pso->maxTotalThreadsPerThreadgroup());
+        const size_t columns = 4 * groups;
+        m_compEncoder->dispatchThreadgroups({(N + columns - 1) / columns, 1, 1}, {32, groups, 1});
+        freeTemporaryBuffer(buf1);
+        freeTemporaryBuffer(buf2);
+        commitBatchQueue();
+        return;
+    }
+
     // Select the appropriate Pipeline State Object, compute kernel.
-    auto compFuncPSO = useStridedM1 ? m_compFuncPSOMatMulStridedM1[iDType]
-                                    : (useTiled ? m_compFuncPSOMatMulStridedTiled1616[iDType]
-                                                : m_compFuncPSOMatMulStrided[iDType]);
+    auto compFuncPSO = useTiled ? m_compFuncPSOMatMulStridedTiled1616[iDType]
+                               : m_compFuncPSOMatMulStrided[iDType];
 
     m_compEncoder->setComputePipelineState(compFuncPSO);
 
@@ -611,17 +690,7 @@ void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& 
     const auto boundLayoutA = bindTensorLayout(a, {.bufferIndex=5});
     const auto boundLayoutB = bindTensorLayout(b, {.bufferIndex=6});
 
-    if (useStridedM1)
-    {
-        constexpr NS::UInteger simdWidth = 32;
-        constexpr NS::UInteger simdgroupsPerThreadgroup = 4;
-        constexpr NS::UInteger outputColumnsPerSimdgroup = 4;
-        constexpr NS::UInteger threadgroupColumns = simdgroupsPerThreadgroup * outputColumnsPerSimdgroup;
-        assert(simdWidth * simdgroupsPerThreadgroup <= compFuncPSO->maxTotalThreadsPerThreadgroup());
-        NS::UInteger tgX = (N + threadgroupColumns - 1) / threadgroupColumns;
-        m_compEncoder->dispatchThreadgroups({tgX, 1, 1}, {simdWidth, simdgroupsPerThreadgroup, 1});
-    }
-    else if (useTiled)
+    if (useTiled)
     {
         // Tiled threadgroup dispatch.
         constexpr NS::UInteger TILE_SIZE = 16;

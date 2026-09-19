@@ -1109,33 +1109,129 @@ template<typename T>
     result[gid.y * matBSize.cols + gid.x] = sum;
 }
 
+struct MatmulM1Params
+{
+    size_t k, n, offsetA, offsetB, strideA, strideBk, strideBn, groups;
+};
+
+struct MatmulProjectionParams
+{
+    uint k, n, ld;
+};
+
+template<uint Lanes>
+[[kernel]] void matrixMulColumnM1(const device float* inA,
+                                  const device float* inB,
+                                  device float* result,
+                                  constant MatmulProjectionParams& params,
+                                  uint tgid [[threadgroup_position_in_grid]],
+                                  uint simdGroupId [[simdgroup_index_in_threadgroup]],
+                                  uint simdLaneId [[thread_index_in_simdgroup]])
+{
+    const uint column = tgid * 32 + (simdGroupId * (32 / Lanes) + simdLaneId / Lanes) * 4;
+    if (column >= params.n)
+    {
+        return;
+    }
+    const uint readColumn = min(column, params.n - 4);
+    float sums[4] = {};
+    const uniform<uint> count = make_uniform(params.k);
+    for (uint k = (simdLaneId % Lanes) * 4; k < count; k += Lanes * 4)
+    {
+        const float4 av = float4(inA[k], inA[k + 1], inA[k + 2], inA[k + 3]);
+        #pragma unroll
+        for (uint i = 0; i < 4; ++i)
+        {
+            const uint index = (readColumn + i) * params.ld + k;
+            #pragma unroll
+            for (uint j = 0; j < 4; ++j)
+            {
+                sums[i] += av[j] * inB[index + j];
+            }
+        }
+    }
+    #pragma unroll
+    for (uint i = 0; i < 4; ++i)
+    {
+        #pragma unroll
+        for (uint step = Lanes / 2; step > 0; step /= 2)
+        {
+            sums[i] += simd_shuffle_down(sums[i], step);
+        }
+        if (simdLaneId % Lanes == 0 && readColumn + i >= column)
+        {
+            result[readColumn + i] = sums[i];
+        }
+    }
+}
+
+template<uint Groups, bool Tail = false>
+[[kernel]] void matrixMulRowM1(const device float* inA,
+                               const device float* inB,
+                               device float* result,
+                               constant MatmulProjectionParams& params,
+                               uint tgid [[threadgroup_position_in_grid]],
+                               uint simdGroupId [[simdgroup_index_in_threadgroup]],
+                               uint simdLaneId [[thread_index_in_simdgroup]])
+{
+    const uint column = (tgid * Groups + simdGroupId) * 16 + (simdLaneId % 4) * 4;
+    const uint reduction = (simdLaneId / 4) * 4;
+    float4 sum = 0;
+    const uniform<uint> full = make_uniform(Tail ? params.k / 32 * 32 : params.k);
+    for (uint base = 0; base < full; base += 32)
+    {
+        threadgroup_barrier(mem_flags::mem_none);
+        #pragma unroll
+        for (uint i = 0; i < 4; ++i)
+        {
+            const uint k = base + reduction + i;
+            const uint index = k * params.ld + column;
+            sum += inA[k] * float4(inB[index], inB[index + 1], inB[index + 2], inB[index + 3]);
+        }
+    }
+    if constexpr (Tail)
+    {
+        #pragma unroll
+        for (uint i = 0; i < 4; ++i)
+        {
+            const uint k = full + reduction + i;
+            if (k < params.k)
+            {
+                const uint index = k * params.ld + column;
+                sum += inA[k] * float4(inB[index], inB[index + 1], inB[index + 2], inB[index + 3]);
+            }
+        }
+    }
+    sum += simd_shuffle_down(sum, 16);
+    sum += simd_shuffle_down(sum, 8);
+    sum += simd_shuffle_down(sum, 4);
+    if (simdLaneId < 4)
+    {
+        #pragma unroll
+        for (uint i = 0; i < 4; ++i)
+        {
+            result[column + i] = sum[i];
+        }
+    }
+}
+
 template<typename T, uint TN>
 [[kernel, max_total_threads_per_threadgroup(128)]] void matrixMulStridedM1(const device T* inA,
                                                                            const device T* inB,
                                                                            device T* result,
-                                                                           constant MatrixSize& matASize,
-                                                                           constant MatrixSize& matBSize,
-                                                                           const constant size_t* layoutA,
-                                                                           const constant size_t* layoutB,
+                                                                           constant MatmulM1Params& params,
                                                                            uint3 tgid [[threadgroup_position_in_grid]],
                                                                            uint simdGroupId [[simdgroup_index_in_threadgroup]],
                                                                            uint simdLaneId [[thread_index_in_simdgroup]])
 {
-    if (matASize.rows != 1)
-    {
-        return;
-    }
+    const size_t startA = params.offsetA;
+    const size_t startB = params.offsetB;
+    const size_t strideA_k = params.strideA;
+    const size_t strideB_k = params.strideBk;
+    const size_t strideB_n = params.strideBn;
+    const uint colBase = static_cast<uint>(tgid.x * (TN * params.groups) + simdGroupId * TN);
 
-    const constant size_t* stridesA = layoutStrides(layoutA);
-    const constant size_t* stridesB = layoutStrides(layoutB);
-    const size_t startA = layoutOffset(layoutA);
-    const size_t startB = layoutOffset(layoutB);
-    const size_t strideA_k = stridesA[1];
-    const size_t strideB_k = stridesB[0];
-    const size_t strideB_n = stridesB[1];
-    const uint colBase = static_cast<uint>(tgid.x * (TN * 4) + simdGroupId * TN);
-
-    if (colBase >= matBSize.cols)
+    if (colBase >= params.n)
     {
         return;
     }
@@ -1146,12 +1242,12 @@ template<typename T, uint TN>
     {
         // Load four adjacent output columns together when every row is float4-aligned.
         // Short dots retain the ordered reduction below, including aligned layouts.
-        if (TN == 4 && matASize.cols > SIMDGROUP_WIDTH && strideB_n == 1
-            && startB % 4 == 0 && strideB_k % 4 == 0 && colBase + 4 <= matBSize.cols)
+        if (TN == 4 && params.k > SIMDGROUP_WIDTH && strideB_n == 1
+            && startB % 4 == 0 && strideB_k % 4 == 0 && colBase + 4 <= params.n)
         {
             float4 sums = 0;
             const device float4* b = reinterpret_cast<const device float4*>(inB + startB + colBase);
-            for (size_t k = simdLaneId; k < matASize.cols; k += SIMDGROUP_WIDTH)
+            for (size_t k = simdLaneId; k < params.k; k += SIMDGROUP_WIDTH)
             {
                 sums += inA[startA + k * strideA_k] * b[k * (strideB_k / 4)];
             }
@@ -1172,7 +1268,7 @@ template<typename T, uint TN>
     threadgroup T partialSums[SIMDGROUPS_PER_THREADGROUP][TN][SIMDGROUP_WIDTH];
 
     T sums[TN] = {0};
-    for (size_t k = simdLaneId; k < matASize.cols; k += 32)
+    for (size_t k = simdLaneId; k < params.k; k += 32)
     {
         const T aVal = inA[startA + k * strideA_k];
         const size_t bRowOffset = startB + k * strideB_k + colBase * strideB_n;
@@ -1180,7 +1276,7 @@ template<typename T, uint TN>
         for (uint tn = 0; tn < TN; ++tn)
         {
             const uint outCol = colBase + tn;
-            if (outCol < matBSize.cols)
+            if (outCol < params.n)
             {
                 sums[tn] += aVal * inB[bRowOffset + tn * strideB_n];
             }
@@ -1193,11 +1289,11 @@ template<typename T, uint TN>
         for (uint tn = 0; tn < TN; ++tn)
         {
             float reducedSum = 0;
-            if (matASize.cols <= SIMDGROUP_WIDTH)
+            if (params.k <= SIMDGROUP_WIDTH)
             {
                 // One product per lane: preserve the original left-to-right sum.
                 // A tree reduction can exceed the CPU parity tolerance for short dots.
-                for (uint lane = 0; lane < matASize.cols; ++lane)
+                for (uint lane = 0; lane < params.k; ++lane)
                 {
                     reducedSum += simd_broadcast(sums[tn], lane);
                 }
@@ -1207,7 +1303,7 @@ template<typename T, uint TN>
                 reducedSum = simd_sum(sums[tn]);
             }
             const uint outCol = colBase + tn;
-            if (simdLaneId == 0 && outCol < matBSize.cols)
+            if (simdLaneId == 0 && outCol < params.n)
             {
                 result[outCol] = reducedSum;
             }
@@ -1235,7 +1331,7 @@ template<typename T, uint TN>
             }
 
             const uint outCol = colBase + tn;
-            if (outCol < matBSize.cols)
+            if (outCol < params.n)
             {
                 result[outCol] = reducedSum;
             }
@@ -2883,15 +2979,32 @@ SpecializeMatrixMulStrided("i16",  short);
 SpecializeMatrixMulStrided("i8",   char);
 SpecializeMatrixMulStrided("ui8",  uchar);
 
+template [[host_name("matrixMulColumnM1_small")]]
+[[kernel]] void matrixMulColumnM1<4>(const device float*, const device float*, device float*,
+                                     constant MatmulProjectionParams&, uint, uint, uint);
+
+template [[host_name("matrixMulColumnM1_large")]]
+[[kernel]]  void matrixMulColumnM1<32>(const device float*, const device float*, device float*,
+                                       constant MatmulProjectionParams&, uint, uint, uint);
+
+template [[host_name("matrixMulRowM1_4")]]
+[[kernel]]  void matrixMulRowM1<4>(const device float*, const device float*, device float*,
+                                   constant MatmulProjectionParams&, uint, uint, uint);
+
+template [[host_name("matrixMulRowM1_16")]]
+[[kernel]]  void matrixMulRowM1<16>(const device float*, const device float*, device float*,
+                                    constant MatmulProjectionParams&, uint, uint, uint);
+
+template [[host_name("matrixMulRowM1_small")]]
+[[kernel]]  void matrixMulRowM1<2, true>(const device float*, const device float*, device float*,
+                                         constant MatmulProjectionParams&, uint, uint, uint);
+
 #define SpecializeMatrixMulStridedM1(tname, tn, type) \
     template [[ host_name("matrixMulStridedM1_" tname) ]] \
     [[kernel]] void matrixMulStridedM1<type, tn>(const device type* inA, \
                                                  const device type* inB, \
                                                  device type* result, \
-                                                 constant MatrixSize& matASize, \
-                                                 constant MatrixSize& matBSize, \
-                                                 const constant size_t* layoutA, \
-                                                 const constant size_t* layoutB, \
+                                                 constant MatmulM1Params& params, \
                                                  uint3 tgid [[threadgroup_position_in_grid]], \
                                                  uint simdGroupId [[simdgroup_index_in_threadgroup]], \
                                                  uint simdLaneId [[thread_index_in_simdgroup]])
