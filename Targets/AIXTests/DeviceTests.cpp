@@ -11,9 +11,11 @@
 #include "Utils.hpp"
 #include <aix.hpp>
 #include <aixFuse.hpp>
+#if defined(__APPLE__) && defined(__arm64__)
 #include <aixDeviceMetal.hpp>
 #include <aixDeviceMetalEncoder.hpp>
 #include <aixDeviceMetalCache.hpp>
+#endif
 #include <aixDevices.hpp>
 // External includes
 #include <doctest/doctest.h>
@@ -1891,6 +1893,7 @@ TEST_CASE("DeviceMetal queued matmul dependencies survive batch boundaries and t
 }
 
 
+#if defined(__APPLE__) && defined(__arm64__)
 TEST_CASE("DeviceMetal concurrent encoder tracks RAW WAR WAW and distinct overlapping heap buffers")
 {
     auto pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
@@ -1997,6 +2000,7 @@ TEST_CASE("DeviceMetal concurrent encoder tracks RAW WAR WAW and distinct overla
         }
     }
 }
+#endif
 
 
 TEST_CASE("DeviceMetal concurrent fused views reductions copies and pending destruction")
@@ -2004,6 +2008,7 @@ TEST_CASE("DeviceMetal concurrent fused views reductions copies and pending dest
     for (size_t pass = 0; pass < 4; ++pass)
     {
         auto device = createDevice(DeviceType::kGPU_METAL);
+        if (!device) return;
         TensorValue storage(1.0f, {16, 64}, device.get());
         TensorValue increment(0.25f, {16, 64}, device.get());
         std::vector<TensorValue> branches;
@@ -2043,6 +2048,7 @@ TEST_CASE("DeviceMetal concurrent fused views reductions copies and pending dest
 TEST_CASE("DeviceMetal concurrent slice ranges preserve disjoint and overlapping view writes")
 {
     auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
     for (size_t round = 0; round < 16; ++round)
     {
         TensorValue storage(-1.0f, {1, 80}, device.get());
@@ -2079,6 +2085,7 @@ TEST_CASE("DeviceMetal strided indexing preserves leading zero coordinates and b
 {
     aix::DeviceCPU reference;
     auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
     for (size_t layout = 0; layout < 3; ++layout)
     {
         const Shape shape = layout == 0 ? Shape{257} : (layout == 1 ? Shape{1, 257} : Shape{2, 3, 5, 7});
@@ -2109,6 +2116,7 @@ TEST_CASE("DeviceMetal strided indexing preserves leading zero coordinates and b
 }
 
 
+#if defined(__APPLE__) && defined(__arm64__)
 TEST_CASE("DeviceMetal concurrent no-work synchronization drains retired allocations")
 {
     class InspectableDevice : public aix::metal::DeviceMetal
@@ -2147,6 +2155,7 @@ TEST_CASE("DeviceMetal concurrent no-work synchronization drains retired allocat
     // in currentAllocatedSize after device teardown. Check our exact owners above.
     device.reset();
 }
+#endif
 
 
 TEST_CASE("DeviceMetal small buffers reuse allocator-sized cache entries after completion")
@@ -2276,6 +2285,7 @@ TEST_CASE("DeviceMetal stride maxTo parity with broadcast source")
 }
 
 
+#if defined(__APPLE__) && defined(__arm64__)
 TEST_CASE("DeviceMetal fused kernels reuse runtime scalar bindings")
 {
     auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
@@ -2310,6 +2320,7 @@ TEST_CASE("DeviceMetal fused kernels reuse runtime scalar bindings")
     CHECK(hits2 > hits1);
     CHECK(hits1 >= hits0);
 }
+#endif
 
 
 TEST_CASE("FuseEngine does not fuse ops that depend on rejected fallback producers")
