@@ -1644,11 +1644,15 @@ private:
     static bool checkMinMaxValueOverflow(float minValue, float maxValue, const aix::TensorValue& tensor)
     {
         assert(tensor.dataType() == aix::DataType::kInt32);     // Currently supports only int32 data type.
+        assert(tensor.shape().size() <= 1);                   // Index tensors are scalars or vectors.
         tensor.device()->synchronize();
+        const size_t stride = tensor.strides().empty() ? 0 : tensor.strides()[0];
         for (size_t i=0; i < tensor.size(); ++i)
         {
-            if (tensor.data<int32_t>()[i] < minValue) return false;
-            if (tensor.data<int32_t>()[i] > maxValue) return false;
+            // Check logical elements, including offset and zero-stride broadcast views.
+            const auto value = tensor.data<int32_t>()[tensor.storageOffset() + i * stride];
+            if (value < minValue) return false;
+            if (value > maxValue) return false;
         }
         return true;
     }

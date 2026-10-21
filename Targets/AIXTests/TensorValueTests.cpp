@@ -1084,6 +1084,89 @@ TEST_CASE("TensorValue - slice view metadata")
 }
 
 
+TEST_CASE("TensorValue - index validation accepts logical views")
+{
+    // Observe dispatch without depending on any backend's indexing kernels.
+    // The shared TensorValue validator must accept the logical indices even
+    // when their backing storage contains out-of-range values outside the view.
+    struct IndexValidationDevice : DeviceCPU
+    {
+        bool m_indexSelectCalled{false};
+        bool m_indexAddCalled{false};
+
+        void indexSelect(const DeviceTensorParams&, const DeviceTensorParams&,
+                         const DeviceTensorParams&, size_t) override
+        {
+            m_indexSelectCalled = true;
+        }
+
+        void indexAdd(const DeviceTensorParams&, const DeviceTensorParams&,
+                      const DeviceTensorParams&, size_t) override
+        {
+            m_indexAddCalled = true;
+        }
+    };
+
+    for (size_t layout = 0; layout < 6; ++layout)
+    {
+        CAPTURE(layout);
+        IndexValidationDevice device;
+        auto values = TensorValue({10.0f, 20.0f, 30.0f}, {3}, &device);
+        auto indices = [&]()
+        {
+            if (layout == 0) // Strided vector.
+                return TensorValue({1, 9, 0, 7}, {4}, &device, DataType::kInt32).slice(0, 0, 4, 2);
+            if (layout == 1) // Contiguous vector with a storage offset.
+                return TensorValue({9, 1, 0, 9}, {4}, &device, DataType::kInt32).slice(0, 1, 3);
+            if (layout == 2) // Stride and offset together.
+                return TensorValue({9, 1, 9, 0, 9}, {5}, &device, DataType::kInt32).slice(0, 1, 5, 2);
+            if (layout == 3) // Zero-stride broadcast view with an offset.
+                return TensorValue({9, 1}, {2}, &device, DataType::kInt32).slice(0, 1, 2).broadcastTo({2});
+            if (layout == 4) // Scalar view with an offset.
+                return TensorValue({9, 1}, {2}, &device, DataType::kInt32).select(0, 1);
+            return TensorValue({1, 0}, {2}, &device, DataType::kInt32);
+        }();
+
+        auto selected = values.indexSelect(0, indices);
+        CHECK(device.m_indexSelectCalled);
+        CHECK(selected.shape() == Shape{indices.size()});
+
+        auto updates = TensorValue(1.0f, selected.shape(), &device);
+        auto added = values.indexAdd(0, indices, updates);
+        CHECK(device.m_indexAddCalled);
+        CHECK(added.shape() == values.shape());
+    }
+}
+
+
+TEST_CASE("TensorValue - Metal index validation accepts offset views")
+{
+    auto device = aix::createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    for (size_t step : {1, 2})
+    {
+        CAPTURE(step);
+        auto values = TensorValue({10.0f, 20.0f, 30.0f}, {3}, device.get());
+        auto indices = [&]()
+        {
+            if (step == 1)
+                return TensorValue({9, 1, 0}, {3}, device.get(), DataType::kInt32).slice(0, 1, 3);
+            return TensorValue({9, 1, 9, 0}, {4}, device.get(), DataType::kInt32).slice(0, 1, 4, 2);
+        }();
+        REQUIRE(indices.storageOffset() == 1);
+        REQUIRE(indices.strides() == Stride{step});
+
+        auto selected = values.indexSelect(0, indices);
+        CheckVectorApproxValues(selected, TensorValue({20.0f, 10.0f}, {2}, &testDevice));
+
+        auto updates = TensorValue({4.0f, 5.0f}, {2}, device.get());
+        auto added = values.indexAdd(0, indices, updates);
+        CheckVectorApproxValues(added, TensorValue({15.0f, 24.0f, 30.0f}, {3}, &testDevice));
+    }
+}
+
+
 TEST_CASE("TensorValue - transpose view metadata")
 {
     auto base = TensorValue({1.0, 2.0, 3.0, 4.0, 5.0, 6.0,
