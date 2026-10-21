@@ -1167,6 +1167,72 @@ TEST_CASE("TensorValue - Metal index validation accepts offset views")
 }
 
 
+TEST_CASE("TensorValue - contiguous normalizes views across devices")
+{
+    const std::pair<Shape, std::vector<double>> cases[] = {
+        {{3, 4}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}},
+        {{2, 4}, {5, 6, 7, 8, 9, 10, 11, 12}},
+        {{3}, {6, 7, 8}},
+        {{}, {7}},
+        {{3, 2}, {2, 4, 6, 8, 10, 12}},
+        {{2, 3}, {7, 7, 7, 7, 7, 7}},
+        {{4, 3}, {1, 5, 9, 2, 6, 10, 3, 7, 11, 4, 8, 12}}
+    };
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+
+        for (size_t i = 0; i < aix::DataTypeCount; ++i)
+        {
+            const auto dtype = static_cast<DataType>(i);
+            if (deviceType == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+            CAPTURE(i);
+            auto base = TensorValue({1.0f, 2.0f, 3.0f, 4.0f,
+                                     5.0f, 6.0f, 7.0f, 8.0f,
+                                     9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, device.get(), dtype);
+            for (size_t layout = 0; layout < std::size(cases); ++layout)
+            {
+                CAPTURE(layout);
+                auto view = [&]()
+                {
+                    if (layout == 0) return base.reshape({3, 4});
+                    if (layout == 1) return base.slice(0, 1, 3);
+                    if (layout == 2) return base.select(0, 1).slice(0, 1, 4);
+                    if (layout == 3) return base.select(0, 1).select(0, 2);
+                    if (layout == 4) return base.slice(1, 1, 4, 2);
+                    if (layout == 5) return base.select(0, 1).select(0, 2).broadcastTo({2, 3});
+                    return base.transpose(0, 1);
+                }();
+                if (layout >= 1 && layout <= 3)
+                {
+                    REQUIRE(view.isContiguous());
+                    REQUIRE(view.storageOffset() > 0);
+                }
+
+                auto result = view.contiguous();
+                device->synchronize();
+                CHECK(result.shape() == cases[layout].first);
+                CHECK(result.dataType() == dtype);
+                CHECK(result.isContiguous());
+                CHECK(result.storageOffset() == 0);
+                CHECK((result.storage() == view.storage()) == (layout == 0));
+
+                auto hostResult = result.to(&testDevice).to(DataType::kFloat64);
+                const auto& expected = cases[layout].second;
+                REQUIRE(hostResult.size() == expected.size());
+                for (size_t j = 0; j < expected.size(); ++j)
+                {
+                    CAPTURE(j);
+                    CHECK(hostResult.data<double>()[j] == expected[j]);
+                }
+            }
+        }
+    }
+}
+
+
 TEST_CASE("TensorValue - transpose view metadata")
 {
     auto base = TensorValue({1.0, 2.0, 3.0, 4.0, 5.0, 6.0,

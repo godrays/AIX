@@ -806,7 +806,8 @@ void DeviceMetal::contiguous(const DeviceTensorParams& src, const DeviceTensorPa
 {
     recordExternalRead(src);
     flushPendingFusedWork();
-    assert(src.isContiguous == false && dst.isContiguous == true);
+    // Contiguous source strides can still require a copy to normalize a storage offset.
+    assert(dst.isContiguous == true);
     validateDataType(src.dtype);
     // Result buffer has to be allocated in advance and has to be a GPU memory.
     if (!isDeviceBuffer(dst.data))
