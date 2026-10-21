@@ -9,12 +9,7 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-project(AIX VERSION 0.1.0)
-
-# Define version variables
-set(AIX_VERSION_MAJOR 0)
-set(AIX_VERSION_MINOR 1)
-set(AIX_VERSION_PATCH 0)
+project(AIX)
 
 # Set default build options.
 
