@@ -21,6 +21,9 @@
 #include <doctest/doctest.h>
 // System includes
 #include <array>
+#include <cmath>
+#include <limits>
+#include <random>
 
 using namespace aix;
 
@@ -1604,44 +1607,117 @@ bool testFillMin(Device* testDevice, size_t n)
 }
 
 
-bool testReduceTo(Device* testDevice)
+static double reduceToErrorBound(DataType dtype, size_t count, double sumAbs, double expected)
 {
+    if (isIntegralDataType(dtype)) return 0.0;
+
+    // These accelerated-device tests allow Float32 accumulation for Float16/BFloat16,
+    // not bitwise parity with another backend. gamma_n * sum(abs(x)) bounds
+    // sequential or tree summation of these bounded binary-fraction inputs,
+    // including cancellation and the initial destination. Their FP64 sums are exact.
+    const double u = (dtype == DataType::kFloat64 ? std::numeric_limits<double>::epsilon() :
+                                                  std::numeric_limits<float>::epsilon()) / 2.0;
+    const double nu = static_cast<double>(count) * u;
+    const double accumulationError = nu / (1.0 - nu) * sumAbs;
+    if (dtype == DataType::kFloat16 || dtype == DataType::kBFloat16)
+    {
+        const double outputU = dtype == DataType::kFloat16 ? 0x1p-11 : 0x1p-8;
+        const double underflowError = dtype == DataType::kFloat16 ? 0x1p-25 : 0x1p-134;
+        return accumulationError + outputU * (std::abs(expected) + accumulationError) + underflowError;
+    }
+    return accumulationError;
+}
+
+
+static void checkReduceTo(Device* testDevice, const TensorValue& src, const Shape& shape, float initialValue = 0.0f)
+{
+    REQUIRE(TensorValue::checkBroadcastTo(shape, src.shape()));
+    aix::DeviceCPU refDevice;
+    const auto dtype = src.dataType();
+
+    // Widen the already quantized inputs, not the original Float32 values.
+    // A same-dtype CPU sum rounds on every addition and is not an accuracy
+    // oracle for a backend using Float32 accumulation for Float16/BFloat16.
+    auto referenceSrc = src.to(&refDevice).to(DataType::kFloat64);
+    auto reference = TensorValue(initialValue, shape, &refDevice, DataType::kFloat64);
+    auto magnitudes = referenceSrc;
+    for (size_t i = 0; i < magnitudes.size(); ++i)
+    {
+        magnitudes.data<double>()[i] = std::abs(magnitudes.data<double>()[i]);
+    }
+    auto sumAbs = TensorValue(std::abs(initialValue), shape, &refDevice, DataType::kFloat64);
+    refDevice.reduceTo(referenceSrc.deviceParams(), reference.deviceParams());
+    refDevice.reduceTo(magnitudes.deviceParams(), sumAbs.deviceParams());
+
+    auto actual = TensorValue(initialValue, shape, testDevice, dtype);
+    auto deviceSrc = src.to(testDevice);
+    testDevice->reduceTo(deviceSrc.deviceParams(), actual.deviceParams());
+    testDevice->synchronize();
+    auto actual64 = actual.to(&refDevice).to(DataType::kFloat64);
+    REQUIRE(actual64.shape() == reference.shape());
+
+    const size_t count = src.size() / reference.size();
+    CAPTURE(static_cast<size_t>(testDevice->type()));
+    CAPTURE(static_cast<size_t>(dtype));
+    CAPTURE(count);
+    INFO("Source: " << src);
+    for (size_t i = 0; i < reference.size(); ++i)
+    {
+        const double expected = reference.data<double>()[i];
+        const double observed = actual64.data<double>()[i];
+        const double tolerance = reduceToErrorBound(dtype, count, sumAbs.data<double>()[i], expected);
+        CAPTURE(i);
+        CAPTURE(expected);
+        CAPTURE(observed);
+        CAPTURE(tolerance);
+        CHECK(std::isfinite(tolerance));
+        CHECK(std::isfinite(observed));
+        CHECK(std::abs(observed - expected) <= tolerance);
+    }
+}
+
+
+void testReduceTo(Device* testDevice, uint32_t seed)
+{
+    // Local state makes each trial reproducible and independent of test order.
+    aix::DeviceCPU refDevice;
+    std::mt19937 generator(seed);
+    CAPTURE(seed);
     for (size_t i=0; i<aix::DataTypeCount; ++i)
     {
         auto dtype = static_cast<DataType>(i);
         // Apple Metal Framework does not support kFloat64 data type.
         if (testDevice->type() == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
 
-        auto shape    = createRandomShape(1, 5);
-        auto newShape = createRandomShape(1, 5);
-        // If we can broadcast a tensor from shape to newShape, then we can reduce from newShape to shape.
-        if (!TensorValue::checkBroadcastTo(shape, newShape)) return true;
-
-        aix::DeviceCPU  refDevice;     // Reference/CPU device.
-
-        auto srcTensor    = aix::randn(newShape).to(dtype).value();
-        // Must initialize result tensor values since reduceTo has sum operation.
-        auto cpuResult    = aix::TensorValue(0, shape, &refDevice).to(dtype);
-        auto deviceResult = aix::TensorValue(0, shape, testDevice).to(dtype);
-
-        refDevice.reduceTo(srcTensor.deviceParams(),   cpuResult.deviceParams());
-        testDevice->reduceTo(srcTensor.deviceParams(), deviceResult.deviceParams());
-        testDevice->synchronize();
-
-        // Compare results with the true/reference results
-        if (!verifyResults(cpuResult, deviceResult))
+        Shape newShape(1 + generator() % 5);
+        for (auto& dim : newShape) dim = 1 + generator() % 5;
+        Shape shape = newShape;
+        for (auto& dim : shape)
         {
-            #ifdef DEBUG_LOG
-            std::cout << "----------------------" << std::endl;
-            std::cout << "Source" << std::endl << srcTensor << std::endl;
-            std::cout << "Expected Result" << std::endl << cpuResult << std::endl;
-            std::cout << "DeviceCPU Result" << std::endl << deviceResult << std::endl;
-            #endif
-            return false;
+            if (generator() % 2) dim = 1;
         }
-    }
+        // Removing leading axes also produces a valid reduction, never a skipped trial.
+        const size_t leading = generator() % shape.size();
+        shape.erase(shape.begin(), shape.begin() + leading);
 
-    return true;
+        const size_t size = std::accumulate(newShape.begin(), newShape.end(), size_t{1}, std::multiplies<>());
+        std::vector<float> values(size);
+        for (size_t j = 0; j < size; ++j)
+        {
+            // Use meaningful integer inputs without overflowing even Int8 sums.
+            if (isIntegralDataType(dtype))
+            {
+                const size_t spacing = (size + 31) / 32;
+                values[j] = j % spacing == 0 ? static_cast<float>(generator() % 4) : 0.0f;
+            }
+            else
+            {
+                values[j] = static_cast<float>(static_cast<int>(generator() >> 8) - 8388608) / 8388608.0f;
+            }
+        }
+        auto srcTensor = TensorValue(values.data(), size, DataType::kFloat32, newShape, &refDevice, dtype);
+        checkReduceTo(testDevice, srcTensor, shape);
+    }
 }
 
 
@@ -3511,7 +3587,7 @@ TEST_CASE("DeviceCPU Tests - FillMin")
 }
 
 
-TEST_CASE("DeviceCPU Tests - reduceTo")
+TEST_CASE("Device Tests - reduceTo")
 {
     // For each available devices, tests add operation.
     for (auto deviceType : testDeviceTypes)
@@ -3524,9 +3600,108 @@ TEST_CASE("DeviceCPU Tests - reduceTo")
         for (size_t i=0; i<100; ++i)
         {
             auto device2 = aix::createDevice(deviceType);
-            CHECK(testReduceTo(&*device2));
+            testReduceTo(&*device2, static_cast<uint32_t>(i));
         }
     }
+}
+
+
+TEST_CASE("Device reduceTo exact sums across backends")
+{
+    aix::DeviceCPU refDevice;
+    auto deviceTypes = testDeviceTypes;
+    deviceTypes.insert(deviceTypes.begin(), DeviceType::kCPU);
+    const std::array<float, 6> values = {1, 2, 3, 4, 5, 6};
+    // Include the initial destination value of one in each independently known sum.
+    const std::pair<Shape, std::vector<float>> cases[] = {
+        {{3}, {6, 8, 10}},
+        {{2, 1}, {7, 16}},
+        {{1}, {22}}
+    };
+    for (auto deviceType : deviceTypes)
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+
+        for (size_t i = 0; i < aix::DataTypeCount; ++i)
+        {
+            const auto dtype = static_cast<DataType>(i);
+            if (deviceType == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+            CAPTURE(i);
+            auto src = TensorValue(values.data(), values.size(), DataType::kFloat32, {2, 3}, &refDevice, dtype);
+            auto deviceSrc = src.to(device.get());
+            for (const auto& [shape, expected] : cases)
+            {
+                auto actual = TensorValue(1.0f, shape, device.get(), dtype);
+                device->reduceTo(deviceSrc.deviceParams(), actual.deviceParams());
+                device->synchronize();
+                auto hostResult = actual.to(&refDevice).to(DataType::kFloat64);
+                REQUIRE(hostResult.size() == expected.size());
+                for (size_t j = 0; j < expected.size(); ++j)
+                {
+                    CAPTURE(j);
+                    // Small integer sums are exact even in Float16/BFloat16,
+                    // regardless of accumulation precision or reduction order.
+                    CHECK(hostResult.data<double>()[j] == expected[j]);
+                }
+            }
+        }
+    }
+}
+
+
+TEST_CASE("Device reduceTo low-precision accumulation regression")
+{
+    aix::DeviceCPU refDevice;
+
+    // Minimized from seed 0, trial 92 of the old randomized test. For column 0,
+    // sequential Float16 accumulation gave -0.66015625; Metal gave -0.65966796875.
+    // The latter is the correctly rounded sum, but their difference exceeds 1e-5.
+    const std::array<float, 18> values = {
+        -0x1.bb4p-3f,  0x1.b9cp-1f, -0x1.08p-1f,
+         0x1.64p-2f,  -0x1.ff4p-2f, -0x1.1a4p-1f,
+        -0x1.1p-5f,   -0x1.e6cp-1f, -0x1.d7p-1f,
+        -0x1.f84p-1f,  0x1.1ep-2f,   0x1.b5cp-1f,
+        -0x1.778p-3f,  0x1.8b8p-2f, -0x1.f64p-3f,
+         0x1.a44p-2f,  0x1.3ccp-1f,  0x1.898p-3f
+    };
+    for (auto deviceType : testDeviceTypes)
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+
+        for (auto dtype : {DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16})
+        {
+            auto src = TensorValue(values.data(), values.size(), DataType::kFloat32, {6, 3}, &refDevice, dtype);
+            for (float initialValue : {0.0f, 0.5f})
+            {
+                CAPTURE(initialValue);
+                checkReduceTo(device.get(), src, {3}, initialValue);
+                checkReduceTo(device.get(), src, {1}, initialValue);
+            }
+        }
+    }
+}
+
+
+TEST_CASE("Device reduceTo error bound remains sensitive to incorrect sums")
+{
+    // A near-zero result still needs a cancellation-aware accumulation allowance.
+    const double cancellationBound = reduceToErrorBound(DataType::kFloat32, 128, 64.0, 0.0);
+    CHECK(cancellationBound > 1e-5);
+    CHECK(cancellationBound < 0.001);
+    for (auto dtype : {DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16})
+    {
+        const double bound = reduceToErrorBound(dtype, 6, 2.0, -0.65966796875);
+        CHECK(bound > 0.0);
+        // A 1% error in this short reduction must not be accepted.
+        CHECK(bound < 0.01 * 0.65966796875);
+        CHECK_FALSE(std::abs(std::numeric_limits<double>::quiet_NaN()) <= bound);
+        CHECK_FALSE(std::abs(std::numeric_limits<double>::infinity()) <= bound);
+    }
+    CHECK(reduceToErrorBound(DataType::kInt8, 32, 96.0, 96.0) == 0.0);
+    CHECK(reduceToErrorBound(DataType::kFloat64, 128, 64.0, 0.0) < 1e-10);
 }
 
 
