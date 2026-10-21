@@ -14,6 +14,8 @@
 // External includes
 #include <doctest/doctest.h>
 // System includes
+#include <cstdint>
+#include <fstream>
 
 using namespace aix;
 
@@ -365,6 +367,23 @@ TEST_CASE("Model - Save/Load Test")
 
         // Save test model1 parameters
         aix::nn::save(model1, testModelFile);
+
+        // Verify that every serialized element count uses a fixed 64-bit field.
+        {
+            std::ifstream ifs(testModelFile, std::ios::binary);
+            REQUIRE(ifs.is_open());
+            for (const auto & [paramName, param] : model1.parameters())
+            {
+                uint64_t size = 0;
+                ifs.read(reinterpret_cast<char*>(&size), sizeof(size));
+                REQUIRE(ifs.good());
+                CHECK(size == param.value().size());
+                ifs.seekg(static_cast<std::streamoff>(param.value().size() * Device::dataTypeSize(dtype)),
+                          std::ios::cur);
+                REQUIRE(ifs.good());
+            }
+            CHECK(ifs.peek() == std::char_traits<char>::eof());
+        }
 
         aix::nn::Sequential model2;
         model2.add(new aix::nn::Linear(kNumInputs, 1000));

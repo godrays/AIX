@@ -14,6 +14,7 @@
 // External includes
 // System includes
 #include <concepts>
+#include <cstdint>
 #include <type_traits>
 #include <utility>
 
@@ -267,7 +268,7 @@ inline void save(const nn::Module & module, const std::string & filename)
     for (const auto& [paramName, param] : params)
     {
         const auto & value = param.value();
-        size_t size = value.size();
+        uint64_t size = value.size();
         ofs.write(reinterpret_cast<const char*>(&size), sizeof(size));                       // Save parameter size
         size_t paramDTypeSize = Device::dataTypeSize(param.dataType());
         ofs.write(reinterpret_cast<const char*>(value.data()), size * paramDTypeSize);       // Save parameter data
@@ -287,7 +288,7 @@ inline void load(nn::Module & module, const std::string & filename)
     auto params = module.parameters();    // Get model parameters.
     for (auto& [paramName, param] : params)
     {
-        size_t size;
+        uint64_t size;
         ifs.read(reinterpret_cast<char*>(&size), sizeof(size));         // Read size of parameter
         if (size != param.value().size())
         {
