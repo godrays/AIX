@@ -1591,9 +1591,11 @@ METAL_FUNC void stagedScalarReduce(const device T* inA,
                                    ReduceOp reduceOp,
                                    uint li,
                                    uint tgi,
-                                   uint threadsPerThreadgroup)
+                                   uint threadsPerThreadgroup,
+                                   uint dispatchedThreadsPerThreadgroup)
 {
-    const size_t baseOffset = static_cast<size_t>(tgi) * static_cast<size_t>(threadsPerThreadgroup);
+    // A partial threadgroup still starts at a multiple of the dispatched width.
+    const size_t baseOffset = static_cast<size_t>(tgi) * static_cast<size_t>(dispatchedThreadsPerThreadgroup);
     const size_t inputIndex = baseOffset + static_cast<size_t>(li);
     sharedData[li] = inputIndex < elementCount
         ? inA[useLayout != 0 ? physicalIndex(inputIndex, layout) : inputIndex]
@@ -1659,13 +1661,14 @@ template<typename T>
                     const constant size_t* layout [[buffer(4)]],
                     uint li [[thread_position_in_threadgroup]],
                     uint tgi [[threadgroup_position_in_grid]],
-                    uint threadsPerThreadgroup [[threads_per_threadgroup]])
+                    uint threadsPerThreadgroup [[threads_per_threadgroup]],
+                    uint dispatchedThreadsPerThreadgroup [[dispatch_threads_per_threadgroup]])
 {
     const size_t MAX_THREADS = 1024;
     threadgroup T sharedData[MAX_THREADS];
     stagedScalarReduce(inA, result, sharedData, elementCount, useLayout, layout,
                        ReductionSumIdentity<T>{}, ReductionSumOp<T>{},
-                       li, tgi, threadsPerThreadgroup);
+                       li, tgi, threadsPerThreadgroup, dispatchedThreadsPerThreadgroup);
 }
 
 
@@ -1679,13 +1682,14 @@ template<typename T>
                     const constant size_t* layout [[buffer(4)]],
                     uint li  [[thread_position_in_threadgroup]],
                     uint tgi [[threadgroup_position_in_grid]],
-                    uint threadsPerThreadgroup [[threads_per_threadgroup]])
+                    uint threadsPerThreadgroup [[threads_per_threadgroup]],
+                    uint dispatchedThreadsPerThreadgroup [[dispatch_threads_per_threadgroup]])
 {
     const size_t MAX_THREADS = 1024;
     threadgroup T sharedData[MAX_THREADS];
     stagedScalarReduce(inA, result, sharedData, elementCount, useLayout, layout,
                        ReductionMaxIdentity<T>{}, ReductionMaxOp<T>{},
-                       li, tgi, threadsPerThreadgroup);
+                       li, tgi, threadsPerThreadgroup, dispatchedThreadsPerThreadgroup);
 }
 
 
@@ -1718,10 +1722,11 @@ template<typename T>
                              device int* outIndices       [[buffer(3)]],
                              uint li  [[thread_position_in_threadgroup]],
                              uint tgi [[threadgroup_position_in_grid]],
-                             uint threadsPerThreadgroup [[threads_per_threadgroup]])
+                             uint threadsPerThreadgroup [[threads_per_threadgroup]],
+                             uint dispatchedThreadsPerThreadgroup [[dispatch_threads_per_threadgroup]])
 {
     const size_t MAX_THREADS = 1024;
-    const size_t baseOffset = static_cast<size_t>(tgi) * static_cast<size_t>(threadsPerThreadgroup);
+    const size_t baseOffset = static_cast<size_t>(tgi) * static_cast<size_t>(dispatchedThreadsPerThreadgroup);
 
     threadgroup T sharedValues[MAX_THREADS];
     threadgroup int sharedIndices[MAX_THREADS];
@@ -2730,7 +2735,8 @@ SpecializePowStrided("ui8",  uchar);
                          const constant size_t* layout [[buffer(4)]], \
                          uint li  [[thread_position_in_threadgroup]], \
                          uint tgi [[threadgroup_position_in_grid]],   \
-                         uint threadsPerThreadgroup [[threads_per_threadgroup]])
+                         uint threadsPerThreadgroup [[threads_per_threadgroup]], \
+                         uint dispatchedThreadsPerThreadgroup [[dispatch_threads_per_threadgroup]])
 
 SpecializeSum("f32",  float);
 SpecializeSum("f16",  half);
@@ -2753,7 +2759,8 @@ SpecializeSum("ui8",  uchar);
                          const constant size_t* layout [[buffer(4)]], \
                          uint li  [[thread_position_in_threadgroup]], \
                          uint tgi [[threadgroup_position_in_grid]],   \
-                         uint threadsPerThreadgroup [[threads_per_threadgroup]])
+                         uint threadsPerThreadgroup [[threads_per_threadgroup]], \
+                         uint dispatchedThreadsPerThreadgroup [[dispatch_threads_per_threadgroup]])
 
 SpecializeMax("f32",  float);
 SpecializeMax("f16",  half);
@@ -2784,7 +2791,8 @@ SpecializeMax("ui8",  uchar);
                                  device int* outIndices          [[buffer(3)]], \
                                  uint li  [[thread_position_in_threadgroup]], \
                                  uint tgi [[threadgroup_position_in_grid]],   \
-                                 uint threadsPerThreadgroup [[threads_per_threadgroup]])
+                                 uint threadsPerThreadgroup [[threads_per_threadgroup]], \
+                                 uint dispatchedThreadsPerThreadgroup [[dispatch_threads_per_threadgroup]])
 
 #define SpecializeArgmaxToLogical(tname, type)  \
     template [[ host_name("argmaxToLogical_" tname) ]]  \

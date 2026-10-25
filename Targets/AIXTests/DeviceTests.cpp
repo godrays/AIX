@@ -595,6 +595,12 @@ bool testMax(Device* testDevice, size_t n)
         // Compare results with the true/reference results
         if (!verifyResults(cpuResult, deviceResult))
         {
+            CAPTURE(testDevice->name());
+            CAPTURE(n);
+            CAPTURE(i);
+            CAPTURE(cpuResult);
+            CAPTURE(deviceResult);
+            CHECK(verifyResults(cpuResult, deviceResult));
             #ifdef DEBUG_LOG
             std::cout << "----------------------" << std::endl;
             std::cout << "Array" << std::endl << array.value() << std::endl;
@@ -4129,6 +4135,65 @@ TEST_CASE("DeviceMetal native reduction global stage buffers preserve singleton 
             CHECK(max.to(&reference).to(DataType::kFloat32).data<float>()[0] == 7.0f);
             CHECK(index.data<int32_t>()[0] == static_cast<int32_t>(count / 2));
         }
+    }
+}
+
+TEST_CASE("DeviceMetal native reduction global stages include partial threadgroup tails")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    DeviceCPU reference;
+    for (size_t dtypeIndex = 1; dtypeIndex < DataTypeCount; ++dtypeIndex)
+    {
+        const auto dtype = static_cast<DataType>(dtypeIndex);
+        // The largest input also produces a partial intermediate stage at a 1024-thread dispatch width.
+        for (size_t count : {size_t{1025}, size_t{1031}, size_t{2049}, size_t{2051}, size_t{1024 * 1025}})
+        {
+            CAPTURE(dtypeIndex);
+            CAPTURE(count);
+            std::vector<float> values(count, 0.0f);
+            values.back() = 7.0f;
+            auto src = TensorValue(values.data(), values.size(), DataType::kFloat32, {count}, device.get(), dtype);
+            auto sum = TensorValue(99.0f, {1}, device.get(), dtype);
+            auto max = TensorValue(99.0f, {1}, device.get(), dtype);
+            auto index = TensorValue(99, {1}, device.get(), DataType::kInt32);
+            device->reduce(src.deviceParams(), sum.deviceParams(), ReduceOp::kSum);
+            device->reduce(src.deviceParams(), max.deviceParams(), ReduceOp::kMax);
+            device->argmax(src.deviceParams(), index.deviceParams());
+            device->synchronize();
+            CHECK(sum.to(&reference).to(DataType::kFloat32).data<float>()[0] == 7.0f);
+            CHECK(max.to(&reference).to(DataType::kFloat32).data<float>()[0] == 7.0f);
+            CHECK(index.data<int32_t>()[0] == static_cast<int32_t>(count - 1));
+        }
+    }
+}
+
+TEST_CASE("DeviceMetal native reduction partial tails honor source offsets and strides")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    constexpr size_t count = 2051;
+    for (size_t step : {size_t{1}, size_t{2}})
+    {
+        CAPTURE(step);
+        std::vector<int32_t> values(count * step + 2, 99);
+        for (size_t i = 0; i < count; ++i) values[1 + i * step] = 0;
+        values[1 + (count - 1) * step] = 7;
+        auto src = TensorValue(values.data(), values.size(), DataType::kInt32, {values.size()}, device.get(),
+                               DataType::kInt32).slice(0, 1, 1 + count * step, step);
+        auto sum = TensorValue(99, {1}, device.get(), DataType::kInt32);
+        auto max = TensorValue(99, {1}, device.get(), DataType::kInt32);
+        auto index = TensorValue(99, {1}, device.get(), DataType::kInt32);
+        auto mask = TensorValue(99, {count}, device.get(), DataType::kInt32);
+        device->reduce(src.deviceParams(), sum.deviceParams(), ReduceOp::kSum);
+        device->reduce(src.deviceParams(), max.deviceParams(), ReduceOp::kMax);
+        device->argmax(src.deviceParams(), index.deviceParams());
+        device->argmaxMask(src.deviceParams(), mask.deviceParams());
+        device->synchronize();
+        CHECK(sum.data<int32_t>()[0] == 7);
+        CHECK(max.data<int32_t>()[0] == 7);
+        CHECK(index.data<int32_t>()[0] == static_cast<int32_t>(count - 1));
+        for (size_t i = 0; i < count; ++i) CHECK(mask.data<int32_t>()[i] == (i == count - 1 ? 1 : 0));
     }
 }
 
