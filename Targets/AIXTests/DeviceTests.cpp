@@ -3772,6 +3772,31 @@ TEST_CASE("Device Tests - reduceTo")
 }
 
 
+TEST_CASE("DeviceMetal empty storage retains zero logical size with valid allocation lifetime")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    for (size_t i = 1; i < DataTypeCount; ++i)
+    {
+        const auto dtype = static_cast<DataType>(i);
+        CAPTURE(i);
+        auto empty = TensorValue(Shape{0, 3}, device.get(), dtype);
+        CHECK(empty.size() == 0);
+        CHECK(empty.shape() == Shape{0, 3});
+        CHECK(empty.storage()->size() == 0);
+        CHECK(empty.data() != nullptr);
+        auto other = TensorValue(Shape{2, 0}, device.get(), dtype);
+        CHECK(other.storage()->size() == 0);
+        CHECK(other.data() != empty.data());
+        device->synchronize();
+    }
+    auto bytes = device->allocate(0);
+    REQUIRE(bytes != nullptr);
+    device->deallocate(bytes);
+    device->synchronize();
+    device->emptyCache();
+}
+
 TEST_CASE("Device reduceTo exact sums across backends")
 {
     aix::DeviceCPU refDevice;

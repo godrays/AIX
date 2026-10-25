@@ -245,7 +245,8 @@ DeviceMetal::~DeviceMetal()
 // Allocate GPU memory and return MTL Buffer contents and keeps MTL Buffer pointers in a hashmap.
 void* DeviceMetal::allocate(size_t size)
 {
-    auto mtlBuf = newBuffer(size);
+    // Empty tensors still need an owned buffer; Metal's internal allocator requires positive sizes.
+    auto mtlBuf = newBuffer(std::max<size_t>(size, 1));
     auto contentPtr = mtlBuf->contents();
     m_allocMap[contentPtr] = mtlBuf;
     m_fuseEngine->retainBuffer(contentPtr);
