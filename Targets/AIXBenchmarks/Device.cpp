@@ -259,12 +259,16 @@ public:
         aix::TensorOptions opt = { .m_dtype=dataType, .m_device=m_device.get() };
         m_t = aix::randn({1, elementCount}, opt);
         m_result = aix::Tensor(aix::Shape{1, elementCount}, opt);
+        m_output = m_result.value().deviceParams();
+        m_output.shape = {1, 1};
+        m_output.strides = {1, 1};
+        m_output.size = 1;
         m_device->synchronize();
     }
 
     void run(const AIXBenchmarkConfigs&) final
     {
-        m_device->sum(m_t.value().deviceParams(), m_result.value().deviceParams());
+        m_device->reduce(m_t.value().deviceParams(), m_output, aix::ReduceOp::kSum);
         m_device->synchronize();
     }
 
@@ -276,6 +280,7 @@ public:
 
 private:
     aix::Tensor  m_t, m_result;
+    aix::DeviceTensorParams m_output;
     std::unique_ptr<aix::Device>  m_device;
 };
 
@@ -297,12 +302,16 @@ public:
         aix::TensorOptions opt = { .m_dtype=dataType, .m_device=m_device.get() };
         m_t = aix::randn({1, elementCount}, opt);
         m_result = aix::Tensor(aix::Shape{1, elementCount}, opt);
+        m_output = m_result.value().deviceParams();
+        m_output.shape = {1, 1};
+        m_output.strides = {1, 1};
+        m_output.size = 1;
         m_device->synchronize();
     }
 
     void run(const AIXBenchmarkConfigs&) final
     {
-        m_device->max(m_t.value().deviceParams(), m_result.value().deviceParams());
+        m_device->reduce(m_t.value().deviceParams(), m_output, aix::ReduceOp::kMax);
         m_device->synchronize();
     }
 
@@ -314,6 +323,7 @@ public:
 
 private:
     aix::Tensor  m_t, m_result;
+    aix::DeviceTensorParams m_output;
     std::unique_ptr<aix::Device>  m_device;
 };
 

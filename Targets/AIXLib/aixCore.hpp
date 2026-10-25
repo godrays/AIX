@@ -28,6 +28,7 @@
 #include <numeric>
 #include <optional>
 #include <random>
+#include <span>
 #include <stack>
 #include <type_traits>
 #include <utility>
@@ -628,16 +629,6 @@ public:
         return result;
     }
 
-    // Reduces the TensorValue back to the original shape.
-    TensorValue reduceTo(const Shape & originalShape) const
-    {
-        if (shape() == originalShape) return shallowCopy();
-        // Ensure tensor values are initialized to zero, as the reduction operation performs a summation.
-        TensorValue result(0, originalShape, device(), m_dType);
-        device()->reduceTo(deviceParams(), result.deviceParams());
-        return result;
-    }
-
     // Returns true if the tensor is contiguous.
     bool isContiguous() const
     {
@@ -783,14 +774,25 @@ public:
 
     TensorValue sum() const
     {
-        TensorValue result({}, device(), m_dType);
-        m_device->sum(deviceParams(), result.deviceParams());
+        // Match default integer-sum promotion before accumulation, not after a narrow fold.
+        if (m_dType > DataType::kInt64 && size() != 0) return to(DataType::kInt64).sum();
+        TensorValue result(Shape{}, device(), m_dType > DataType::kInt64 ? DataType::kInt64 : m_dType);
+        if (size() == 0)
+        {
+            result.fill(0);
+            return result;
+        }
+        auto dst = result.deviceParams();
+        dst.shape = Shape(m_shape.size(), 1);
+        dst.strides = Stride(m_shape.size(), 1);
+        m_device->reduce(deviceParams(), dst, ReduceOp::kSum);
         return result;
     }
 
     TensorValue sum(ssize_t dim, bool keepDim=false) const
     {
-        if (m_shape.empty()) return shallowCopy();      // Return itself if it's a scalar tensor.
+        if (m_shape.empty())
+            return m_dType > DataType::kInt64 ? to(DataType::kInt64) : shallowCopy();
 
         dim = dim < 0 ? static_cast<ssize_t>(m_shape.size()) + dim : dim;
         if (dim < 0 || dim >= static_cast<ssize_t>(m_shape.size()))
@@ -798,13 +800,56 @@ public:
             throw std::invalid_argument("Dimension parameter of TensorValue::sum() is out of range.");
         }
 
+        return sum(SIndex{dim}, keepDim);
+    }
+
+    // Negative axes count from the end; an empty list reduces all axes.
+    TensorValue sum(const SIndex& axes, bool keepDim=false) const
+    {
+        if (axes.empty())
+        {
+            auto result = sum();
+            if (keepDim) return result.reshape(Shape(m_shape.size(), 1));
+            return result;
+        }
+        const auto rank = static_cast<ssize_t>(std::max<size_t>(m_shape.size(), 1));
+        std::vector<bool> reduced(rank, false);
+        Index normalizedAxes;
+        normalizedAxes.reserve(axes.size());
         Shape resultShape = m_shape;
-        resultShape[dim] = 1;
-        auto result = reduceTo(resultShape);
-        if (!keepDim) return result.squeeze(dim);
-        // reduceTo shares the input storage when the shape is unchanged; preserve the independent result.
-        if (m_shape[dim] == 1) return TensorValue(result);
-        return result;
+        for (auto axis : axes)
+        {
+            axis = axis < 0 ? rank + axis : axis;
+            if (axis < 0 || axis >= rank || reduced[axis])
+            {
+                throw std::invalid_argument("Axes of TensorValue::sum() must be unique and in range.");
+            }
+            reduced[axis] = true;
+            if (!m_shape.empty()) resultShape[axis] = 1;
+            normalizedAxes.push_back(static_cast<size_t>(axis));
+        }
+        if (m_shape.empty()) return sum();
+        if (m_dType > DataType::kInt64 && size() != 0) return to(DataType::kInt64).sum(axes, keepDim);
+
+        TensorValue result(resultShape, device(), m_dType > DataType::kInt64 ? DataType::kInt64 : m_dType);
+        if (size() == 0 && result.size() != 0) result.fill(0);
+        if (size() != 0)
+        {
+            device()->reduce(deviceParams(), result.deviceParams(), ReduceOp::kSum, normalizedAxes);
+        }
+        if (keepDim) return result;
+
+        resultShape.clear();
+        for (size_t i = 0; i < m_shape.size(); ++i)
+        {
+            if (!reduced[i]) resultShape.push_back(m_shape[i]);
+        }
+        return result.reshape(resultShape);
+    }
+
+    TensorValue sum(std::initializer_list<ssize_t> axes, bool keepDim=false) const
+    {
+        return sum(SIndex(axes), keepDim);
     }
 
     TensorValue mean() const
@@ -867,9 +912,13 @@ public:
 
     TensorValue max() const
     {
+        if (size() == 0) throw std::invalid_argument("Cannot take max of an empty TensorValue.");
         // Create a new TensorValue to store the result. Perform element-wise.
         TensorValue result({}, m_device, m_dType);
-        m_device->max(deviceParams(), result.deviceParams());
+        auto dst = result.deviceParams();
+        dst.shape = Shape(m_shape.size(), 1);
+        dst.strides = Stride(m_shape.size(), 1);
+        m_device->reduce(deviceParams(), dst, ReduceOp::kMax);
         return result;
     }
 
@@ -882,23 +931,31 @@ public:
         {
             throw std::invalid_argument("Dimension parameter of TensorValue::max() is out of range.");
         }
+        if (m_shape[dim] == 0) throw std::invalid_argument("Cannot take max over a zero-length axis.");
 
         Shape newShape = m_shape;
         newShape[dim] = 1;
 
         TensorValue result(newShape, device(), m_dType);            // Zero initialization is not required.
         auto resDevParams = result.deviceParams();
-        device()->fillMin(resDevParams);       // Initialize the tensor with the lowest value.
-        device()->maxTo(deviceParams(), resDevParams);
+        if (size() != 0)
+        {
+            const size_t axes[] = {static_cast<size_t>(dim)};
+            device()->reduce(deviceParams(), resDevParams, ReduceOp::kMax, axes);
+        }
         if (!keepDim) return result.squeeze(dim);
         return result;
     }
 
     TensorValue argmax() const
     {
+        if (size() == 0) throw std::invalid_argument("Cannot take argmax of an empty TensorValue.");
         // Create a new TensorValue to store the result. Perform element-wise.
         TensorValue result({}, m_device, aix::DataType::kInt32);        // Index is by default in int32 type.
-        m_device->argmax(deviceParams(), result.deviceParams());
+        auto dst = result.deviceParams();
+        dst.shape = Shape(m_shape.size(), 1);
+        dst.strides = Stride(m_shape.size(), 1);
+        m_device->argmax(deviceParams(), dst);
         return result;
     }
 
@@ -911,20 +968,23 @@ public:
         {
             throw std::invalid_argument("Dimension parameter of TensorValue::argmax() is out of range.");
         }
+        if (size() == 0) throw std::invalid_argument("Cannot take argmax of an empty TensorValue.");
 
         Shape newShape = m_shape;
         newShape[dim] = 1;
 
         TensorValue result(newShape, m_device, aix::DataType::kInt32);        // Index is by default in int32 type.
-        m_device->argmaxTo(deviceParams(), result.deviceParams(), dim);
+        const size_t axes[] = {static_cast<size_t>(dim)};
+        m_device->argmax(deviceParams(), result.deviceParams(), axes);
         return keepDim ? result : result.squeeze(dim);
     }
 
     TensorValue argmaxIndices() const
     {
+        // Keep backend-specific winner-mask emission and initialization separate from value/index reduction.
         // Create a new TensorValue to store the result. Perform element-wise.
         TensorValue result(m_shape, m_device, aix::DataType::kInt32);   // Index is by default in int32 type.
-        m_device->argmaxIndices(deviceParams(), result.deviceParams());
+        m_device->argmaxMask(deviceParams(), result.deviceParams());
         return result;
     }
 
@@ -938,8 +998,9 @@ public:
             throw std::invalid_argument("Dimension parameter of TensorValue::argmaxIndices() is out of range.");
         }
 
-        TensorValue result(0, m_shape, m_device, aix::DataType::kInt32);        // Index is by default in int32 type.
-        m_device->argmaxIndicesTo(deviceParams(), result.deviceParams(), dim);
+        TensorValue result(m_shape, m_device, aix::DataType::kInt32);
+        const size_t axes[] = {static_cast<size_t>(dim)};
+        m_device->argmaxMask(deviceParams(), result.deviceParams(), axes);
         return result;
     }
 
@@ -1813,7 +1874,7 @@ public:
     // Perform backpropagation to calculate gradients recursively.
     void backward(const TensorValue & seed)
     {
-        if (m_retainGrad)
+        if (m_retainGrad && seed.size() != 0)
         {
             grad() += seed;
         }
@@ -1828,7 +1889,7 @@ public:
         if (!m_grad.storage())
         {
             m_grad = TensorValue{m_value.shape(), m_value.device(), m_value.size(), m_value.strides(), m_value.dataType()};
-            m_grad.fill(0);
+            if (m_grad.size() != 0) m_grad.fill(0);
         }
         return m_grad;
     }
@@ -1963,9 +2024,9 @@ public:
         return m_data->grad();
     }
 
-    inline void zeroGrad()                      { m_data->grad().fill(0); }
+    inline void zeroGrad()                      { if (m_data->grad().size() != 0) m_data->grad().fill(0); }
     inline bool isRequireGrad() const           { return m_data->m_requireGrad; }
-    inline void retainGrad() const              { m_data->m_retainGrad = true; m_data->grad().fill(0); }
+    inline void retainGrad() const              { m_data->m_retainGrad = true; if (m_data->grad().size() != 0) m_data->grad().fill(0); }
     inline const Tensor& requireGrad(bool state) const
     {
         m_data->m_requireGrad = state;
@@ -2024,7 +2085,7 @@ public:
         if (node->m_requireGrad && !node->m_retainGrad)
         {
             assert(node->grad().dataType() == seed.dataType());
-            node->grad() += seed;
+            if (seed.size() != 0) node->grad() += seed;
         }
     }
 
@@ -2040,7 +2101,19 @@ public:
         // Accumulate the gradient to the original node by reducing the gradient from the broadcasted shape to the
         // original shape. Summation is used for gradient accumulation when reducing dimensions because each element
         // of the original tensor contributes to multiple elements of the resulting tensor after broadcasting.
-        node->m_inputs[0]->backward(seed.reduceTo(node->m_inputs[0]->m_value.shape()));
+        const auto& originalShape = node->m_inputs[0]->m_value.shape();
+        if (seed.shape() == originalShape)
+        {
+            node->m_inputs[0]->backward(seed);
+            return;
+        }
+        SIndex axes;
+        const size_t leading = seed.shape().size() - originalShape.size();
+        for (size_t i = 0; i < seed.shape().size(); ++i)
+        {
+            if (i < leading || originalShape[i - leading] != seed.shape()[i]) axes.push_back(i);
+        }
+        node->m_inputs[0]->backward(seed.sum(axes, true).reshape(originalShape));
     }
 
     static void toDeviceBackwardFunc(TensorNode * node, const TensorValue & seed)
@@ -2259,11 +2332,15 @@ public:
         if (node->m_inputs.empty()) return;
         const auto& originalShape = node->m_inputs[0]->m_value.shape();
 
-        // For keepDim=False case, 1 dimension was squeezed. That dimension needs to be unsqueezed.
-        if (!node->m_keepDim)
-            node->m_inputs[0]->backward(seed.unsqueeze(static_cast<ssize_t>(node->m_dim0)).broadcastTo(originalShape));
-        else
+        // Restore reduced dimensions before broadcasting the seed back to the input.
+        if (node->m_keepDim || node->m_dims.empty())
+        {
             node->m_inputs[0]->backward(seed.broadcastTo(originalShape));
+            return;
+        }
+        auto restored = seed.unsqueeze(node->m_dims[0]);
+        for (size_t i = 1; i < node->m_dims.size(); ++i) restored = restored.unsqueeze(node->m_dims[i]);
+        node->m_inputs[0]->backward(restored.broadcastTo(originalShape));
     }
 
     static void squeezeBackwardFunc(TensorNode * node, const TensorValue & seed)
@@ -2498,9 +2575,37 @@ public:
     {
         auto result = makeResult(m_data->m_value.sum(dim, keepDim), isRequireGrad());
         result.m_data->setBackward({ m_data }, sumBackwardFunc2);
-        result.m_data->m_dim0 = dim >= 0 ? dim : dim + m_data->m_value.shape().size();
+        if (!shape().empty())
+            result.m_data->m_dims = {dim >= 0 ? dim : dim + static_cast<ssize_t>(shape().size())};
         result.m_data->m_keepDim = keepDim;
         return result;
+    }
+
+    // Like TensorValue::sum: signed axes, with an empty list reducing all axes.
+    Tensor sum(const SIndex& axes, bool keepDim=false) const
+    {
+        auto result = makeResult(m_data->m_value.sum(axes, keepDim), isRequireGrad());
+        result.m_data->setBackward({ m_data }, sumBackwardFunc2);
+        result.m_data->m_dims.assign(axes.begin(), axes.end());
+        if (axes.empty())
+        {
+            result.m_data->m_dims.resize(shape().size());
+            std::iota(result.m_data->m_dims.begin(), result.m_data->m_dims.end(), 0);
+        }
+        else if (shape().empty()) result.m_data->m_dims.clear();
+        else
+        {
+            for (auto& axis : result.m_data->m_dims)
+                if (axis < 0) axis += static_cast<ssize_t>(shape().size());
+        }
+        std::sort(result.m_data->m_dims.begin(), result.m_data->m_dims.end());
+        result.m_data->m_keepDim = keepDim;
+        return result;
+    }
+
+    Tensor sum(std::initializer_list<ssize_t> axes, bool keepDim=false) const
+    {
+        return sum(SIndex(axes), keepDim);
     }
 
     Tensor mean() const
@@ -2966,6 +3071,8 @@ inline Tensor exp(const Tensor & A)    { return A.exp();  }
 inline Tensor sum(const Tensor & A)    { return A.sum();  }
 inline Tensor mean(const Tensor & A)   { return A.mean(); }
 inline Tensor sum(const Tensor & A, ssize_t dim, bool keepDim=false)    { return A.sum(dim, keepDim);  }
+inline Tensor sum(const Tensor & A, const SIndex& axes, bool keepDim=false)    { return A.sum(axes, keepDim);  }
+inline Tensor sum(const Tensor & A, std::initializer_list<ssize_t> axes, bool keepDim=false)    { return A.sum(axes, keepDim);  }
 inline Tensor mean(const Tensor & A, ssize_t dim, bool keepDim=false)   { return A.mean(dim, keepDim);  }
 inline Tensor pow(const Tensor & A, const Tensor & exp)     { return A.pow(exp); }
 inline Tensor max(const Tensor & A)         { return A.max();    }

@@ -21,6 +21,7 @@
 #include <doctest/doctest.h>
 // System includes
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <random>
@@ -623,6 +624,9 @@ bool testArgmax(Device* testDevice, size_t n)
 
         if (!verifyResults(cpuResult, deviceResult))
         {
+            CAPTURE(n);
+            CAPTURE(i);
+            CHECK(cpuResult.item<int32_t>() == deviceResult.item<int32_t>());
             #ifdef DEBUG_LOG
             std::cout << "----------------------" << std::endl;
             std::cout << "Array" << std::endl << array.value() << std::endl;
@@ -1632,6 +1636,12 @@ static double reduceToErrorBound(DataType dtype, size_t count, double sumAbs, do
 static void checkReduceTo(Device* testDevice, const TensorValue& src, const Shape& shape, float initialValue = 0.0f)
 {
     REQUIRE(TensorValue::checkBroadcastTo(shape, src.shape()));
+    Index axes;
+    const size_t leading = src.shape().size() - shape.size();
+    for (size_t i = 0; i < src.shape().size(); ++i)
+    {
+        if (i < leading || shape[i - leading] != src.shape()[i]) axes.push_back(i);
+    }
     aix::DeviceCPU refDevice;
     const auto dtype = src.dataType();
 
@@ -1646,12 +1656,12 @@ static void checkReduceTo(Device* testDevice, const TensorValue& src, const Shap
         magnitudes.data<double>()[i] = std::abs(magnitudes.data<double>()[i]);
     }
     auto sumAbs = TensorValue(std::abs(initialValue), shape, &refDevice, DataType::kFloat64);
-    refDevice.reduceTo(referenceSrc.deviceParams(), reference.deviceParams());
-    refDevice.reduceTo(magnitudes.deviceParams(), sumAbs.deviceParams());
+    reduceAxes(refDevice, referenceSrc.deviceParams(), reference.deviceParams(), axes, ReduceOp::kSum);
+    reduceAxes(refDevice, magnitudes.deviceParams(), sumAbs.deviceParams(), axes, ReduceOp::kSum);
 
     auto actual = TensorValue(initialValue, shape, testDevice, dtype);
     auto deviceSrc = src.to(testDevice);
-    testDevice->reduceTo(deviceSrc.deviceParams(), actual.deviceParams());
+    reduceAxes(*testDevice, deviceSrc.deviceParams(), actual.deviceParams(), axes, ReduceOp::kSum);
     testDevice->synchronize();
     auto actual64 = actual.to(&refDevice).to(DataType::kFloat64);
     REQUIRE(actual64.shape() == reference.shape());
@@ -1741,8 +1751,14 @@ bool testMaxTo(Device* testDevice)
 
         refDevice.fillMin(cpuResult.deviceParams());
         testDevice->fillMin(deviceResult.deviceParams());
-        refDevice.maxTo(srcTensor.deviceParams(),   cpuResult.deviceParams());
-        testDevice->maxTo(srcTensor.deviceParams(), deviceResult.deviceParams());
+        Index axes;
+        const size_t leading = newShape.size() - shape.size();
+        for (size_t axis = 0; axis < newShape.size(); ++axis)
+        {
+            if (axis < leading || shape[axis - leading] != newShape[axis]) axes.push_back(axis);
+        }
+        reduceAxes(refDevice, srcTensor.deviceParams(), cpuResult.deviceParams(), axes, ReduceOp::kMax);
+        reduceAxes(*testDevice, srcTensor.deviceParams(), deviceResult.deviceParams(), axes, ReduceOp::kMax);
         testDevice->synchronize();
 
         if (!verifyResults(cpuResult, deviceResult))
@@ -2333,8 +2349,8 @@ TEST_CASE("DeviceMetal stride reduceTo parity with broadcast source")
     CHECK_FALSE(cpuSrc.isContiguous());
     CHECK_FALSE(metalSrc.isContiguous());
 
-    auto expected = cpuSrc.reduceTo({1, 3});
-    auto actual = metalSrc.reduceTo({1, 3});
+    auto expected = cpuSrc.sum({0}, true);
+    auto actual = metalSrc.sum({0}, true);
     device->synchronize();
 
     CheckVectorApproxValues(actual, expected);
@@ -3772,6 +3788,899 @@ TEST_CASE("Device Tests - reduceTo")
 }
 
 
+TEST_CASE("Device reduction API rejects unsupported operations modes and dtypes before mutation")
+{
+    DeviceCPU cpu;
+    auto metal = createDevice(DeviceType::kGPU_METAL);
+    for (Device* device : {static_cast<Device*>(&cpu), metal.get()})
+    {
+        if (!device) continue;
+        auto input = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, device);
+        auto output = TensorValue(99.0f, {2, 3}, device);
+        device->synchronize();
+        auto src = input.deviceParams();
+        auto dst = output.deviceParams();
+        dst.shape = {1, 3};
+        dst.size = 3;
+        const size_t axis[] = {0};
+        auto rejected = [&](DeviceTensorParams source, DeviceTensorParams destination, ReduceOp op)
+        {
+            CHECK_THROWS_AS(device->reduce(source, destination, op, axis), std::invalid_argument);
+            for (size_t i = 0; i < output.size(); ++i) CHECK(output.data<float>()[i] == 99);
+        };
+
+        rejected(src, dst, static_cast<ReduceOp>(99));
+        const size_t multiple[] = {0, 1};
+        auto allDst = dst;
+        allDst.shape = {1, 1};
+        allDst.strides = {1, 1};
+        allDst.size = 1;
+        CHECK_THROWS_AS(device->argmax(src, allDst, multiple), std::invalid_argument);
+
+        auto bad = src;
+        bad.dtype = static_cast<DataType>(DataTypeCount);
+        rejected(bad, dst, ReduceOp::kSum);
+        bad = dst;
+        bad.dtype = DataType::kInt32;
+        rejected(src, bad, ReduceOp::kSum);
+        rejected(src, bad, ReduceOp::kMax);
+        CHECK_THROWS_AS(device->argmax(src, dst, axis), std::invalid_argument);
+
+        uint8_t values[] = {1, 3, 3, 2};
+        int32_t winner = -1;
+        DeviceTensorParams valid{.data=values, .dtype=DataType::kUInt8, .shape={4}, .size=4, .strides={1}};
+        DeviceTensorParams indexDst{.data=&winner, .dtype=DataType::kInt32, .shape={1}, .size=1, .strides={1}};
+        device->argmax(valid, indexDst);
+        CHECK(winner == 1);
+    }
+}
+
+TEST_CASE("Device reduction maps offset multi-axis transpose and broadcast coordinates")
+{
+    DeviceCPU device;
+    float input[64];
+    for (size_t i = 0; i < 64; ++i) input[i] = static_cast<float>(i);
+    float output[24]{};
+    DeviceTensorParams src{.data=input, .offset=5, .shape={2, 3, 4}, .size=24, .strides={12, 4, 1}};
+    DeviceTensorParams dst{.data=output, .shape={2, 1, 4}, .size=8, .strides={4, 4, 1}};
+    size_t axis[] = {1};
+    device.reduce(src, dst, ReduceOp::kSum, axis);
+    for (size_t i = 0; i < 8; ++i) CHECK(output[i] == 27 + 36 * (i / 4) + 3 * (i % 4));
+
+    const size_t axes[] = {2, 0};
+    DeviceTensorParams destination{.data=output, .shape={1, 3, 1}, .size=3, .strides={3, 1, 1}};
+    std::fill_n(output, 3, 100);
+    device.reduce(src, destination, ReduceOp::kSum, axes, true);
+    for (size_t i = 0; i < 3; ++i) CHECK(output[i] == 200 + 32 * i);
+
+    src = {.data=input, .isContiguous=false, .shape={3, 2}, .size=6, .strides={1, 3}};
+    dst = {.data=output, .shape={3, 1}, .size=3, .strides={1, 1}};
+    axis[0] = 1;
+    device.reduce(src, dst, ReduceOp::kSum, axis);
+    for (size_t i = 0; i < 3; ++i) CHECK(output[i] == 3 + 2 * i);
+    src = {.data=input, .isContiguous=false, .shape={2, 3}, .size=6, .strides={0, 1}};
+    dst = {.data=output, .shape={1, 3}, .size=3, .strides={3, 1}};
+    axis[0] = 0;
+    device.reduce(src, dst, ReduceOp::kSum, axis);
+    for (size_t i = 0; i < 3; ++i) CHECK(output[i] == 2 * i);
+
+    src = {.data=input, .shape={2, 3}, .size=6, .strides={3, 1}};
+    device.reduce(src, dst, ReduceOp::kSum, axis);
+    for (size_t i = 0; i < 3; ++i) CHECK(output[i] == 3 + 2 * i);
+    dst = {.data=output, .shape={2, 1}, .size=2, .strides={1, 1}};
+    axis[0] = 1;
+    device.reduce(src, dst, ReduceOp::kSum, axis);
+    CHECK(output[0] == 3);
+    CHECK(output[1] == 12);
+}
+
+TEST_CASE("Device reduction handles no axes singleton scalar and high rank")
+{
+    DeviceCPU device;
+    float input[] = {1, 2, 3, 4};
+    float output[4]{};
+    DeviceTensorParams src{.data=input, .shape={2, 1, 2}, .size=4, .strides={2, 2, 1}};
+    DeviceTensorParams dst{.data=output, .shape={2, 1, 2}, .size=4, .strides={2, 2, 1}};
+    device.contiguous(src, dst);
+    for (size_t i = 0; i < 4; ++i) CHECK(output[i] == input[i]);
+    const size_t singleton[] = {1};
+    std::fill_n(output, 4, 99);
+    device.reduce(src, dst, ReduceOp::kSum, singleton);
+    for (size_t i = 0; i < 4; ++i) CHECK(output[i] == input[i]);
+
+    src = {.data=input, .size=1};
+    dst = {.data=output, .size=1};
+    output[0] = 99;
+    device.reduce(src, dst, ReduceOp::kSum);
+    CHECK(output[0] == 1);
+    output[0] = 99;
+    device.contiguous(src, dst);
+    CHECK(output[0] == 1);
+
+    src.shape.assign(17, 1);
+    src.strides.assign(17, 1);
+    dst.shape = src.shape;
+    dst.strides = src.strides;
+    output[0] = 99;
+    device.reduce(src, dst, ReduceOp::kSum);
+    CHECK(output[0] == 1);
+}
+
+TEST_CASE("DeviceMetal native reduction explicit route and dtype matrix")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    DeviceCPU reference;
+    struct Fixture
+    {
+        Shape shape;
+        Shape output;
+        Index axes;
+        std::vector<float> values;
+        std::vector<float> sums;
+        std::vector<float> maxima;
+    };
+    std::vector<Fixture> fixtures = {
+        {{3, 8}, {3, 1}, {1}, {1, 2, 3, 4, 1, 2, 3, 4,
+                               2, 3, 4, 5, 2, 3, 4, 5,
+                               3, 4, 5, 6, 3, 4, 5, 6}, {20, 28, 36}, {4, 5, 6}},
+        {{3, 7}, {3, 1}, {1}, {1, 2, 3, 1, 2, 3, 1,
+                               2, 3, 1, 2, 3, 1, 2,
+                               3, 1, 2, 3, 1, 2, 3}, {13, 14, 15}, {3, 3, 3}},
+        {{5, 3}, {1, 3}, {0}, {1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3}, {5, 10, 15}, {1, 2, 3}},
+        {{2, 2}, {1, 2}, {0}, {1, 2, 3, 4}, {4, 6}, {3, 4}},
+        {{2, 2}, {2, 1}, {1}, {1, 2, 3, 4}, {3, 7}, {2, 4}},
+        {{2, 2, 2}, {1, 2, 1}, {2, 0}, {1, 2, 3, 4, 5, 6, 7, 8}, {14, 22}, {6, 8}},
+        {{3, 4, 5}, {3, 1, 5}, {1}, {}, std::vector<float>(15, 10), std::vector<float>(15, 4)}
+    };
+    for (size_t i = 0; i < 60; ++i) fixtures.back().values.push_back(static_cast<float>((i / 5) % 4 + 1));
+    for (size_t dtypeIndex = 1; dtypeIndex < DataTypeCount; ++dtypeIndex)
+    {
+        const auto dtype = static_cast<DataType>(dtypeIndex);
+        for (const auto& fixture : fixtures)
+        {
+            CAPTURE(dtypeIndex);
+            CAPTURE(fixture.shape);
+            CAPTURE(fixture.axes);
+            auto src = TensorValue(fixture.values.data(), fixture.values.size(), DataType::kFloat32,
+                                   fixture.shape, device.get(), dtype);
+            auto dst = TensorValue(99.0f, fixture.output, device.get(), dtype);
+            for (auto op : {ReduceOp::kSum, ReduceOp::kMax})
+            {
+                const auto& values = op == ReduceOp::kSum ? fixture.sums : fixture.maxima;
+                auto expected = TensorValue(values.data(), values.size(), DataType::kFloat32,
+                                            fixture.output, &reference, dtype);
+                device->reduce(src.deviceParams(), dst.deviceParams(), op, fixture.axes);
+                device->synchronize();
+                CheckVectorApproxValues(dst, expected);
+                dst = TensorValue(3.0f, fixture.output, device.get(), dtype);
+                for (size_t call = 1; call <= 2; ++call)
+                {
+                    device->reduce(src.deviceParams(), dst.deviceParams(), op, fixture.axes, true);
+                    device->synchronize();
+                    auto actual = dst.to(&reference).to(DataType::kFloat32);
+                    for (size_t i = 0; i < values.size(); ++i)
+                    {
+                        CHECK(actual.data<float>()[i] == (op == ReduceOp::kSum ? 3 + call * values[i] :
+                                                                                 std::max(3.0f, values[i])));
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("DeviceMetal native reduction global noaxis singleton and layout routes")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    DeviceCPU reference;
+    for (size_t dtypeIndex = 1; dtypeIndex < DataTypeCount; ++dtypeIndex)
+    {
+        const auto dtype = static_cast<DataType>(dtypeIndex);
+        CAPTURE(dtypeIndex);
+        auto base = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f,
+                                 9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, device.get(), dtype);
+        const size_t axis[] = {1};
+        for (auto src : {base.slice(0, 1, 3), base.slice(0, 1, 3).slice(1, 0, 4, 2), base.transpose(0, 1)})
+        {
+            Shape output = src.shape();
+            output[1] = 1;
+            auto dst = TensorValue(99.0f, output, device.get(), dtype);
+            device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, axis);
+            device->synchronize();
+            const std::vector<float> values = src.shape()[0] == 4 ? std::vector<float>{15, 18, 21, 24} :
+                (src.shape()[1] == 2 ? std::vector<float>{12, 20} : std::vector<float>{26, 42});
+            CheckVectorApproxValues(dst, TensorValue(values.data(), values.size(), DataType::kFloat32,
+                                                     output, &reference, dtype));
+            for (auto op : {ReduceOp::kSum, ReduceOp::kMax})
+            {
+                auto copied = TensorValue(99.0f, src.shape(), device.get(), dtype);
+                device->contiguous(src.deviceParams(), copied.deviceParams());
+                device->synchronize();
+                auto hostSource = src.contiguous();
+                device->synchronize();
+                CheckVectorApproxValues(copied, hostSource);
+                if (op == ReduceOp::kSum) device->add(src.deviceParams(), copied.deviceParams(), copied.deviceParams());
+                device->synchronize();
+                auto expected = hostSource.to(&reference);
+                if (op == ReduceOp::kSum) expected += expected;
+                CheckVectorApproxValues(copied, expected);
+            }
+        }
+        auto global = TensorValue(99.0f, {1, 1}, device.get(), dtype);
+        for (auto op : {ReduceOp::kSum, ReduceOp::kMax})
+        {
+            device->reduce(base.deviceParams(), global.deviceParams(), op);
+            device->synchronize();
+            CHECK(global.to(&reference).to(DataType::kFloat32).data<float>()[0] == (op == ReduceOp::kSum ? 78 : 12));
+            global = TensorValue(1.0f, {1, 1}, device.get(), dtype);
+            device->reduce(base.deviceParams(), global.deviceParams(), op, {}, true);
+            device->synchronize();
+            CHECK(global.to(&reference).to(DataType::kFloat32).data<float>()[0] == (op == ReduceOp::kSum ? 79 : 12));
+        }
+        auto singleton = TensorValue({2.0f, 5.0f}, {2, 1}, device.get(), dtype);
+        auto dst = TensorValue(99.0f, {2, 1}, device.get(), dtype);
+        device->reduce(singleton.deviceParams(), dst.deviceParams(), ReduceOp::kSum, axis);
+        device->synchronize();
+        CheckVectorApproxValues(dst, singleton);
+    }
+}
+
+TEST_CASE("DeviceMetal native reduction logical argmax coordinates")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    const size_t axis[] = {1};
+    for (size_t dtypeIndex = 1; dtypeIndex < DataTypeCount; ++dtypeIndex)
+    {
+        CAPTURE(dtypeIndex);
+        const auto dtype = static_cast<DataType>(dtypeIndex);
+        auto src = TensorValue({1.0f, 8.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, device.get(), dtype).transpose(0, 1);
+        auto dst = TensorValue(99, {3, 1}, device.get(), DataType::kInt32);
+        device->argmax(src.deviceParams(), dst.deviceParams(), axis);
+        device->synchronize();
+        CHECK(dst.data<int32_t>()[0] == 1);
+        CHECK(dst.data<int32_t>()[1] == 0);
+        CHECK(dst.data<int32_t>()[2] == 1);
+        argmaxAxis(*device, src.deviceParams(), dst.deviceParams(), 1);
+        device->synchronize();
+        CHECK(dst.data<int32_t>()[0] == 1);
+        CHECK(dst.data<int32_t>()[1] == 0);
+        CHECK(dst.data<int32_t>()[2] == 1);
+        auto global = TensorValue(99, {1, 1}, device.get(), DataType::kInt32);
+        device->argmax(src.deviceParams(), global.deviceParams());
+        device->synchronize();
+        CHECK(global.data<int32_t>()[0] == 2);
+        auto broadcast = TensorValue({1.0f, 8.0f, 3.0f}, {3, 1}, device.get(), dtype).broadcastTo({3, 2});
+        device->argmax(broadcast.deviceParams(), dst.deviceParams(), axis);
+        device->synchronize();
+        for (size_t i = 0; i < 3; ++i) CHECK(dst.data<int32_t>()[i] == 0);
+        auto sums = TensorValue(99.0f, {3, 1}, device.get(), dtype);
+        device->reduce(broadcast.deviceParams(), sums.deviceParams(), ReduceOp::kSum, axis);
+        device->synchronize();
+        CHECK(sums.dataType() == dtype);
+        DeviceCPU reference;
+        CheckVectorApproxValues(sums, TensorValue({2.0f, 16.0f, 6.0f}, {3, 1}, &reference, dtype));
+    }
+}
+
+#if defined(__APPLE__) && defined(__arm64__)
+TEST_CASE("DeviceMetal native reduction stays deferred and falls back with explicit metadata")
+{
+    class InspectableDevice : public aix::metal::DeviceMetal
+    {
+    public:
+        void synchronize() override { ++synchronizations; DeviceMetal::synchronize(); }
+        size_t synchronizations{0};
+    } device;
+    DeviceCPU reference;
+    const size_t axis[] = {1};
+    auto src = TensorValue({1.0f, 8.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, &device).transpose(0, 1);
+    auto dst = TensorValue(99, {3, 1}, &device, DataType::kInt32);
+    device.argmax(src.deviceParams(), dst.deviceParams(), axis);
+    auto broadcast = TensorValue(5.0f, {3, 1}, &device).broadcastTo({3, 2});
+    device.argmax(broadcast.deviceParams(), dst.deviceParams(), axis);
+    const size_t multiple[] = {0, 1};
+    auto allDst = dst.deviceParams();
+    allDst.shape = {1, 1};
+    allDst.strides = {1, 1};
+    allDst.size = 1;
+    CHECK_THROWS_AS(device.argmax(src.deviceParams(), allDst, multiple), std::invalid_argument);
+    CHECK(device.synchronizations == 0);
+    device.synchronize();
+    for (size_t i = 0; i < 3; ++i) CHECK(dst.data<int32_t>()[i] == 0);
+
+    // Non-device destinations must complete pending GPU producers before native CPU fallback.
+    auto hostIndices = TensorValue(99, {3, 1}, &reference, DataType::kInt32);
+    auto produced = src + TensorValue(1.0f, {}, &device);
+    device.argmax(produced.deviceParams(), hostIndices.deviceParams(), axis);
+    CHECK(device.synchronizations == 2);
+    CHECK(hostIndices.data<int32_t>()[0] == 1);
+    CHECK(hostIndices.data<int32_t>()[1] == 0);
+    CHECK(hostIndices.data<int32_t>()[2] == 1);
+
+    const double values[] = {1, 8, 3, 4, 5, 6};
+    auto doubles = TensorValue(values, 6, DataType::kFloat64, {2, 3}, &reference).transpose(0, 1);
+    device.argmax(doubles.deviceParams(), hostIndices.deviceParams(), axis);
+    CHECK(device.synchronizations == 3);
+    CHECK(hostIndices.data<int32_t>()[0] == 1);
+    CHECK(hostIndices.data<int32_t>()[1] == 0);
+    CHECK(hostIndices.data<int32_t>()[2] == 1);
+
+    Shape shape(17, 1);
+    shape.front() = shape.back() = 2;
+    auto highRank = TensorValue({1.0f, 2.0f, 3.0f, 4.0f}, shape, &device);
+    shape.front() = shape.back() = 1;
+    auto total = TensorValue(99.0f, shape, &device);
+    const size_t mixed[] = {16, 0};
+    device.reduce(highRank.deviceParams(), total.deviceParams(), ReduceOp::kSum, mixed);
+    CHECK(device.synchronizations == 4);
+    CHECK(total.data<float>()[0] == 10);
+    // Axis argmax has no fixed-rank coordinate array and need not take the shape-kernel fallback.
+    shape.front() = 2;
+    auto highIndices = TensorValue(99, shape, &device, DataType::kInt32);
+    auto transposed = highRank.transpose(0, 16);
+    const size_t last[] = {16};
+    device.argmax(transposed.deviceParams(), highIndices.deviceParams(), last);
+    CHECK(device.synchronizations == 4);
+    device.synchronize();
+    CHECK(highIndices.data<int32_t>()[0] == 1);
+    CHECK(highIndices.data<int32_t>()[1] == 1);
+}
+
+TEST_CASE("DeviceMetal Tensor shape lowering uses canonical native accumulation")
+{
+    class InspectableDevice : public aix::metal::DeviceMetal
+    {
+    public:
+        void synchronize() override { ++synchronizations; DeviceMetal::synchronize(); }
+        size_t synchronizations{0};
+    } device;
+    auto input = TensorValue({2048.0f, 2048.0f, 2048.0f, 2048.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                              -2048.0f, -2048.0f, -2048.0f, -2048.0f}, {3, 4}, &device, DataType::kFloat16);
+    auto produced = input + TensorValue(0.0f, {}, &device, DataType::kFloat16);
+    auto lowerRank = produced.sum({0}, true).reshape({4});
+    auto canonical = TensorValue(0.0f, {1, 4}, &device, DataType::kFloat16);
+    const size_t axis[] = {0};
+    device.reduce(produced.deviceParams(), canonical.deviceParams(), ReduceOp::kSum, axis, true);
+    CHECK(device.synchronizations == 0);
+    device.synchronize();
+    for (size_t i = 0; i < canonical.size(); ++i)
+    {
+        CHECK(static_cast<float>(lowerRank.data<float16_t>()[i]) == 1.0f);
+        CHECK(lowerRank.data<float16_t>()[i] == canonical.data<float16_t>()[i]);
+    }
+
+    auto highRankSource = input.reshape(Shape{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 4});
+    SIndex axes(16);
+    std::iota(axes.begin(), axes.end(), 0);
+    auto highRankResult = highRankSource.sum(axes, true).reshape({4});
+    CHECK(device.synchronizations == 2);
+    for (size_t i = 0; i < highRankResult.size(); ++i) CHECK(static_cast<float>(highRankResult.data<float16_t>()[i]) == 0.0f);
+}
+#endif
+
+TEST_CASE("DeviceMetal native reduction queued combine consumers and temporary retirement")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    auto dst = TensorValue(3.0f, {2, 1}, device.get());
+    std::vector<TensorValue> consumers;
+    const size_t axis[] = {1};
+    for (size_t i = 0; i < 96; ++i)
+    {
+        auto src = TensorValue(1.0f, {2, 8}, device.get());
+        auto produced = (src + src) * src;
+        device->reduce(produced.deviceParams(), dst.deviceParams(), ReduceOp::kSum, axis, true);
+        consumers.push_back(dst + dst);
+        dst += TensorValue(1.0f, {2, 1}, device.get());
+    }
+    device->synchronize();
+    for (size_t i = 0; i < consumers.size(); ++i)
+    {
+        for (size_t j = 0; j < 2; ++j) CHECK(consumers[i].data<float>()[j] == 2 * (19 + 17 * i));
+    }
+    for (size_t i = 0; i < 2; ++i) CHECK(dst.data<float>()[i] == 1635);
+}
+
+TEST_CASE("DeviceMetal native reduction preserves accumulator and destination combination order")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    DeviceCPU reference;
+    const size_t axis[] = {1};
+    for (auto dtype : {DataType::kFloat16, DataType::kBFloat16})
+    {
+        const float large = dtype == DataType::kFloat16 ? 2048.0f : 256.0f;
+        auto src = TensorValue({large, -large, 1.0f, 1.0f}, {1, 4}, device.get(), dtype);
+        auto global = TensorValue(99.0f, {1, 1}, device.get(), dtype);
+        auto shaped = TensorValue(99.0f, {1, 1}, device.get(), dtype);
+        device->reduce(src.deviceParams(), global.deviceParams(), ReduceOp::kSum);
+        device->reduce(src.deviceParams(), shaped.deviceParams(), ReduceOp::kSum, axis);
+        device->synchronize();
+        CHECK(global.to(&reference).to(DataType::kFloat32).data<float>()[0] == 1);
+        CHECK(shaped.to(&reference).to(DataType::kFloat32).data<float>()[0] == 2);
+    }
+
+    const float large = 0x1p24f;
+    auto inner = TensorValue({large, 1.0f, -large}, {1, 3}, device.get());
+    auto outer = TensorValue({large, 1.0f, -large}, {3, 1}, device.get());
+    auto strided = outer.broadcastTo({3, 2});
+    auto vector = TensorValue({large, 1.0f, -large, 1.0f}, {1, 4}, device.get());
+    auto innerDst = TensorValue(1.0f, {1, 1}, device.get());
+    auto outerDst = TensorValue(1.0f, {1, 1}, device.get());
+    auto stridedDst = TensorValue(1.0f, {1, 2}, device.get());
+    auto vectorDst = TensorValue(1.0f, {1, 1}, device.get());
+    const size_t first[] = {0};
+    device->reduce(inner.deviceParams(), innerDst.deviceParams(), ReduceOp::kSum, axis, true);
+    device->reduce(outer.deviceParams(), outerDst.deviceParams(), ReduceOp::kSum, first, true);
+    device->reduce(strided.deviceParams(), stridedDst.deviceParams(), ReduceOp::kSum, first, true);
+    device->reduce(vector.deviceParams(), vectorDst.deviceParams(), ReduceOp::kSum, axis, true);
+    device->synchronize();
+    CHECK(innerDst.data<float>()[0] == 2);
+    CHECK(outerDst.data<float>()[0] == 0);
+    CHECK(stridedDst.data<float>()[0] == 0);
+    CHECK(stridedDst.data<float>()[1] == 0);
+    CHECK(vectorDst.data<float>()[0] == 2);
+
+    std::vector<float> values(25, 99.0f);
+    for (size_t i = 1; i < values.size(); ++i) values[i] = static_cast<float>((i - 1) % 4 + 1);
+    auto storage = TensorValue(values.data(), values.size(), DataType::kFloat32, {25}, device.get());
+    auto offset = storage.deviceParams();
+    offset.offset = 1;
+    offset.shape = {3, 8};
+    offset.strides = {8, 1};
+    offset.size = 24;
+    auto offsetDst = TensorValue(99.0f, {3, 1}, device.get());
+    for (auto op : {ReduceOp::kSum, ReduceOp::kMax})
+    {
+        device->reduce(offset, offsetDst.deviceParams(), op, axis);
+        device->synchronize();
+        for (size_t i = 0; i < 3; ++i) CHECK(offsetDst.data<float>()[i] == (op == ReduceOp::kSum ? 20 : 4));
+    }
+}
+
+TEST_CASE("DeviceMetal native reduction propagates max special values and retains argmax staged ties")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    const size_t axis[] = {1};
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float infinity = std::numeric_limits<float>::infinity();
+    auto src = TensorValue({nan, 3.0f, 2.0f, -0.0f, 0.0f, -0.0f}, {2, 3}, device.get());
+    auto dst = TensorValue(-10.0f, {2, 1}, device.get());
+    device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kMax, axis, true);
+    auto infinities = TensorValue({-infinity, -infinity}, {1, 2}, device.get());
+    auto global = TensorValue(99.0f, {1, 1}, device.get());
+    auto shaped = TensorValue(99.0f, {1, 1}, device.get());
+    device->reduce(infinities.deviceParams(), global.deviceParams(), ReduceOp::kMax);
+    device->reduce(infinities.deviceParams(), shaped.deviceParams(), ReduceOp::kMax, axis);
+    device->synchronize();
+    CHECK(std::isnan(dst.data<float>()[0]));
+    CHECK(dst.data<float>()[1] == 0);
+    CHECK_FALSE(std::signbit(dst.data<float>()[1]));
+    CHECK(global.data<float>()[0] == -infinity);
+    CHECK(shaped.data<float>()[0] == -infinity);
+
+    {
+        auto copied = TensorValue(99.0f, src.shape(), device.get());
+        device->contiguous(src.deviceParams(), copied.deviceParams());
+        device->synchronize();
+        for (size_t i = 0; i < src.size(); ++i)
+        {
+            CHECK(std::bit_cast<uint32_t>(copied.data<float>()[i]) == std::bit_cast<uint32_t>(src.data<float>()[i]));
+        }
+    }
+
+    std::vector<float> values(2051, 1.0f);
+    values[1023] = values[2049] = 8.0f;
+    auto tied = TensorValue(values.data(), values.size(), DataType::kFloat32, {1, values.size()}, device.get());
+    auto index = TensorValue(99, {1, 1}, device.get(), DataType::kInt32);
+    device->argmax(tied.deviceParams(), index.deviceParams());
+    device->synchronize();
+    CHECK(index.data<int32_t>()[0] == 1023);
+    device->argmax(tied.deviceParams(), index.deviceParams(), axis);
+    device->synchronize();
+    CHECK(index.data<int32_t>()[0] == 1023);
+}
+
+TEST_CASE("DeviceCPU native reduction explicit mixed equal and singleton axes")
+{
+    DeviceCPU device;
+    auto src = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f}, {2, 2, 2}, &device);
+    const size_t mixed[] = {2, 0};
+    auto dst = TensorValue(100.0f, {1, 2, 1}, &device);
+    device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, mixed);
+    CheckVectorApproxValues(dst, TensorValue({14.0f, 22.0f}, {1, 2, 1}, &device));
+    device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, mixed, true);
+    CheckVectorApproxValues(dst, TensorValue({28.0f, 44.0f}, {1, 2, 1}, &device));
+    device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kMax, mixed);
+    CheckVectorApproxValues(dst, TensorValue({6.0f, 8.0f}, {1, 2, 1}, &device));
+
+    const size_t first[] = {0};
+    const size_t middle[] = {1};
+    auto outer = TensorValue(100.0f, {1, 2, 2}, &device);
+    auto inner = TensorValue(100.0f, {2, 1, 2}, &device);
+    device.reduce(src.deviceParams(), outer.deviceParams(), ReduceOp::kSum, first);
+    device.reduce(src.deviceParams(), inner.deviceParams(), ReduceOp::kSum, middle);
+    CheckVectorApproxValues(outer, TensorValue({6.0f, 8.0f, 10.0f, 12.0f}, {1, 2, 2}, &device));
+    CheckVectorApproxValues(inner, TensorValue({4.0f, 6.0f, 12.0f, 14.0f}, {2, 1, 2}, &device));
+
+    auto singleton = TensorValue({1.0f, 2.0f, 3.0f, 4.0f}, {2, 1, 2}, &device);
+    for (auto op : {ReduceOp::kSum, ReduceOp::kMax})
+    {
+        device.reduce(singleton.deviceParams(), inner.deviceParams(), op, middle);
+        CheckVectorApproxValues(inner, singleton);
+    }
+}
+
+TEST_CASE("DeviceCPU native reduction all dtypes overwrite combine and no axes")
+{
+    DeviceCPU device;
+    const size_t axis[] = {1};
+    for (size_t i = 0; i < DataTypeCount; ++i)
+    {
+        CAPTURE(i);
+        const auto dtype = static_cast<DataType>(i);
+        auto src = TensorValue({1.0f, 7.0f, 7.0f, 4.0f, 7.0f, 2.0f}, {2, 3}, &device, dtype);
+        auto dst = TensorValue(99.0f, {2, 1}, &device, dtype);
+        device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, axis);
+        CheckVectorApproxValues(dst, TensorValue({15.0f, 13.0f}, {2, 1}, &device, dtype));
+        device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, axis, true);
+        CheckVectorApproxValues(dst, TensorValue({30.0f, 26.0f}, {2, 1}, &device, dtype));
+
+        dst = TensorValue({3.0f, 9.0f}, {2, 1}, &device, dtype);
+        device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kMax, axis, true);
+        CheckVectorApproxValues(dst, TensorValue({7.0f, 9.0f}, {2, 1}, &device, dtype));
+        device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kMax, axis);
+        CheckVectorApproxValues(dst, TensorValue({7.0f, 7.0f}, {2, 1}, &device, dtype));
+
+        auto global = TensorValue(99.0f, {1, 1}, &device, dtype);
+        device.reduce(src.deviceParams(), global.deviceParams(), ReduceOp::kSum);
+        CHECK(global.to(DataType::kFloat64).data<double>()[0] == 28);
+        device.reduce(src.deviceParams(), global.deviceParams(), ReduceOp::kSum, {}, true);
+        CHECK(global.to(DataType::kFloat64).data<double>()[0] == 56);
+        device.reduce(src.deviceParams(), global.deviceParams(), ReduceOp::kMax);
+        CHECK(global.to(DataType::kFloat64).data<double>()[0] == 7);
+        device.reduce(src.deviceParams(), global.deviceParams(), ReduceOp::kMax, {}, true);
+        CHECK(global.to(DataType::kFloat64).data<double>()[0] == 7);
+
+        auto indices = TensorValue(99, {2, 1}, &device, DataType::kInt32);
+        device.argmax(src.deviceParams(), indices.deviceParams(), axis);
+        CHECK(indices.data<int32_t>()[0] == 1);
+        CHECK(indices.data<int32_t>()[1] == 1);
+        auto index = TensorValue(99, {1, 1}, &device, DataType::kInt32);
+        device.argmax(src.deviceParams(), index.deviceParams());
+        CHECK(index.data<int32_t>()[0] == 1);
+
+        auto copied = TensorValue(99.0f, src.shape(), &device, dtype);
+        for (auto op : {ReduceOp::kSum, ReduceOp::kMax})
+        {
+            device.contiguous(src.deviceParams(), copied.deviceParams());
+            CheckVectorApproxValues(copied, src);
+            if (op == ReduceOp::kSum) device.add(src.deviceParams(), copied.deviceParams(), copied.deviceParams());
+            CheckVectorApproxValues(copied, op == ReduceOp::kSum ?
+                TensorValue({2.0f, 14.0f, 14.0f, 8.0f, 14.0f, 4.0f}, src.shape(), &device, dtype) : src);
+        }
+    }
+}
+
+TEST_CASE("DeviceCPU native reduction retains input precision and destination first order")
+{
+    DeviceCPU device;
+    const size_t axis[] = {0};
+    const std::pair<DataType, double> cases[] = {
+        {DataType::kFloat16, 0x1p11}, {DataType::kBFloat16, 0x1p8},
+        {DataType::kFloat32, 0x1p24}, {DataType::kFloat64, 0x1p53}
+    };
+    for (const auto& [dtype, large] : cases)
+    {
+        CAPTURE(static_cast<size_t>(dtype));
+        const double values[] = {large, large, 1, 1, -large, -large};
+        auto src = TensorValue(values, 6, DataType::kFloat64, {3, 2}, &device, dtype);
+        for (bool mode : {false, true})
+        {
+            auto dst = TensorValue(1.0f, {1, 2}, &device, dtype);
+            device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, axis, mode);
+            auto actual = dst.to(DataType::kFloat64);
+            CHECK(actual.data<double>()[0] == 0);
+            CHECK(actual.data<double>()[1] == 0);
+            auto global = TensorValue(1.0f, {1, 1}, &device, dtype);
+            device.reduce(src.deviceParams(), global.deviceParams(), ReduceOp::kSum, {}, mode);
+            CHECK(global.to(DataType::kFloat64).data<double>()[0] == 0);
+        }
+    }
+}
+
+TEST_CASE("DeviceCPU native reduction layout and logical argmax coordinates")
+{
+    DeviceCPU device;
+    const size_t axis[] = {1};
+    auto src = TensorValue({1.0f, 8.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, &device).transpose(0, 1);
+    auto indices = TensorValue(99, {3, 1}, &device, DataType::kInt32);
+    device.argmax(src.deviceParams(), indices.deviceParams(), axis);
+    CHECK(indices.data<int32_t>()[0] == 1);
+    CHECK(indices.data<int32_t>()[1] == 0);
+    CHECK(indices.data<int32_t>()[2] == 1);
+    argmaxAxis(device, src.deviceParams(), indices.deviceParams(), 1);
+    CHECK(indices.data<int32_t>()[0] == 1);
+    CHECK(indices.data<int32_t>()[1] == 0);
+    CHECK(indices.data<int32_t>()[2] == 1);
+    auto global = TensorValue(99, {1, 1}, &device, DataType::kInt32);
+    device.argmax(src.deviceParams(), global.deviceParams());
+    CHECK(global.data<int32_t>()[0] == 2);
+
+    auto broadcast = TensorValue({1.0f, 8.0f, 3.0f}, {3, 1}, &device).broadcastTo({3, 2});
+    device.argmax(broadcast.deviceParams(), indices.deviceParams(), axis);
+    for (size_t i = 0; i < 3; ++i) CHECK(indices.data<int32_t>()[i] == 0);
+    device.argmax(broadcast.deviceParams(), global.deviceParams());
+    CHECK(global.data<int32_t>()[0] == 2);
+    auto sums = TensorValue(99.0f, {3, 1}, &device);
+    device.reduce(broadcast.deviceParams(), sums.deviceParams(), ReduceOp::kSum, axis);
+    CheckVectorApproxValues(sums, TensorValue({2.0f, 16.0f, 6.0f}, {3, 1}, &device));
+
+    auto base = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f,
+                             9.0f, 10.0f, 11.0f, 12.0f}, {3, 4}, &device);
+    for (auto view : {base.slice(0, 1, 3), base.slice(0, 1, 3).slice(1, 0, 4, 2)})
+    {
+        auto dst = TensorValue(99.0f, {2, 1}, &device);
+        device.reduce(view.deviceParams(), dst.deviceParams(), ReduceOp::kSum, axis);
+        const bool stepped = view.shape()[1] == 2;
+        CheckVectorApproxValues(dst, stepped ? TensorValue({12.0f, 20.0f}, {2, 1}, &device) :
+                                               TensorValue({26.0f, 42.0f}, {2, 1}, &device));
+        auto copied = TensorValue(99.0f, view.shape(), &device);
+        device.contiguous(view.deviceParams(), copied.deviceParams());
+        CheckVectorApproxValues(copied, view.contiguous());
+    }
+}
+
+TEST_CASE("DeviceCPU native reduction global axis and noaxis special value seeds")
+{
+    DeviceCPU device;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float infinity = std::numeric_limits<float>::infinity();
+    const size_t axis[] = {0};
+    for (auto values : {std::array{nan, 3.0f}, std::array{-infinity, -infinity}, std::array{-0.0f, -0.0f}})
+    {
+        auto src = TensorValue(values.data(), values.size(), DataType::kFloat32, {2}, &device);
+        auto dst = TensorValue(99.0f, {1}, &device);
+        device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kMax);
+        CHECK(std::bit_cast<uint32_t>(dst.data<float>()[0]) == std::bit_cast<uint32_t>(values[0]));
+        device.reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kMax, axis);
+        const float axisExpected = values[0];
+        CHECK(std::bit_cast<uint32_t>(dst.data<float>()[0]) == std::bit_cast<uint32_t>(axisExpected));
+        auto index = TensorValue(99, {1}, &device, DataType::kInt32);
+        for (bool global : {true, false})
+        {
+            device.argmax(src.deviceParams(), index.deviceParams(), global ? std::span<const size_t>{} : axis);
+            CHECK(index.data<int32_t>()[0] == 0);
+        }
+        {
+            auto copied = TensorValue(99.0f, src.shape(), &device);
+            device.contiguous(src.deviceParams(), copied.deviceParams());
+            for (size_t i = 0; i < src.size(); ++i)
+            {
+                CHECK(std::bit_cast<uint32_t>(copied.data<float>()[i]) == std::bit_cast<uint32_t>(values[i]));
+            }
+        }
+    }
+}
+
+TEST_CASE("Device reduction max special values agree across backends and routes")
+{
+    DeviceCPU reference;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float infinity = std::numeric_limits<float>::infinity();
+    struct MaxCase
+    {
+        std::array<float, 3> values;
+        float expected;
+    };
+    const MaxCase cases[] =
+    {
+        {{nan, 3, 2}, nan}, {{3, nan, 2}, nan}, {{3, 2, nan}, nan}, {{nan, nan, nan}, nan},
+        {{-infinity, -infinity, -infinity}, -infinity}, {{-infinity, infinity, 3}, infinity},
+        {{-0.0f, -0.0f, -0.0f}, -0.0f}, {{-0.0f, 0.0f, -0.0f}, 0.0f}, {{0.0f, -0.0f, -0.0f}, 0.0f}
+    };
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(type));
+        for (auto dtype : {DataType::kFloat64, DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16})
+        {
+            if (type == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+            CAPTURE(static_cast<size_t>(dtype));
+            auto check = [&](const TensorValue& result, float expected)
+            {
+                device->synchronize();
+                auto actual = result.to(&reference).to(DataType::kFloat64);
+                for (size_t i = 0; i < actual.size(); ++i)
+                {
+                    const double value = actual.data<double>()[i];
+                    if (std::isnan(expected)) CHECK(std::isnan(value));
+                    else
+                    {
+                        CHECK(value == expected);
+                        if (expected == 0) CHECK(std::signbit(value) == std::signbit(expected));
+                    }
+                }
+            };
+            for (const auto& [values, expected] : cases)
+            {
+                for (size_t count : {size_t{3}, size_t{8}, size_t{2051}})
+                {
+                    CAPTURE(count);
+                    std::vector<float> repeated(count);
+                    for (size_t i = 0; i < count; ++i) repeated[i] = values[i % values.size()];
+                    auto input = TensorValue(repeated.data(), repeated.size(), DataType::kFloat32, {1, count}, device.get()).to(dtype);
+                    check(input.max(), expected);              // Global, including multiple stages.
+                    check(input.max(1, true), expected);       // Scalar/vector inner routes.
+                    auto transposed = input.transpose(0, 1).broadcastTo({count, 2});
+                    check(transposed.max(0, true), expected);  // Strided/broadcast route.
+                    auto outer = transposed.contiguous();
+                    check(outer.max(0, true), expected);       // Outer route.
+                    auto dst = TensorValue(99, {1, 1}, device.get(), dtype);
+                    const Index axes{1, 0};
+                    device->reduce(input.deviceParams(), dst.deviceParams(), ReduceOp::kMax, axes);
+                    check(dst, expected);                     // Explicit multi-axis overwrite.
+                    for (bool global : {true, false})
+                    {
+                        for (float seed : {-infinity, infinity, nan, -0.0f, 0.0f})
+                        {
+                            dst.fill(seed);
+                            device->reduce(input.deviceParams(), dst.deviceParams(),
+                                           ReduceOp::kMax,
+                                           global ? std::span<const size_t>{} : std::span<const size_t>{axes}, true);
+                            float combined = expected;
+                            if (std::isnan(seed) || std::isnan(expected)) combined = nan;
+                            else if (seed == infinity || (seed == 0 && expected < 0)) combined = seed;
+                            else if (seed == 0 && expected == 0 && !std::signbit(seed)) combined = seed;
+                            check(dst, combined);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Device reduction API executes backend layout and scalar routes")
+{
+    DeviceCPU reference;
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        auto src = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, device.get()).transpose(0, 1);
+        auto dst = TensorValue(100.0f, {3, 1}, device.get());
+        const size_t axis[] = {1};
+        device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, axis);
+        device->synchronize();
+        CheckVectorApproxValues(dst, TensorValue({5.0f, 7.0f, 9.0f}, {3, 1}, &reference));
+        device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, axis, true);
+        device->synchronize();
+        CheckVectorApproxValues(dst, TensorValue({10.0f, 14.0f, 18.0f}, {3, 1}, &reference));
+
+        auto scalar = TensorValue(-0.0f, {}, device.get());
+        auto scalarDst = TensorValue(100.0f, {}, device.get());
+        device->reduce(scalar.deviceParams(), scalarDst.deviceParams(), ReduceOp::kMax);
+        device->synchronize();
+        CHECK(std::signbit(scalarDst.to(&reference).item<float>()));
+        auto index = TensorValue(99, {}, device.get(), DataType::kInt32);
+        device->argmax(scalar.deviceParams(), index.deviceParams());
+        device->synchronize();
+        CHECK(index.to(&reference).item<int32_t>() == 0);
+    }
+}
+
+TEST_CASE("Device reductions overwrite scalars and combine destinations")
+{
+    aix::DeviceCPU refDevice;
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+
+        for (size_t i = 0; i < aix::DataTypeCount; ++i)
+        {
+            const auto dtype = static_cast<DataType>(i);
+            if (deviceType == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+            CAPTURE(i);
+            auto src = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, device.get(), dtype);
+            auto sum = TensorValue(100.0f, {}, device.get(), dtype);
+            auto max = TensorValue(100.0f, {}, device.get(), dtype);
+            auto added = TensorValue({10.0f, 20.0f, 30.0f}, {3}, device.get(), dtype);
+            auto maxima = TensorValue({10.0f, 0.0f, 5.0f}, {3}, device.get(), dtype);
+
+            for (size_t call = 1; call <= 2; ++call)
+            {
+                CAPTURE(call);
+                reduceAll(*device, src.deviceParams(), sum.deviceParams(), ReduceOp::kSum);
+                reduceAll(*device, src.deviceParams(), max.deviceParams(), ReduceOp::kMax);
+                reduceAxes(*device, src.deviceParams(), added.deviceParams(), {0}, ReduceOp::kSum);
+                reduceAxes(*device, src.deviceParams(), maxima.deviceParams(), {0}, ReduceOp::kMax);
+                device->synchronize();
+
+                CHECK(sum.to(&refDevice).to(DataType::kFloat64).item<double>() == 21.0);
+                CHECK(max.to(&refDevice).to(DataType::kFloat64).item<double>() == 6.0);
+                auto actualAdded = added.to(&refDevice).to(DataType::kFloat64);
+                auto actualMaxima = maxima.to(&refDevice).to(DataType::kFloat64);
+                const double contributions[] = {5.0, 7.0, 9.0};
+                const double expectedMaxima[] = {10.0, 5.0, 6.0};
+                for (size_t j = 0; j < 3; ++j)
+                {
+                    CHECK(actualAdded.data<double>()[j] == 10.0 * (j + 1) + call * contributions[j]);
+                    CHECK(actualMaxima.data<double>()[j] == expectedMaxima[j]);
+                }
+            }
+        }
+    }
+}
+
+
+TEST_CASE("Device reduction shape lowering preserves source layouts")
+{
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+        auto check = [&](const TensorValue& src, const Index& axes,
+                          std::initializer_list<float> sums, std::initializer_list<float> maxima)
+        {
+            auto shape = src.shape();
+            for (auto axis : axes) shape[axis] = 1;
+            auto added = TensorValue(1.0f, shape, device.get());
+            auto max = TensorValue(0.0f, shape, device.get());
+            reduceAxes(*device, src.deviceParams(), added.deviceParams(), axes, ReduceOp::kSum);
+            reduceAxes(*device, src.deviceParams(), max.deviceParams(), axes, ReduceOp::kMax);
+            device->synchronize();
+            REQUIRE(added.size() == sums.size());
+            REQUIRE(max.size() == maxima.size());
+            for (size_t i = 0; i < added.size(); ++i)
+            {
+                CHECK(added.data<float>()[i] == sums.begin()[i] + 1.0f);
+                CHECK(max.data<float>()[i] == maxima.begin()[i]);
+            }
+        };
+
+        auto rows = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f,
+                                 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f, 16.0f,
+                                 17.0f, 18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f, 24.0f}, {3, 8}, device.get());
+        check(rows, {1}, {36, 100, 164}, {8, 16, 24});       // Vector inner.
+        auto offsetRows = rows.slice(0, 1, 3);
+        CHECK(offsetRows.isContiguous());
+        CHECK(offsetRows.storageOffset() == 8);
+        check(offsetRows, {1}, {100, 164}, {16, 24});
+        auto unaligned = rows.reshape({24}).slice(0, 1, 8);
+        CHECK(unaligned.isContiguous());
+        CHECK(unaligned.storageOffset() == 1);
+        check(unaligned, {0}, {35}, {8});
+        auto columns = rows.slice(1, 1, 8);
+        CHECK_FALSE(columns.isContiguous());
+        CHECK(columns.storageOffset() == 1);
+        check(columns, {1}, {35, 91, 147}, {8, 16, 24});
+        check(rows.slice(1, 0, 8, 2), {1}, {16, 48, 80}, {7, 15, 23});
+        check(rows.reshape({2, 3, 4}), {1}, {15, 18, 21, 24, 51, 54, 57, 60}, {9, 10, 11, 12, 21, 22, 23, 24});
+
+        auto small = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, device.get());
+        check(small, {0}, {5, 7, 9}, {4, 5, 6});                // Outer.
+        check(small, {}, {1, 2, 3, 4, 5, 6}, {1, 2, 3, 4, 5, 6});
+        check(small.transpose(0, 1), {1}, {5, 7, 9}, {4, 5, 6});
+        auto broadcast = small.slice(0, 0, 1).broadcastTo({2, 3});
+        CHECK(broadcast.strides()[0] == 0);
+        check(broadcast, {0}, {2, 4, 6}, {1, 2, 3});
+
+        // Leave the producer pending until the reductions consume it.
+        auto produced = small + 1.0f;
+        check(produced, {1}, {9, 18}, {4, 7});               // Scalar inner, odd extent.
+    }
+}
+
+
 TEST_CASE("DeviceMetal empty storage retains zero logical size with valid allocation lifetime")
 {
     auto device = createDevice(DeviceType::kGPU_METAL);
@@ -3788,7 +4697,10 @@ TEST_CASE("DeviceMetal empty storage retains zero logical size with valid alloca
         auto other = TensorValue(Shape{2, 0}, device.get(), dtype);
         CHECK(other.storage()->size() == 0);
         CHECK(other.data() != empty.data());
+        auto sum = empty.sum();
+        auto actual = sum.to(DataType::kFloat32);
         device->synchronize();
+        CHECK(actual.item<float>() == 0);
     }
     auto bytes = device->allocate(0);
     REQUIRE(bytes != nullptr);
@@ -3796,6 +4708,156 @@ TEST_CASE("DeviceMetal empty storage retains zero logical size with valid alloca
     device->synchronize();
     device->emptyCache();
 }
+
+TEST_CASE("Device reduction empty axes are global and accumulation is opt in")
+{
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(deviceType);
+        if (!device) continue;
+        auto src = TensorValue({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, device.get());
+        auto dst = TensorValue(100.0f, {1, 1}, device.get());
+        device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum);
+        device->synchronize();
+        CHECK(dst.data<float>()[0] == 21);
+        device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, {}, true);
+        device->synchronize();
+        CHECK(dst.data<float>()[0] == 42);
+        device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum, {});
+        device->synchronize();
+        CHECK(dst.data<float>()[0] == 21);
+        device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kMax, {}, true);
+        device->synchronize();
+        CHECK(dst.data<float>()[0] == 21);
+        device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kMax);
+        device->synchronize();
+        CHECK(dst.data<float>()[0] == 6);
+        auto index = TensorValue(99, {1, 1}, device.get(), DataType::kInt32);
+        device->argmax(src.deviceParams(), index.deviceParams(), {});
+        device->synchronize();
+        CHECK(index.data<int32_t>()[0] == 5);
+    }
+}
+
+TEST_CASE("Device argmax and argmaxMask overwrite indices and complete masks")
+{
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+        for (size_t i = 0; i < aix::DataTypeCount; ++i)
+        {
+            const auto dtype = static_cast<DataType>(i);
+            if (deviceType == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+            CAPTURE(i);
+            auto src = TensorValue({1.0f, 5.0f, 5.0f, 4.0f, 4.0f, 3.0f}, {2, 3}, device.get(), dtype);
+            auto index = TensorValue(100.0f, {}, device.get(), DataType::kInt32);
+            auto coordinates = TensorValue(100.0f, {2, 1}, device.get(), DataType::kInt32);
+            auto mask = TensorValue(7.0f, {2, 3}, device.get(), DataType::kInt32);
+            auto axisMask = TensorValue(7.0f, {2, 3}, device.get(), DataType::kInt32);
+            for (size_t call = 0; call < 2; ++call)
+            {
+                argmaxAll(*device, src.deviceParams(), index.deviceParams());
+                argmaxAxis(*device, src.deviceParams(), coordinates.deviceParams(), 1);
+                device->argmaxMask(src.deviceParams(), mask.deviceParams());
+                device->argmaxMask(src.deviceParams(), axisMask.deviceParams(), std::array<size_t, 1>{1});
+                device->synchronize();
+                CHECK(index.dataType() == DataType::kInt32);
+                CHECK(index.item<int32_t>() == 1);
+                CHECK(coordinates.data<int32_t>()[0] == 1);
+                CHECK(coordinates.data<int32_t>()[1] == 0);
+                for (size_t j = 0; j < src.size(); ++j)
+                {
+                    CHECK(mask.data<int32_t>()[j] == (j == 1 ? 1 : 0));
+                    CHECK(axisMask.data<int32_t>()[j] == (j == 1 || j == 3 ? 1 : 0));
+                }
+            }
+        }
+
+        // Reusing masks with different winners must clear the previous winners too.
+        auto first = TensorValue({9.0f, 1.0f, 2.0f, 8.0f, 3.0f, 4.0f}, {2, 3}, device.get());
+        auto second = TensorValue({1.0f, 2.0f, 9.0f, 3.0f, 4.0f, 8.0f}, {2, 3}, device.get());
+        auto reused = TensorValue(7, {2, 3}, device.get(), DataType::kInt32);
+        const size_t axis[] = {1};
+        device->argmaxMask(first.deviceParams(), reused.deviceParams(), axis);
+        device->argmaxMask(second.deviceParams(), reused.deviceParams(), axis);
+        device->synchronize();
+        for (size_t i = 0; i < reused.size(); ++i)
+            CHECK(reused.data<int32_t>()[i] == (i == 2 || i == 5 ? 1 : 0));
+        device->argmaxMask(first.deviceParams(), reused.deviceParams());
+        device->argmaxMask(second.deviceParams(), reused.deviceParams());
+        device->synchronize();
+        for (size_t i = 0; i < reused.size(); ++i)
+            CHECK(reused.data<int32_t>()[i] == (i == 2 ? 1 : 0));
+        const size_t multiple[] = {0, 1};
+        CHECK_THROWS_AS(device->argmaxMask(second.deviceParams(), reused.deviceParams(), multiple), std::invalid_argument);
+
+        // Global indices and masks use logical order, not physical storage order.
+        auto transposed = TensorValue({1.0f, 8.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, device.get()).transpose(0, 1);
+        auto invalidResult = TensorValue(0.0f, {3, 2}, device.get());
+        CHECK_THROWS_AS(argmaxAll(*device, transposed.deviceParams(), invalidResult.deviceParams()), std::invalid_argument);
+        CHECK_THROWS_AS(argmaxAxis(*device, transposed.deviceParams(), invalidResult.deviceParams(), 1), std::invalid_argument);
+        CHECK_THROWS_AS(device->argmaxMask(transposed.deviceParams(), invalidResult.deviceParams()), std::invalid_argument);
+        CHECK_THROWS_AS(device->argmaxMask(transposed.deviceParams(), invalidResult.deviceParams(), std::array<size_t, 1>{1}), std::invalid_argument);
+        auto index = transposed.argmax();
+        auto mask = transposed.argmaxIndices();
+        device->synchronize();
+        CHECK(index.item<int32_t>() == 2);
+        for (size_t i = 0; i < mask.size(); ++i)
+        {
+            CHECK(mask.data<int32_t>()[i] == (i == 2 ? 1 : 0));
+        }
+
+        // Equal maxima straddle the maximum 1024-thread Metal threadgroup extent.
+        std::vector<float> values(1025, 1.0f);
+        values[31] = values[1024] = 5.0f;
+        auto tied = TensorValue(values.data(), values.size(), DataType::kFloat32, {1025}, device.get());
+        auto winner = tied.argmax();
+        auto winners = tied.argmaxIndices();
+        device->synchronize();
+        CHECK(winner.item<int32_t>() == 31);
+        for (size_t i = 0; i < winners.size(); ++i)
+        {
+            CHECK(winners.data<int32_t>()[i] == (i == 31 ? 1 : 0));
+        }
+    }
+}
+
+
+TEST_CASE("Device Float64 shape reductions and argmax use CPU fallback")
+{
+    aix::DeviceCPU refDevice;
+    auto device = aix::createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    auto src = TensorValue({1.0, 5.0, 5.0, 4.0, 4.0, 3.0}, {2, 3}, &refDevice, DataType::kFloat64);
+    auto sum = TensorValue(1.0f, {2, 1}, &refDevice, DataType::kFloat64);
+    auto max = TensorValue(2.0f, {2, 1}, &refDevice, DataType::kFloat64);
+    auto index = TensorValue(100.0f, {}, &refDevice, DataType::kInt32);
+    auto coordinates = TensorValue(100.0f, {2, 1}, &refDevice, DataType::kInt32);
+    auto mask = TensorValue(7.0f, {2, 3}, &refDevice, DataType::kInt32);
+    auto axisMask = TensorValue(7.0f, {2, 3}, &refDevice, DataType::kInt32);
+    reduceAxes(*device, src.deviceParams(), sum.deviceParams(), {1}, ReduceOp::kSum);
+    reduceAxes(*device, src.deviceParams(), max.deviceParams(), {1}, ReduceOp::kMax);
+    argmaxAll(*device, src.deviceParams(), index.deviceParams());
+    argmaxAxis(*device, src.deviceParams(), coordinates.deviceParams(), 1);
+    device->argmaxMask(src.deviceParams(), mask.deviceParams());
+    device->argmaxMask(src.deviceParams(), axisMask.deviceParams(), std::array<size_t, 1>{1});
+    device->synchronize();
+    CHECK(sum.data<double>()[0] == 12.0);
+    CHECK(sum.data<double>()[1] == 12.0);
+    CHECK(max.data<double>()[0] == 5.0);
+    CHECK(max.data<double>()[1] == 4.0);
+    CHECK(index.item<int32_t>() == 1);
+    CHECK(coordinates.data<int32_t>()[0] == 1);
+    CHECK(coordinates.data<int32_t>()[1] == 0);
+    for (size_t i = 0; i < mask.size(); ++i)
+    {
+        CHECK(mask.data<int32_t>()[i] == (i == 1 ? 1 : 0));
+        CHECK(axisMask.data<int32_t>()[i] == (i == 1 || i == 3 ? 1 : 0));
+    }
+}
+
 
 TEST_CASE("Device reduceTo exact sums across backends")
 {
@@ -3825,7 +4887,8 @@ TEST_CASE("Device reduceTo exact sums across backends")
             for (const auto& [shape, expected] : cases)
             {
                 auto actual = TensorValue(1.0f, shape, device.get(), dtype);
-                device->reduceTo(deviceSrc.deviceParams(), actual.deviceParams());
+                const Index axes = shape == Shape{3} ? Index{0} : shape == Shape{2, 1} ? Index{1} : Index{0, 1};
+                reduceAxes(*device, deviceSrc.deviceParams(), actual.deviceParams(), axes, ReduceOp::kSum);
                 device->synchronize();
                 auto hostResult = actual.to(&refDevice).to(DataType::kFloat64);
                 REQUIRE(hostResult.size() == expected.size());

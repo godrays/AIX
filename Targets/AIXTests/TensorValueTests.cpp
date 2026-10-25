@@ -15,6 +15,7 @@
 #include <doctest/doctest.h>
 // System includes
 #include <array>
+#include <cstring>
 #include <limits>
 #include <sstream>
 
@@ -583,6 +584,181 @@ TEST_CASE("TensorValue - keepDim reductions avoid redundant allocations")
 }
 
 
+TEST_CASE("TensorValue - multi-axis sum shapes values and layouts")
+{
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(type));
+        for (size_t dtypeIndex = 0; dtypeIndex < DataTypeCount; ++dtypeIndex)
+        {
+            const auto dtype = static_cast<DataType>(dtypeIndex);
+            if (type == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+            CAPTURE(dtypeIndex);
+            const auto sumType = dtype > DataType::kInt64 ? DataType::kInt64 : dtype;
+            auto input = TensorValue({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, {2, 3, 2}, device.get(), dtype);
+            for (bool keepDim : {false, true})
+            {
+                auto sum = input.sum({2, 0}, keepDim);
+                const Shape expectedShape = keepDim ? Shape{1, 3, 1} : Shape{3};
+                CHECK(sum.shape() == expectedShape);
+                CHECK(sum.dataType() == sumType);
+                CHECK(sum.device() == device.get());
+                CHECK(sum.storage() != input.storage());
+                CHECK(sum.storageOffset() == 0);
+                CHECK(sum.isContiguous());
+                CheckVectorApproxValues(sum, TensorValue({18, 26, 34}, expectedShape, device.get(), sumType));
+                CheckVectorApproxValues(sum, input.sum({0, 2}, keepDim));
+
+                auto all = input.sum({2, 0, 1}, keepDim);
+                CHECK(all.shape() == (keepDim ? Shape{1, 1, 1} : Shape{}));
+                CheckVectorApproxValues(all, TensorValue(78, all.shape(), device.get(), sumType));
+                auto implicitAll = input.sum({}, keepDim);
+                CHECK(implicitAll.shape() == all.shape());
+                CHECK(implicitAll.storage() != input.storage());
+                CheckVectorApproxValues(implicitAll, all);
+                CheckVectorApproxValues(input.sum({1}, keepDim), input.sum(-2, keepDim));
+                CheckVectorApproxValues(input.sum({-1, -3}, keepDim), sum);
+                CheckVectorApproxValues(input.sum({0, -1}, keepDim), sum);
+            }
+
+            auto transposed = input.transpose(0, 1);
+            CheckVectorApproxValues(transposed.sum({2, 0}), TensorValue({21, 57}, {2}, device.get(), sumType));
+            auto offset = input.slice(2, 1, 2);
+            CheckVectorApproxValues(offset.sum({2, 0}), TensorValue({10, 14, 18}, {3}, device.get(), sumType));
+            auto broadcast = TensorValue({1, 2, 3}, {1, 3, 1}, device.get(), dtype).broadcastTo({2, 3, 2});
+            CheckVectorApproxValues(broadcast.sum({2, 0}), TensorValue({4, 8, 12}, {3}, device.get(), sumType));
+            auto singleton = offset.sum({2}, true);
+            CHECK(singleton.storage() != input.storage());
+            CheckVectorApproxValues(singleton, offset.to(sumType));
+            singleton.fill(0);
+            CheckVectorApproxValues(offset, TensorValue({2, 4, 6, 8, 10, 12}, {2, 3, 1}, device.get(), dtype));
+
+            CHECK_THROWS_AS(input.sum({0, 0}), std::invalid_argument);
+            CHECK_THROWS_AS(input.sum({2, 0, 2}, true), std::invalid_argument);
+            CHECK_THROWS_AS(input.sum({3}), std::invalid_argument);
+            CHECK_THROWS_AS(input.sum({-4}), std::invalid_argument);
+            CHECK_THROWS_AS(input.sum({2, -1}), std::invalid_argument);
+            CHECK_THROWS_AS(input.sum(SIndex{std::numeric_limits<ssize_t>::min()}), std::invalid_argument);
+            CHECK_THROWS_AS(input.sum(SIndex{std::numeric_limits<ssize_t>::max()}), std::invalid_argument);
+            auto scalar = TensorValue(7, {}, device.get(), dtype);
+            auto scalarCopy = scalar.sum({});
+            CHECK(scalarCopy.shape() == Shape{});
+            CHECK(scalarCopy.storage() != scalar.storage());
+            CheckVectorApproxValues(scalarCopy, scalar.to(sumType));
+            CheckVectorApproxValues(scalar.sum({0}), scalar.to(sumType));
+            CheckVectorApproxValues(scalar.sum({-1}, true), scalar.to(sumType));
+            CHECK_THROWS_AS(scalar.sum({-1, 0}), std::invalid_argument);
+            CHECK_THROWS_AS(scalar.sum({1}), std::invalid_argument);
+        }
+    }
+}
+
+
+TEST_CASE("TensorValue - integer sum promotes before accumulation")
+{
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        for (auto dtype : {DataType::kUInt8, DataType::kInt8, DataType::kInt16, DataType::kInt32, DataType::kInt64})
+        {
+            CAPTURE(static_cast<size_t>(type));
+            CAPTURE(static_cast<size_t>(dtype));
+            const int64_t value = dtype == DataType::kInt32 ? 2147483647 :
+                                  dtype == DataType::kInt64 ? 9007199254740993LL :
+                                  dtype == DataType::kInt16 ? 32767 : 100;
+            const int64_t values[] = {value, value, value, value};
+            auto input = TensorValue(values, 4, DataType::kInt64, {2, 2}, device.get(), dtype);
+            auto check = [&](TensorValue actual, int64_t expected)
+            {
+                REQUIRE(actual.dataType() == DataType::kInt64);
+                CHECK(actual.device() == device.get());
+                CHECK(actual.storage() != input.storage());
+                device->synchronize();
+                for (size_t i = 0; i < actual.size(); ++i) CHECK(actual.data<int64_t>()[i] == expected);
+            };
+            check(input.sum(), value * 4);
+            check(input.sum({}), value * 4);
+            check(input.sum({-1, -2}, true), value * 4);
+            check(input.sum(0), value * 2);
+            check(input.sum(-1, true), value * 2);
+            check(input.transpose(0, 1).sum({0}), value * 2);
+            check(input.slice(1, 1, 2).sum(), value * 2);
+            check(input.slice(0, 0, 1).broadcastTo({3, 2}).sum({0}), value * 3);
+            if (dtype != DataType::kUInt8)
+            {
+                auto negative = TensorValue({-100, -100, -100, -100}, {2, 2}, device.get(), dtype);
+                check(negative.sum(), -400);
+                check(negative.sum({-1}), -200);
+            }
+            auto scalar = TensorValue(values, 1, DataType::kInt64, {}, device.get(), dtype);
+            check(scalar.sum(), value);
+            check(scalar.sum(0), value);
+            check(scalar.sum({-1}, true), value);
+            auto empty = TensorValue({2, 0, 3}, device.get(), dtype);
+            check(empty.sum(), 0);
+            check(empty.sum({1}, true), 0);
+            auto keptEmpty = empty.sum({0, 2});
+            CHECK(keptEmpty.shape() == Shape{0});
+            CHECK(keptEmpty.dataType() == DataType::kInt64);
+            CHECK(input.dataType() == dtype);
+        }
+    }
+}
+
+TEST_CASE("TensorValue - multi-axis sum empty inputs")
+{
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        for (size_t dtypeIndex = 0; dtypeIndex < DataTypeCount; ++dtypeIndex)
+        {
+            const auto dtype = static_cast<DataType>(dtypeIndex);
+            if (type == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+            auto base = TensorValue({2, 0, 3}, device.get(), dtype);
+            for (size_t layout = 0; layout < 2; ++layout)
+            {
+                auto input = layout == 0 ? base.contiguous() : base.transpose(0, 2);
+                for (const auto& axes : {SIndex{}, SIndex{0}, SIndex{1}, SIndex{2, 0}, SIndex{2, 1, 0}, SIndex{-1, -3}})
+                {
+                    for (bool keepDim : {false, true})
+                    {
+                        auto expectedShape = input.shape();
+                        auto normalized = axes;
+                        if (normalized.empty()) normalized = {0, 1, 2};
+                        for (auto& axis : normalized)
+                        {
+                            if (axis < 0) axis += static_cast<ssize_t>(expectedShape.size());
+                            expectedShape[axis] = 1;
+                        }
+                        if (!keepDim)
+                        {
+                            for (size_t i = expectedShape.size(); i-- > 0;)
+                            {
+                                if (std::find(normalized.begin(), normalized.end(), i) != normalized.end())
+                                    expectedShape.erase(expectedShape.begin() + i);
+                            }
+                        }
+                        auto sum = input.sum(axes, keepDim);
+                        CHECK(sum.shape() == expectedShape);
+                        CHECK(sum.dataType() == (dtype > DataType::kInt64 ? DataType::kInt64 : dtype));
+                        CHECK(sum.device() == device.get());
+                        CHECK(sum.storage() != input.storage());
+                        if (sum.size() != 0)
+                            CheckVectorApproxValues(sum, TensorValue(0, expectedShape, device.get(), sum.dataType()));
+                    }
+                }
+                CHECK_THROWS_AS(input.sum({1, 1}), std::invalid_argument);
+                CHECK_THROWS_AS(input.sum({3}), std::invalid_argument);
+            }
+        }
+    }
+}
+
+
 TEST_CASE("TensorValue - keepDim singleton reductions preserve independent storage")
 {
     auto check = [](Device* device)
@@ -618,6 +794,605 @@ TEST_CASE("TensorValue - keepDim singleton reductions preserve independent stora
     }
 }
 
+
+TEST_CASE("TensorValue - reduction shapes dtypes and storage")
+{
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+        auto input = TensorValue({1.0f, 5.0f, 5.0f, 4.0f, 4.0f, 3.0f}, {2, 3}, device.get(), DataType::kInt16);
+        for (bool keepDim : {false, true})
+        {
+            CAPTURE(keepDim);
+            auto sum = input.sum(-1, keepDim);
+            auto max = input.max(-1, keepDim);
+            auto index = input.argmax(-1, keepDim);
+            const Shape expectedShape = keepDim ? Shape{2, 1} : Shape{2};
+            CHECK(sum.shape() == expectedShape);
+            CHECK(max.shape() == expectedShape);
+            CHECK(index.shape() == expectedShape);
+            CHECK(sum.dataType() == DataType::kInt64);
+            CHECK(max.dataType() == DataType::kInt16);
+            CHECK(index.dataType() == DataType::kInt32);
+            device->synchronize();
+            CHECK(sum.data<int64_t>()[0] == 11);
+            CHECK(sum.data<int64_t>()[1] == 11);
+            CHECK(max.data<int16_t>()[0] == 5);
+            CHECK(max.data<int16_t>()[1] == 4);
+            CHECK(index.data<int32_t>()[0] == 1);
+            CHECK(index.data<int32_t>()[1] == 0);
+        }
+        auto mask = input.argmaxIndices(-1);
+        CHECK(mask.shape() == input.shape());
+        CHECK(mask.dataType() == DataType::kInt32);
+        device->synchronize();
+        for (size_t i = 0; i < mask.size(); ++i)
+        {
+            CHECK(mask.data<int32_t>()[i] == (i == 1 || i == 3 ? 1 : 0));
+        }
+        CHECK_THROWS_AS(input.sum(-3), std::invalid_argument);
+        CHECK_THROWS_AS(input.max(2), std::invalid_argument);
+        CHECK_THROWS_AS(input.argmax(-3), std::invalid_argument);
+        CHECK_THROWS_AS(input.argmaxIndices(2), std::invalid_argument);
+
+        auto scalar = TensorValue(5.0f, {}, device.get(), DataType::kInt16);
+        auto scalarSum = scalar.sum(0, true);
+        auto scalarMax = scalar.max(0, false);
+        auto scalarIndex = scalar.argmax(0, true);
+        auto scalarMask = scalar.argmaxIndices(0);
+        CHECK(scalarSum.storage() != scalar.storage());
+        CHECK(scalarSum.dataType() == DataType::kInt64);
+        CHECK(scalarMax.storage() == scalar.storage());
+        CHECK(scalarSum.shape() == Shape{});
+        CHECK(scalarMax.shape() == Shape{});
+        CHECK(scalarIndex.shape() == Shape{});
+        CHECK(scalarMask.shape() == Shape{});
+        CHECK(scalarIndex.dataType() == DataType::kInt32);
+        CHECK(scalarMask.dataType() == DataType::kInt32);
+        device->synchronize();
+        CHECK(scalarSum.item<int64_t>() == 5);
+        CHECK(scalarMax.item<int16_t>() == 5);
+        CHECK(scalarIndex.item<int32_t>() == 0);
+        CHECK(scalarMask.item<int32_t>() == 1);
+    }
+}
+
+
+TEST_CASE("TensorValue - generalized reduction integration dispatch")
+{
+    class TrackingDevice : public DeviceCPU
+    {
+    public:
+        void* allocate(size_t size, DataType dtype) override
+        {
+            ++m_allocations;
+            return DeviceCPU::allocate(size, dtype);
+        }
+
+        void fill(const void* scalar, DataType dtype, const DeviceTensorParams& dst) override
+        {
+            CHECK(dst.size != 0);
+            ++m_fills;
+            DeviceCPU::fill(scalar, dtype, dst);
+        }
+
+        void reduce(const DeviceTensorParams& src, const DeviceTensorParams& dst, ReduceOp op,
+                    std::span<const size_t> axes = {}, bool accumulate = false) override
+        {
+            ++m_calls;
+            m_op = op;
+            m_accumulate = accumulate;
+            m_axes.assign(axes.begin(), axes.end());
+            CHECK(dst.shape.size() == src.shape.size());
+            DeviceCPU::reduce(src, dst, op, axes, accumulate);
+        }
+
+        void argmax(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                    std::span<const size_t> axes = {}) override
+        {
+            ++m_calls;
+            m_accumulate = false;
+            m_axes.assign(axes.begin(), axes.end());
+            DeviceCPU::argmax(src, dst, axes);
+        }
+
+        size_t m_calls{0};
+        size_t m_allocations{0};
+        size_t m_fills{0};
+        ReduceOp m_op{};
+        bool m_accumulate{};
+        Index m_axes;
+    } device;
+
+    auto input = TensorValue({1.0f, 8.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, &device);
+    auto sum = input.sum();
+    CHECK(sum.shape() == Shape{});
+    CHECK(sum.item<float>() == 27.0f);
+    CHECK(device.m_calls == 1);
+    CHECK(device.m_op == ReduceOp::kSum);
+    CHECK_FALSE(device.m_accumulate);
+    CHECK(device.m_axes.empty());
+    auto max = input.max();
+    CHECK(max.item<float>() == 8.0f);
+    CHECK(device.m_op == ReduceOp::kMax);
+    auto index = input.argmax();
+    CHECK(index.item<int32_t>() == 1);
+    CHECK(device.m_axes.empty());
+    CHECK(device.m_calls == 3);
+
+    auto axisSum = input.sum(-1, true);
+    CHECK(device.m_calls == 4);
+    CHECK(device.m_op == ReduceOp::kSum);
+    CHECK_FALSE(device.m_accumulate);
+    CHECK(device.m_axes == Index{1});
+    CheckVectorApproxValues(axisSum, TensorValue({12.0f, 15.0f}, {2, 1}, &testDevice));
+    auto axisMax = input.max(-1, true);
+    CHECK(device.m_calls == 5);
+    CHECK(device.m_op == ReduceOp::kMax);
+    CHECK_FALSE(device.m_accumulate);
+    CheckVectorApproxValues(axisMax, TensorValue({8.0f, 6.0f}, {2, 1}, &testDevice));
+    auto axisIndex = input.argmax(-1, true);
+    CHECK(device.m_calls == 6);
+    CHECK_FALSE(device.m_accumulate);
+    CHECK(axisIndex.data<int32_t>()[0] == 1);
+    CHECK(axisIndex.data<int32_t>()[1] == 2);
+
+    auto transposed = input.transpose(0, 1);
+    auto transposedIndex = transposed.argmax(-1, true);
+    CHECK(device.m_calls == 7);
+    CHECK(transposedIndex.data<int32_t>()[0] == 1);
+    CHECK(transposedIndex.data<int32_t>()[1] == 0);
+    CHECK(transposedIndex.data<int32_t>()[2] == 1);
+    auto mask = transposed.argmaxIndices(-1);
+    CHECK(device.m_calls == 7);
+    CHECK(mask.data<int32_t>()[1] == 1);
+    CHECK(mask.data<int32_t>()[2] == 1);
+    CHECK(mask.data<int32_t>()[5] == 1);
+
+    auto lowerRank = input.sum({0}, true).reshape({3});
+    CHECK(device.m_calls == 8);
+    CheckVectorApproxValues(lowerRank, TensorValue({5.0f, 13.0f, 9.0f}, {3}, &testDevice));
+
+    auto cube = input.reshape({2, 1, 3});
+    for (bool keepDim : {false, true})
+    {
+        for (const auto& axes : {SIndex{2, 0}, SIndex{1}, SIndex{2, 1, 0}, SIndex{}, SIndex{-1, -3}})
+        {
+            const auto calls = device.m_calls;
+            const auto allocations = device.m_allocations;
+            auto sum = cube.sum(axes, keepDim);
+            CHECK(device.m_calls == calls + 1);
+            CHECK(device.m_allocations == allocations + 1);
+            CHECK(device.m_op == ReduceOp::kSum);
+            Index normalized;
+            for (auto axis : axes) normalized.push_back(axis < 0 ? static_cast<ssize_t>(cube.shape().size()) + axis : axis);
+            CHECK(device.m_axes == normalized);
+            CHECK_FALSE(device.m_accumulate);
+            CHECK(sum.storage() != cube.storage());
+        }
+    }
+
+    auto tensorInput = Tensor(1, {2, 3, 4}, {.m_requireGrad=true, .m_device=&device});
+    const auto tensorCalls = device.m_calls;
+    const auto tensorAllocations = device.m_allocations;
+    auto tensorSum = tensorInput.sum({2, 0});
+    CHECK(tensorSum.shape() == Shape{3});
+    CHECK(tensorSum.isRequireGrad());
+    CHECK(device.m_calls == tensorCalls + 1);
+    CHECK(device.m_allocations == tensorAllocations + 1);
+    CHECK(device.m_axes == Index{2, 0});
+    const auto allocations = device.m_allocations;
+    const auto calls = device.m_calls;
+    auto reduced = cube.sum({0, 1, 2}, true).reshape({1});
+    CHECK(device.m_allocations == allocations + 1);
+    CHECK(device.m_calls == calls + 1);
+    CHECK(device.m_axes == Index{0, 1, 2});
+    CHECK(reduced.shape() == Shape{1});
+    CHECK(reduced.data<float>()[0] == 27);
+    const auto fills = device.m_fills;
+    const auto validationAllocations = device.m_allocations;
+    const auto validationCalls = device.m_calls;
+    CHECK_THROWS_AS(cube.sum({0, 0}), std::invalid_argument);
+    CHECK_THROWS_AS(cube.sum({3}), std::invalid_argument);
+    CHECK_THROWS_AS(cube.sum({2, -1}), std::invalid_argument);
+    CHECK_THROWS_AS(cube.sum({-4}), std::invalid_argument);
+    CHECK(device.m_allocations == validationAllocations);
+    CHECK(device.m_calls == validationCalls);
+    CHECK(device.m_fills == fills);
+
+    auto empty = TensorValue({2, 0, 3}, &device);
+    const auto maxAllocations = device.m_allocations;
+    const auto maxFills = device.m_fills;
+    const auto maxCalls = device.m_calls;
+    CHECK_THROWS_AS(empty.max(1), std::invalid_argument);
+    CHECK_THROWS_AS(empty.max(-2, true), std::invalid_argument);
+    CHECK(device.m_allocations == maxAllocations);
+    CHECK(device.m_fills == maxFills);
+    CHECK(device.m_calls == maxCalls);
+    for (const auto& axes : {SIndex{}, SIndex{0, 2}, SIndex{0, 1, 2}})
+    {
+        const auto calls = device.m_calls;
+        const auto fills = device.m_fills;
+        const auto allocations = device.m_allocations;
+        auto sum = empty.sum(axes);
+        CHECK(device.m_calls == calls);
+        CHECK(device.m_allocations == allocations + 1);
+        CHECK(device.m_fills == fills + (sum.size() != 0 ? 1 : 0));
+    }
+
+    auto original = std::make_shared<TensorNode>(TensorValue(0, cube.shape(), &device), true);
+    TensorNode broadcast(TensorValue{}, true);
+    broadcast.m_inputs = {original};
+    size_t backwardCalls = 0;
+    original->m_backwardFunc = [&](TensorNode*, const TensorValue& seed)
+    {
+        ++backwardCalls;
+        CHECK(seed.data() == cube.data());
+        CHECK(seed.shape() == cube.shape());
+        CHECK(seed.strides() == cube.strides());
+        CHECK(seed.storageOffset() == cube.storageOffset());
+    };
+    auto backwardAllocations = device.m_allocations;
+    auto backwardReductions = device.m_calls;
+    auto backwardFills = device.m_fills;
+    Tensor::broadcastBackwardFunc(&broadcast, cube);
+    CHECK(backwardCalls == 1);
+    CHECK(device.m_allocations == backwardAllocations);
+    CHECK(device.m_calls == backwardReductions);
+    CHECK(device.m_fills == backwardFills);
+
+    original->m_value = TensorValue(0, {1}, &device);
+    original->m_backwardFunc = [&](TensorNode*, const TensorValue& seed)
+    {
+        ++backwardCalls;
+        CHECK(seed.shape() == Shape{1});
+        CHECK(seed.dataType() == cube.dataType());
+        CHECK(seed.device() == &device);
+        CHECK(seed.data<float>()[0] == 27);
+    };
+    backwardAllocations = device.m_allocations;
+    backwardReductions = device.m_calls;
+    backwardFills = device.m_fills;
+    Tensor::broadcastBackwardFunc(&broadcast, cube);
+    CHECK(backwardCalls == 2);
+    CHECK(device.m_allocations == backwardAllocations + 1);
+    CHECK(device.m_calls == backwardReductions + 1);
+    CHECK(device.m_fills == backwardFills);
+    CHECK(device.m_axes == Index{0, 1, 2});
+    CHECK_FALSE(device.m_accumulate);
+
+    original->m_value = TensorValue(0, {1, 1, 3}, &device);
+    original->m_backwardFunc = [&](TensorNode*, const TensorValue& seed)
+    {
+        ++backwardCalls;
+        CHECK(seed.shape() == Shape{1, 1, 3});
+        for (size_t i = 0; i < seed.size(); ++i) CHECK(seed.data<float>()[i] == 0);
+    };
+    backwardAllocations = device.m_allocations;
+    backwardReductions = device.m_calls;
+    backwardFills = device.m_fills;
+    Tensor::broadcastBackwardFunc(&broadcast, empty);
+    CHECK(backwardCalls == 3);
+    CHECK(device.m_allocations == backwardAllocations + 1);
+    CHECK(device.m_calls == backwardReductions);
+    CHECK(device.m_fills == backwardFills + 1);
+}
+
+
+TEST_CASE("TensorValue - logical argmax and masks for transpose and zero strides")
+{
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+        auto transposed = TensorValue({1.0f, 8.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, device.get()).transpose(0, 1);
+        auto indices = transposed.argmax(-1, true);
+        auto mask = transposed.argmaxIndices(-1);
+        device->synchronize();
+        CHECK(indices.shape() == Shape{3, 1});
+        CHECK(indices.data<int32_t>()[0] == 1);
+        CHECK(indices.data<int32_t>()[1] == 0);
+        CHECK(indices.data<int32_t>()[2] == 1);
+        const int32_t transposeMask[] = {0, 1, 1, 0, 0, 1};
+        for (size_t i = 0; i < 6; ++i) CHECK(mask.data<int32_t>()[i] == transposeMask[i]);
+
+        auto broadcast = TensorValue({1.0f, 8.0f, 3.0f}, {3, 1}, device.get()).broadcastTo({3, 2});
+        auto broadcastIndices = broadcast.argmax(-1, false);
+        auto broadcastMask = broadcast.argmaxIndices(-1);
+        auto globalIndex = broadcast.argmax();
+        auto globalMask = broadcast.argmaxIndices();
+        device->synchronize();
+        CHECK(broadcastIndices.shape() == Shape{3});
+        for (size_t i = 0; i < 3; ++i) CHECK(broadcastIndices.data<int32_t>()[i] == 0);
+        CHECK(globalIndex.item<int32_t>() == 2);
+        for (size_t i = 0; i < 6; ++i)
+        {
+            CHECK(broadcastMask.data<int32_t>()[i] == (i % 2 == 0 ? 1 : 0));
+            CHECK(globalMask.data<int32_t>()[i] == (i == 2 ? 1 : 0));
+        }
+    }
+}
+
+
+TEST_CASE("TensorValue - multi-axis sum reshape preserves broadcast gradient values")
+{
+    DeviceCPU reference;
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(type));
+        auto check = [&](TensorValue& input, const Shape& target, const SIndex& axes,
+                         std::initializer_list<float> values)
+        {
+            auto actual = input.sum(axes, true).reshape(target);
+            auto canonical = input.shape();
+            for (auto axis : axes) canonical[axis] = 1;
+            auto promoted = input.to(actual.dataType());
+            auto direct = TensorValue(0, canonical, device.get(), actual.dataType());
+            const Index deviceAxes(axes.begin(), axes.end());
+            device->reduce(promoted.deviceParams(), direct.deviceParams(), ReduceOp::kSum, deviceAxes, true);
+            device->synchronize();
+            CHECK(actual.shape() == target);
+            CHECK(actual.dataType() == (input.dataType() > DataType::kInt64 ? DataType::kInt64 : input.dataType()));
+            CHECK(actual.device() == device.get());
+            CHECK(actual.storage() != input.storage());
+            CHECK(actual.storageOffset() == 0);
+            REQUIRE(actual.size() == direct.size());
+            CHECK(std::memcmp(actual.data(), direct.data(), actual.size() * Device::dataTypeSize(actual.dataType())) == 0);
+            CheckVectorApproxValues(actual.to(&reference).to(DataType::kFloat32),
+                                    TensorValue(values, target, &reference));
+        };
+        for (auto dtype : {DataType::kFloat64, DataType::kFloat32, DataType::kFloat16,
+                           DataType::kBFloat16, DataType::kInt32})
+        {
+            if (type == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+            CAPTURE(static_cast<size_t>(dtype));
+            auto input = TensorValue({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, {2, 2, 3}, device.get(), dtype);
+            check(input, {2, 3}, {0}, {8, 10, 12, 14, 16, 18});
+            check(input, {3}, {0, 1}, {22, 26, 30});
+            check(input, {1, 3}, {0, 1}, {22, 26, 30});
+            check(input, {2, 1}, {0, 2}, {30, 48});
+            check(input, {}, {0, 1, 2}, {78});
+            check(input, {1}, {0, 1, 2}, {78});
+
+            auto singleton = TensorValue({1, 2, 3, 4, 5, 6}, {1, 2, 3}, device.get(), dtype);
+            check(singleton, {2, 3}, {0}, {1, 2, 3, 4, 5, 6});
+            auto one = TensorValue(7, {1, 1}, device.get(), dtype);
+            check(one, {}, {0, 1}, {7});
+            check(one, {1}, {0}, {7});
+
+            if (dtype == DataType::kFloat16 || dtype == DataType::kBFloat16)
+            {
+                const float large = dtype == DataType::kFloat16 ? 2048.0f : 256.0f;
+                auto rounded = TensorValue({large, large, 1.0f, 1.0f, -large, -large}, {3, 2}, device.get(), dtype);
+                const float expected = type == DeviceType::kCPU ? 0.0f : 1.0f;
+                check(rounded, {2}, {0}, {expected, expected});
+            }
+        }
+
+        for (const auto& shape : {Shape{0}, Shape{2, 0}, Shape{0, 3}, Shape{2, 0, 3}, Shape{0, 0}})
+        {
+            auto base = TensorValue(shape, device.get());
+            for (size_t layout = 0; layout < (shape.size() == 1 ? 1 : 2); ++layout)
+            {
+                auto input = layout == 0 ? base.contiguous() : base.transpose(0, static_cast<ssize_t>(shape.size() - 1));
+                SIndex allAxes(input.shape().size());
+                std::iota(allAxes.begin(), allAxes.end(), 0);
+                auto leadingAxes = allAxes;
+                leadingAxes.pop_back();
+                for (const auto& [target, axes] : {std::pair{Shape{}, allAxes},
+                                                  std::pair{Shape(input.shape().size(), 1), allAxes},
+                                                  std::pair{Shape{input.shape().back()}, leadingAxes}})
+                {
+                    auto sum = axes.empty() ? input.reshape(target) : input.sum(axes, true).reshape(target);
+                    device->synchronize();
+                    CHECK(sum.shape() == target);
+                    CHECK(sum.dataType() == input.dataType());
+                    CHECK(sum.device() == device.get());
+                    for (size_t i = 0; i < sum.size(); ++i) CHECK(sum.data<float>()[i] == 0.0f);
+                }
+            }
+        }
+    }
+}
+
+
+TEST_CASE("TensorValue - reduction integration preserves numerics and shape mapping")
+{
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+        for (auto dtype : {DataType::kFloat64, DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16})
+        {
+            if (deviceType == DeviceType::kGPU_METAL && dtype == DataType::kFloat64) continue;
+            CAPTURE(static_cast<size_t>(dtype));
+            auto base = TensorValue({1.0f, -0.125f, 3.0f, 0.0625f, -2.0f, 6.0f,
+                                     0.5f, 1.0f, -3.0f, 4.0f, 0.25f, 2.0f}, {3, 4}, device.get(), dtype);
+            for (size_t layout = 0; layout < 4; ++layout)
+            {
+                CAPTURE(layout);
+                auto input = layout == 0 ? base.contiguous() :
+                             layout == 1 ? base.transpose(0, 1) :
+                             layout == 2 ? base.slice(1, 1, 4) : base.slice(0, 0, 1).broadcastTo({3, 4});
+                auto checkExact = [&](const TensorValue& actual, const TensorValue& expected)
+                {
+                    device->synchronize();
+                    REQUIRE(actual.shape() == expected.shape());
+                    REQUIRE(actual.dataType() == expected.dataType());
+                    CHECK(std::memcmp(actual.data(), expected.data(), actual.size() * Device::dataTypeSize(actual.dataType())) == 0);
+                };
+                auto directSum = TensorValue({}, device.get(), dtype);
+                reduceAll(*device, input.deviceParams(), directSum.deviceParams(), ReduceOp::kSum);
+                checkExact(input.sum(), directSum);
+                Index axes(input.shape().size());
+                std::iota(axes.begin(), axes.end(), 0);
+                auto explicitSum = TensorValue(0, Shape(input.shape().size(), 1), device.get(), dtype);
+                reduceAxes(*device, input.deviceParams(), explicitSum.deviceParams(), axes, ReduceOp::kSum);
+                checkExact(input.sum(SIndex(axes.begin(), axes.end()), true), explicitSum);
+                auto directMax = TensorValue({}, device.get(), dtype);
+                reduceAll(*device, input.deviceParams(), directMax.deviceParams(), ReduceOp::kMax);
+                checkExact(input.max(), directMax);
+                auto directIndex = TensorValue({}, device.get(), DataType::kInt32);
+                argmaxAll(*device, input.deviceParams(), directIndex.deviceParams());
+                checkExact(input.argmax(), directIndex);
+                for (size_t axis = 0; axis < input.shape().size(); ++axis)
+                {
+                    auto shape = input.shape();
+                    shape[axis] = 1;
+                    auto sum = TensorValue(0.0f, shape, device.get(), dtype);
+                    reduceAxes(*device, input.deviceParams(), sum.deviceParams(), {axis}, ReduceOp::kSum);
+                    checkExact(input.sum(static_cast<ssize_t>(axis), true), sum);
+                    auto max = TensorValue(shape, device.get(), dtype);
+                    device->fillMin(max.deviceParams());
+                    reduceAxes(*device, input.deviceParams(), max.deviceParams(), {axis}, ReduceOp::kMax);
+                    checkExact(input.max(static_cast<ssize_t>(axis), true), max);
+                    auto index = TensorValue(shape, device.get(), DataType::kInt32);
+                    argmaxAxis(*device, input.deviceParams(), index.deviceParams(), axis);
+                    checkExact(input.argmax(static_cast<ssize_t>(axis), true), index);
+                    auto mask = TensorValue(0.0f, input.shape(), device.get(), DataType::kInt32);
+                    const size_t maskAxes[] = {axis};
+                    device->argmaxMask(input.deviceParams(), mask.deviceParams(), maskAxes);
+                    checkExact(input.argmaxIndices(static_cast<ssize_t>(axis)), mask);
+                }
+            }
+            auto special = TensorValue({-0.0f, 0.0f, std::numeric_limits<float>::infinity(),
+                                        -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()},
+                                       {1, 5, 1}, device.get(), dtype);
+            auto all = special.sum({});
+            auto global = special.sum();
+            auto sum = special.sum({2, 0}, true);
+            auto direct = TensorValue(0, special.shape(), device.get(), dtype);
+            reduceAxes(*device, special.deviceParams(), direct.deviceParams(), {2, 0}, ReduceOp::kSum);
+            device->synchronize();
+            CHECK(all.shape() == Shape{});
+            CHECK(std::memcmp(all.data(), global.data(), Device::dataTypeSize(dtype)) == 0);
+            CHECK(std::memcmp(sum.data(), direct.data(), sum.size() * Device::dataTypeSize(dtype)) == 0);
+        }
+
+        auto cube = TensorValue({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                                  13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24}, {2, 3, 4}, device.get());
+        auto expected = TensorValue({15, 18, 21, 24, 51, 54, 57, 60}, {2, 4}, &testDevice);
+        CheckVectorApproxValues(cube.sum({1}, true).reshape({2, 4}), expected);
+        auto negativeInfinity = TensorValue(-std::numeric_limits<float>::infinity(), {2, 1}, device.get());
+        auto globalMax = negativeInfinity.max();
+        auto axisMax = negativeInfinity.max(0, true);
+        device->synchronize();
+        CHECK(globalMax.item<float>() == -std::numeric_limits<float>::infinity());
+        CHECK(axisMax.data<float>()[0] == -std::numeric_limits<float>::infinity());
+    }
+}
+
+
+TEST_CASE("TensorValue - empty CPU reduction integration returns initialized results")
+{
+    DeviceCPU device;
+    for (auto dtype : {DataType::kFloat32, DataType::kFloat64, DataType::kInt32})
+    {
+        CAPTURE(static_cast<size_t>(dtype));
+        for (const auto& shape : {Shape{0}, Shape{2, 0}, Shape{0, 3}, Shape{2, 0, 3}, Shape{0, 0}})
+        {
+            auto base = TensorValue(shape, &device, dtype);
+            for (size_t layout = 0; layout < (shape.size() == 1 ? 1 : 2); ++layout)
+            {
+                CAPTURE(layout);
+                auto input = layout == 0 ? base.contiguous() : base.transpose(0, static_cast<ssize_t>(shape.size() - 1));
+                auto zeroSum = TensorValue(0, {}, &device, dtype);
+                auto sum = input.sum();
+                CHECK(sum.shape() == Shape{});
+                CHECK(sum.dataType() == (dtype > DataType::kInt64 ? DataType::kInt64 : dtype));
+                CHECK(sum.device() == &device);
+                CHECK(sum.storage() != input.storage());
+                CHECK(sum.to(DataType::kFloat64).item<double>() == 0.0);
+                CHECK(sum.to(DataType::kFloat64).item<double>() == zeroSum.to(DataType::kFloat64).item<double>());
+                CHECK_THROWS_AS(input.max(), std::invalid_argument);
+                CHECK_THROWS_AS(input.argmax(), std::invalid_argument);
+
+                for (size_t axis = 0; axis < input.shape().size(); ++axis)
+                {
+                    CAPTURE(axis);
+                    auto resultShape = input.shape();
+                    resultShape[axis] = 1;
+                    CHECK_THROWS_AS(input.argmax(static_cast<ssize_t>(axis)), std::invalid_argument);
+                    for (bool keepDim : {false, true})
+                    {
+                        if (input.shape()[axis] == 0)
+                        {
+                            CHECK_THROWS_AS(input.max(static_cast<ssize_t>(axis), keepDim), std::invalid_argument);
+                            CHECK_THROWS_AS(input.max(static_cast<ssize_t>(axis) - static_cast<ssize_t>(input.shape().size()), keepDim),
+                                            std::invalid_argument);
+                            continue;
+                        }
+                        auto max = input.max(static_cast<ssize_t>(axis) - static_cast<ssize_t>(input.shape().size()), keepDim);
+                        auto expectedShape = resultShape;
+                        if (!keepDim) expectedShape.erase(expectedShape.begin() + axis);
+                        CHECK(max.shape() == expectedShape);
+                        CHECK(max.dataType() == dtype);
+                        CHECK(max.device() == &device);
+                        CHECK(max.storage() != input.storage());
+                        CHECK(max.storageOffset() == 0);
+                        CHECK(max.size() == 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+TEST_CASE("TensorValue - reduction argmax bounds on valid broadcast storage")
+{
+    DeviceCPU cpu;
+    auto metal = createDevice(DeviceType::kGPU_METAL);
+    for (Device* device : {static_cast<Device*>(&cpu), metal.get()})
+    {
+        if (!device) continue;
+        auto input = TensorValue(1, {1}, device).broadcastTo({static_cast<size_t>(INT32_MAX) + 2});
+        CHECK_THROWS_AS(input.argmax(), std::invalid_argument);
+        CHECK_THROWS_AS(input.argmax(0), std::invalid_argument);
+    }
+}
+
+TEST_CASE("TensorValue - Metal empty reduction integration stays safe")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    for (size_t dtypeIndex = 1; dtypeIndex < DataTypeCount; ++dtypeIndex)
+    {
+        const auto dtype = static_cast<DataType>(dtypeIndex);
+        for (const auto& shape : {Shape{0}, Shape{2, 0}, Shape{0, 3}, Shape{2, 0, 3}, Shape{0, 0}})
+        {
+            auto base = TensorValue(shape, device.get(), dtype);
+            auto input = shape.size() == 1 ? base.contiguous() : base.transpose(0, shape.size() - 1);
+            auto sum = input.sum().to(DataType::kFloat32);
+            CHECK_THROWS_AS(input.max(), std::invalid_argument);
+            CHECK_THROWS_AS(input.argmax(), std::invalid_argument);
+            device->synchronize();
+            CHECK(sum.item<float>() == 0);
+            for (size_t axis = 0; axis < shape.size(); ++axis)
+            {
+                CHECK_THROWS_AS(input.argmax(axis), std::invalid_argument);
+                if (input.shape()[axis] == 0)
+                {
+                    CHECK_THROWS_AS(input.max(axis, true), std::invalid_argument);
+                    CHECK_THROWS_AS(input.max(axis, false), std::invalid_argument);
+                    continue;
+                }
+                auto result = input.max(axis, true);
+                auto expectedShape = input.shape();
+                expectedShape[axis] = 1;
+                CHECK(result.shape() == expectedShape);
+                CHECK(result.size() == 0);
+                device->synchronize();
+            }
+        }
+    }
+}
 
 TEST_CASE("TensorValue - Mean")
 {
@@ -1296,15 +2071,6 @@ TEST_CASE("TensorValue - no operation value returns share storage")
     SUBCASE("broadcastTo")
     {
         auto result = base.broadcastTo({2, 3});
-
-        CHECK(result.storage() == base.storage());
-        CHECK(result.storageOffset() == base.storageOffset());
-        CHECK(result.strides() == base.strides());
-    }
-
-    SUBCASE("reduceTo")
-    {
-        auto result = base.reduceTo({2, 3});
 
         CHECK(result.storage() == base.storage());
         CHECK(result.storageOffset() == base.storageOffset());

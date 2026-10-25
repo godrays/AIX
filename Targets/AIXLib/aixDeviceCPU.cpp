@@ -18,7 +18,6 @@
 namespace aix
 {
 
-static size_t translationIndex(size_t index, const Shape& shape, const Shape& newShape);
 static size_t flattenIndex(const Stride& indices, const Stride& strides);
 static Stride unflattenIndex(size_t index, const Stride& strides);
 static size_t physicalIndex(size_t flatIndex, size_t offset, const Shape& shape, const Stride& strides);
@@ -137,19 +136,48 @@ static void fillMinGeneric(const DeviceTensorParams& result)
     }
 }
 
-template <typename T>
-static void sumGeneric(const DeviceTensorParams& a, const DeviceTensorParams& result)
+namespace
 {
-    auto t1  = static_cast<const T*>(a.data);
-    auto res = static_cast<T*>(result.data);
 
-    T sum = 0;
-    for (size_t i = 0; i < a.size; ++i)
+template <typename T, ReduceOp Op, bool IsArgmax = false>
+struct ReductionPolicy
+{
+    T value;
+
+    void consume(T candidate, size_t)
     {
-        sum += t1[physicalIndex(i, a.offset, a.shape, a.strides)];
+        if constexpr (Op == ReduceOp::kSum) value += candidate;
+        else if constexpr (std::is_integral_v<T>) value = std::max<T>(value, candidate);
+        else
+        {
+            // Propagate NaNs and prefer +0 over -0, independently of traversal order.
+            if (value != value) return;
+            if (candidate != candidate || candidate > value ||
+                (candidate == value && candidate == T(0) && std::signbit(static_cast<double>(value))))
+            {
+                value = candidate;
+            }
+        }
     }
-    *res = sum;
-}
+};
+
+template <typename T>
+struct ReductionPolicy<T, ReduceOp::kMax, true>
+{
+    T value;
+    int32_t index{0};
+
+    void consume(T candidate, size_t candidateIndex)
+    {
+        if (candidate > value)
+        {
+            value = candidate;
+            index = static_cast<int32_t>(candidateIndex);
+        }
+    }
+};
+
+}   // namespace
 
 template <typename T>
 static void sqrtGeneric(const DeviceTensorParams& a, const DeviceTensorParams& result)
@@ -241,62 +269,6 @@ static void powGeneric(const DeviceTensorParams& a, const DeviceTensorParams& ex
     }
 }
 
-template <typename T>
-static void maxGeneric(const DeviceTensorParams& a, const DeviceTensorParams& result)
-{
-    auto t  = static_cast<const T*>(a.data);
-    auto res = static_cast<T*>(result.data);
-
-    res[0] = t[physicalIndex(0, a.offset, a.shape, a.strides)];
-    for (size_t i = 1; i < a.size; ++i)
-    {
-        res[0] = std::max<T>(res[0], t[physicalIndex(i, a.offset, a.shape, a.strides)]);
-    }
-}
-
-template <typename T, typename T2>
-static void argmaxGeneric(const DeviceTensorParams& a, const DeviceTensorParams& result)
-{
-    auto t  = static_cast<const T*>(a.data);
-    auto res = static_cast<T2*>(result.data);
-
-    T max = t[physicalIndex(0, a.offset, a.shape, a.strides)];
-    res[0] = 0;
-    for (size_t i = 1; i < a.size; ++i)
-    {
-        if (t[physicalIndex(i, a.offset, a.shape, a.strides)] > max)
-        {
-            max = t[physicalIndex(i, a.offset, a.shape, a.strides)];
-            res[0] = i;
-        }
-    }
-}
-
-template <typename T, typename T2>
-static void argmaxToGeneric(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
-{
-    auto tSrc = static_cast<const T*>(src.data);
-    auto tDst = static_cast<T2*>(dst.data);
-    auto tmaxTemp = new T[dst.size];         // Temporary helper buffer to store max values for comparison.
-    auto tInitialized = new bool[dst.size]{};
-
-    // Initialize the temp buffer with the lowest value of the data type, T.
-    fillMinGeneric<T>({ .data=tmaxTemp, .size=dst.size });
-
-    for (size_t index = 0; index < src.size; ++index)
-    {
-        auto transIndex = translationIndex(index, dst.shape, src.shape);
-        if (!tInitialized[transIndex] || tSrc[physicalIndex(index, src.offset, src.shape, src.strides)] > tmaxTemp[transIndex])
-        {
-            tInitialized[transIndex] = true;
-            tmaxTemp[transIndex] = tSrc[physicalIndex(index, src.offset, src.shape, src.strides)];
-            tDst[transIndex] = (index / src.strides[dim]) % src.shape[dim];
-        }
-    }
-    delete [] tmaxTemp;
-    delete [] tInitialized;
-}
-
 template <typename T, typename T2>
 static void argmaxIndicesGeneric(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
@@ -337,10 +309,12 @@ static void argmaxIndicesToGeneric(const DeviceTensorParams& src, const DeviceTe
     fillMinGeneric<T>({ .data=tmaxTemp, .size=maxElementCount });
 
     auto tDstTemp = new T2[maxElementCount];   // Temporary helper buffer to store index of max elements.
+    size_t innerSize = 1;
+    for (size_t i = dim + 1; i < src.shape.size(); ++i) innerSize *= src.shape[i];
 
     for (size_t index = 0; index < src.size; ++index)
     {
-        auto transIndex = translationIndex(index, dstShape, src.shape);
+        auto transIndex = (index / innerSize / src.shape[dim]) * innerSize + index % innerSize;
         if (!tInitialized[transIndex] || tSrc[physicalIndex(index, src.offset, src.shape, src.strides)] > tmaxTemp[transIndex])
         {
             tInitialized[transIndex] = true;
@@ -357,6 +331,23 @@ static void argmaxIndicesToGeneric(const DeviceTensorParams& src, const DeviceTe
     delete [] tmaxTemp;
     delete [] tInitialized;
     delete [] tDstTemp;
+}
+
+static void executeAxisArgmaxMask(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
+{
+    static const auto funcTable = std::array
+    {
+        argmaxIndicesToGeneric<double    , int32_t>,
+        argmaxIndicesToGeneric<float     , int32_t>,
+        argmaxIndicesToGeneric<float16_t , int32_t>,
+        argmaxIndicesToGeneric<bfloat16_t, int32_t>,
+        argmaxIndicesToGeneric<int64_t   , int32_t>,
+        argmaxIndicesToGeneric<int32_t   , int32_t>,
+        argmaxIndicesToGeneric<int16_t   , int32_t>,
+        argmaxIndicesToGeneric<int8_t    , int32_t>,
+        argmaxIndicesToGeneric<uint8_t   , int32_t>,
+    };
+    funcTable[static_cast<size_t>(src.dtype)](src, dst, dim);
 }
 
 template <typename T>
@@ -437,32 +428,54 @@ static void contiguousGeneric(const DeviceTensorParams& src, const DeviceTensorP
     }
 }
 
-template <typename T>
-static void reduceToGeneric(const DeviceTensorParams& src, const DeviceTensorParams& dst)
+template <typename T, ReduceOp Op, bool IsArgmax = false>
+static void reductionGeneric(const DeviceTensorParams& src, const DeviceTensorParams& dst, bool accumulate,
+                             const Shape& reductionShape)
 {
     auto tSrc = static_cast<const T*>(src.data);
-    auto tDst = static_cast<T*>(dst.data);
+    using OutputType = std::conditional_t<IsArgmax, int32_t, T>;
+    auto tDst = static_cast<OutputType*>(dst.data);
+    const size_t extent = src.size / dst.size;
 
-    // Sum the values from the broadcasted tensor to the original tensor shape. The reduction involves summation
-    // because each element of the original tensor is used multiple times in the broadcasted operation.
-    // Summing the gradients correctly aggregates these contributions.
-    for (size_t index = 0; index < src.size; ++index)
+    // Source-axis order preserves the sequential input-type fold within each destination.
+    for (size_t output = 0; output < dst.size; ++output)
     {
-        tDst[translationIndex(index, dst.shape, src.shape)] += tSrc[physicalIndex(index, src.offset, src.shape, src.strides)];
+        const auto base = physicalIndex(output, src.offset, dst.shape, src.strides);
+        auto sourceIndex = [&](size_t index)
+        {
+            return physicalIndex(index, base, reductionShape, src.strides);
+        };
+        size_t first = 0;
+        T seed = 0;
+        if constexpr (IsArgmax)
+        {
+            seed = tSrc[sourceIndex(first++)];
+        }
+        else if (accumulate)
+        {
+            seed = tDst[output];
+        }
+        else if constexpr (Op == ReduceOp::kMax)
+        {
+            seed = tSrc[sourceIndex(first++)];
+        }
+
+        ReductionPolicy<T, Op, IsArgmax> state{seed};
+        for (size_t index = first; index < extent; ++index)
+        {
+            state.consume(tSrc[sourceIndex(index)], index);
+        }
+        if constexpr (IsArgmax) tDst[output] = state.index;
+        else tDst[output] = state.value;
     }
 }
 
 template <typename T>
-static void maxToGeneric(const DeviceTensorParams& src, const DeviceTensorParams& dst)
+static void dispatchReductionGeneric(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                                     ReduceOp op, bool accumulate, const Shape& reductionShape)
 {
-    auto tSrc = static_cast<const T*>(src.data);
-    auto tDst = static_cast<T*>(dst.data);
-
-    for (size_t index = 0; index < src.size; ++index)
-    {
-        auto transIndex = translationIndex(index, dst.shape, src.shape);
-        tDst[transIndex] = std::max<T>(tDst[transIndex], tSrc[physicalIndex(index, src.offset, src.shape, src.strides)]);
-    }
+    if (op == ReduceOp::kSum) reductionGeneric<T, ReduceOp::kSum>(src, dst, accumulate, reductionShape);
+    else reductionGeneric<T, ReduceOp::kMax>(src, dst, accumulate, reductionShape);
 }
 
 template <typename T>
@@ -622,31 +635,6 @@ static void triuGeneric(const DeviceTensorParams& src, const DeviceTensorParams&
 }
 
 // Helper Methods
-
-// Calculate the translation index, originalIndex, to copy data from the original index to the new index.
-static size_t translationIndex(size_t index, const Shape& shape, const Shape& newShape)
-{
-    size_t originalIndex  = 0;
-    size_t targetStride   = 1;
-    size_t originalStride = 1;
-
-    for (ssize_t i = newShape.size() - 1, j = shape.size() - 1; i >= 0; --i)
-    {
-        size_t dimIndex = (index / targetStride) % newShape[i];
-        if (j >= 0 && shape[j] == newShape[i])
-        {
-            originalIndex += dimIndex * originalStride;
-            originalStride *= shape[--j + 1];
-        }
-        else if (j >= 0 && shape[j] == 1)
-        {
-            originalStride *= shape[--j + 1];
-        }
-        targetStride *= newShape[i];
-    }
-
-    return originalIndex;
-}
 
 static size_t flattenIndex(const Stride& indices, const Stride& strides)
 {
@@ -860,24 +848,6 @@ void DeviceCPU::fillMin(const DeviceTensorParams& result)
     funcTable[static_cast<size_t>(result.dtype)](result);
 }
 
-void DeviceCPU::sum(const DeviceTensorParams& a, const DeviceTensorParams& result)
-{
-    static const auto funcTable = std::array
-    {
-        sumGeneric<double    >,
-        sumGeneric<float     >,
-        sumGeneric<float16_t >,
-        sumGeneric<bfloat16_t>,
-        sumGeneric<int64_t   >,
-        sumGeneric<int32_t   >,
-        sumGeneric<int16_t   >,
-        sumGeneric<int8_t    >,
-        sumGeneric<uint8_t   >,
-    };
-    // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(result.dtype)](a, result);
-}
-
 void DeviceCPU::sqrt(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     static const auto funcTable = std::array
@@ -1004,70 +974,6 @@ void DeviceCPU::pow(const DeviceTensorParams& a, const DeviceTensorParams& exp, 
     funcTable[static_cast<size_t>(result.dtype)](a, exp, result);
 }
 
-void DeviceCPU::max(const DeviceTensorParams& a, const DeviceTensorParams& result)
-{
-    static const auto funcTable = std::array
-    {
-        maxGeneric<double    >,
-        maxGeneric<float     >,
-        maxGeneric<float16_t >,
-        maxGeneric<bfloat16_t>,
-        maxGeneric<int64_t   >,
-        maxGeneric<int32_t   >,
-        maxGeneric<int16_t   >,
-        maxGeneric<int8_t    >,
-        maxGeneric<uint8_t   >,
-    };
-    // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(result.dtype)](a, result);
-}
-
-void DeviceCPU::argmax(const DeviceTensorParams& a, const DeviceTensorParams& result)
-{
-    if (result.dtype != DataType::kInt32)
-    {
-        throw std::invalid_argument("DeviceCPU::argmax supports only int32 data type for its result.");
-    }
-
-    static const auto funcTable = std::array
-    {
-        argmaxGeneric<double    , int32_t>,
-        argmaxGeneric<float     , int32_t>,
-        argmaxGeneric<float16_t , int32_t>,
-        argmaxGeneric<bfloat16_t, int32_t>,
-        argmaxGeneric<int64_t   , int32_t>,
-        argmaxGeneric<int32_t   , int32_t>,
-        argmaxGeneric<int16_t   , int32_t>,
-        argmaxGeneric<int8_t    , int32_t>,
-        argmaxGeneric<uint8_t   , int32_t>,
-    };
-    // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(a.dtype)](a, result);
-}
-
-void DeviceCPU::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorParams& result)
-{
-    if (result.dtype != DataType::kInt32)
-    {
-        throw std::invalid_argument("DeviceCPU::argmaxIndices supports only int32 data type for its result.");
-    }
-
-    static const auto funcTable = std::array
-    {
-        argmaxIndicesGeneric<double    , int32_t>,
-        argmaxIndicesGeneric<float     , int32_t>,
-        argmaxIndicesGeneric<float16_t , int32_t>,
-        argmaxIndicesGeneric<bfloat16_t, int32_t>,
-        argmaxIndicesGeneric<int64_t   , int32_t>,
-        argmaxIndicesGeneric<int32_t   , int32_t>,
-        argmaxIndicesGeneric<int16_t   , int32_t>,
-        argmaxIndicesGeneric<int8_t    , int32_t>,
-        argmaxIndicesGeneric<uint8_t   , int32_t>,
-    };
-    // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(a.dtype)](a, result);
-}
-
 void DeviceCPU::matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result)
 {
     static const auto funcTable = std::array
@@ -1150,86 +1056,109 @@ void DeviceCPU::contiguous(const DeviceTensorParams& src, const DeviceTensorPara
     funcTable[static_cast<size_t>(src.dtype)](src, dst);
 }
 
-void DeviceCPU::reduceTo(const DeviceTensorParams& src, const DeviceTensorParams& dst)
+void DeviceCPU::reduce(const DeviceTensorParams& src, const DeviceTensorParams& dst, ReduceOp op,
+                       std::span<const size_t> axes, bool accumulate)
 {
     static const auto funcTable = std::array
     {
-        reduceToGeneric<double    >,
-        reduceToGeneric<float     >,
-        reduceToGeneric<float16_t >,
-        reduceToGeneric<bfloat16_t>,
-        reduceToGeneric<int64_t   >,
-        reduceToGeneric<int32_t   >,
-        reduceToGeneric<int16_t   >,
-        reduceToGeneric<int8_t    >,
-        reduceToGeneric<uint8_t   >,
+        dispatchReductionGeneric<double    >,
+        dispatchReductionGeneric<float     >,
+        dispatchReductionGeneric<float16_t >,
+        dispatchReductionGeneric<bfloat16_t>,
+        dispatchReductionGeneric<int64_t   >,
+        dispatchReductionGeneric<int32_t   >,
+        dispatchReductionGeneric<int16_t   >,
+        dispatchReductionGeneric<int8_t    >,
+        dispatchReductionGeneric<uint8_t   >,
     };
-    // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(src.dtype)](src, dst);
+
+    assert(src.size > 0 && dst.size > 0);
+    assert(src.shape.size() == src.strides.size() && dst.shape.size() == src.shape.size());
+    assert(dst.isContiguous && dst.offset == 0);
+    if (static_cast<size_t>(src.dtype) >= DataTypeCount)
+    {
+        throw std::invalid_argument("Unsupported reduction dtype or mode.");
+    }
+    switch (op)
+    {
+        case ReduceOp::kSum:
+        case ReduceOp::kMax:
+            if (src.dtype != dst.dtype) throw std::invalid_argument("Sum/max reduction dtypes must match.");
+            break;
+        default:
+            throw std::invalid_argument("Unsupported reduction operation.");
+    }
+    Shape reductionShape(src.shape.size(), 1);
+    if (axes.empty()) reductionShape = src.shape;
+    else for (auto axis : axes) reductionShape[axis] = src.shape[axis];
+    funcTable[static_cast<size_t>(src.dtype)](src, dst, op, accumulate, reductionShape);
 }
 
-void DeviceCPU::maxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst)
+void DeviceCPU::argmax(const DeviceTensorParams& src, const DeviceTensorParams& dst, std::span<const size_t> axes)
 {
+    assert(src.size > 0 && dst.size > 0);
+    assert(src.shape.size() == src.strides.size() && dst.shape.size() == src.shape.size());
+    assert(dst.isContiguous && dst.offset == 0);
+    if (static_cast<size_t>(src.dtype) >= DataTypeCount || dst.dtype != DataType::kInt32 || axes.size() > 1 ||
+        (!axes.empty() && axes[0] >= src.shape.size()))
+    {
+        throw std::invalid_argument("Argmax requires Int32 output with all axes or one normalized axis.");
+    }
+    if ((axes.empty() ? src.size : src.shape[axes[0]]) - 1 >
+        static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+    {
+        throw std::invalid_argument("Argmax indices must be representable in Int32.");
+    }
     static const auto funcTable = std::array
     {
-        maxToGeneric<double    >,
-        maxToGeneric<float     >,
-        maxToGeneric<float16_t >,
-        maxToGeneric<bfloat16_t>,
-        maxToGeneric<int64_t   >,
-        maxToGeneric<int32_t   >,
-        maxToGeneric<int16_t   >,
-        maxToGeneric<int8_t    >,
-        maxToGeneric<uint8_t   >,
+        reductionGeneric<double, ReduceOp::kMax, true>,
+        reductionGeneric<float, ReduceOp::kMax, true>,
+        reductionGeneric<float16_t, ReduceOp::kMax, true>,
+        reductionGeneric<bfloat16_t, ReduceOp::kMax, true>,
+        reductionGeneric<int64_t, ReduceOp::kMax, true>,
+        reductionGeneric<int32_t, ReduceOp::kMax, true>,
+        reductionGeneric<int16_t, ReduceOp::kMax, true>,
+        reductionGeneric<int8_t, ReduceOp::kMax, true>,
+        reductionGeneric<uint8_t, ReduceOp::kMax, true>,
     };
-    // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(src.dtype)](src, dst);
+    Shape reductionShape(src.shape.size(), 1);
+    if (axes.empty()) reductionShape = src.shape;
+    else reductionShape[axes[0]] = src.shape[axes[0]];
+    funcTable[static_cast<size_t>(src.dtype)](src, dst, false, reductionShape);
 }
 
-void DeviceCPU::argmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
+void DeviceCPU::argmaxMask(const DeviceTensorParams& a, const DeviceTensorParams& result, std::span<const size_t> axes)
 {
-    if (dst.dtype != DataType::kInt32)
+    if (axes.size() > 1 || (!axes.empty() && axes[0] >= a.shape.size()))
+        throw std::invalid_argument("Argmax mask requires all axes or one normalized axis.");
+    if (!axes.empty())
     {
-        throw std::invalid_argument("DeviceCPU::argmaxTo supports only int32 data type for its result.");
+        if (result.dtype != DataType::kInt32)
+            throw std::invalid_argument("Argmax mask requires Int32 output.");
+        const int32_t zero = 0;
+        fill(&zero, DataType::kInt32, result);
+        executeAxisArgmaxMask(a, result, axes[0]);
+        return;
+    }
+    if (result.dtype != DataType::kInt32)
+    {
+        throw std::invalid_argument("DeviceCPU::argmaxMask supports only int32 data type for its result.");
     }
 
     static const auto funcTable = std::array
     {
-        argmaxToGeneric<double    , int32_t>,
-        argmaxToGeneric<float     , int32_t>,
-        argmaxToGeneric<float16_t , int32_t>,
-        argmaxToGeneric<bfloat16_t, int32_t>,
-        argmaxToGeneric<int64_t   , int32_t>,
-        argmaxToGeneric<int32_t   , int32_t>,
-        argmaxToGeneric<int16_t   , int32_t>,
-        argmaxToGeneric<int8_t    , int32_t>,
-        argmaxToGeneric<uint8_t   , int32_t>,
+        argmaxIndicesGeneric<double    , int32_t>,
+        argmaxIndicesGeneric<float     , int32_t>,
+        argmaxIndicesGeneric<float16_t , int32_t>,
+        argmaxIndicesGeneric<bfloat16_t, int32_t>,
+        argmaxIndicesGeneric<int64_t   , int32_t>,
+        argmaxIndicesGeneric<int32_t   , int32_t>,
+        argmaxIndicesGeneric<int16_t   , int32_t>,
+        argmaxIndicesGeneric<int8_t    , int32_t>,
+        argmaxIndicesGeneric<uint8_t   , int32_t>,
     };
     // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(src.dtype)](src, dst, dim);
-}
-
-void DeviceCPU::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
-{
-    if (dst.dtype != DataType::kInt32)
-    {
-        throw std::invalid_argument("DeviceCPU::argmaxIndicesTo supports only int32 data type for its result.");
-    }
-
-    static const auto funcTable = std::array
-    {
-        argmaxIndicesToGeneric<double    , int32_t>,
-        argmaxIndicesToGeneric<float     , int32_t>,
-        argmaxIndicesToGeneric<float16_t , int32_t>,
-        argmaxIndicesToGeneric<bfloat16_t, int32_t>,
-        argmaxIndicesToGeneric<int64_t   , int32_t>,
-        argmaxIndicesToGeneric<int32_t   , int32_t>,
-        argmaxIndicesToGeneric<int16_t   , int32_t>,
-        argmaxIndicesToGeneric<int8_t    , int32_t>,
-        argmaxIndicesToGeneric<uint8_t   , int32_t>,
-    };
-    // Call the appropriate function from the table.
-    funcTable[static_cast<size_t>(src.dtype)](src, dst, dim);
+    funcTable[static_cast<size_t>(a.dtype)](a, result);
 }
 
 void DeviceCPU::sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,

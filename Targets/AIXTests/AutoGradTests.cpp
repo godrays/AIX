@@ -1033,7 +1033,7 @@ TEST_CASE("Auto Grad - Metal view chain permute slice mul backward parity")
 }
 
 
-TEST_CASE("Auto Grad - Metal Broadcast view reduceTo backward parity")
+TEST_CASE("Auto Grad - Metal Broadcast view sum backward parity")
 {
     auto device = aix::createDevice(aix::DeviceType::kGPU_METAL);
     if (!device) return;
@@ -1065,6 +1065,131 @@ TEST_CASE("Auto Grad - Metal Broadcast view reduceTo backward parity")
     CheckVectorApproxValues(metalOther.grad(), cpuOther.grad());
 }
 
+
+TEST_CASE("Auto Grad - multi-axis broadcast backward literal gradients")
+{
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(type));
+        for (auto dtype : {DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16})
+        {
+            CAPTURE(static_cast<size_t>(dtype));
+            const TensorOptions options{.m_requireGrad=true, .m_dtype=dtype, .m_device=device.get()};
+            auto seed = tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {2, 2, 3},
+                               {.m_dtype=dtype, .m_device=device.get()});
+            auto check = [&](const Shape& shape, std::initializer_list<float> expected)
+            {
+                auto input = Tensor(1, shape, options);
+                auto output = input.broadcastTo(seed.shape());
+                output.backward(seed);
+                output.backward(seed);
+                device->synchronize();
+                CHECK(input.grad().shape() == shape);
+                CHECK(input.grad().dataType() == dtype);
+                CHECK(input.grad().device() == device.get());
+                auto actual = input.grad().to(&defaultDevice).to(DataType::kFloat32);
+                REQUIRE(actual.size() == expected.size());
+                size_t i = 0;
+                for (auto value : expected) CHECK(actual.data<float>()[i++] == 2 * value);
+            };
+            check({3}, {22, 26, 30});
+            check({2, 1}, {30, 48});
+            check({1, 2, 1}, {30, 48});
+            check({}, {78});
+            check({1, 2, 3}, {8, 10, 12, 14, 16, 18});
+
+            auto singleton = Tensor(1, {2, 3}, options);
+            auto leading = singleton.broadcastTo({1, 2, 3});
+            auto leadingSeed = tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {1, 2, 3},
+                                      {.m_dtype=dtype, .m_device=device.get()});
+            leading.backward(leadingSeed);
+            device->synchronize();
+            CheckVectorApproxValues(singleton.grad().to(&defaultDevice).to(DataType::kFloat32),
+                                    TensorValue({1, 2, 3, 4, 5, 6}, {2, 3}, &defaultDevice));
+
+            auto input = Tensor(1, {1, 3}, options);
+            auto empty = input.broadcastTo({0, 3});
+            auto emptySeed = Tensor(Shape{0, 3}, {.m_dtype=dtype, .m_device=device.get()});
+            empty.backward(emptySeed);
+            device->synchronize();
+            CheckVectorApproxValues(input.grad().to(&defaultDevice).to(DataType::kFloat32),
+                                    TensorValue(0, {1, 3}, &defaultDevice));
+        }
+    }
+}
+
+
+TEST_CASE("Auto Grad - multi-axis sum broadcasts weighted gradients")
+{
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(type));
+        for (auto dtype : {DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16})
+        {
+            CAPTURE(static_cast<size_t>(dtype));
+            const TensorOptions options{.m_requireGrad=true, .m_dtype=dtype, .m_device=device.get()};
+            for (const SIndex& axes : {SIndex{2, 0}, SIndex{0, 1, 2}, SIndex{1}, SIndex{}, SIndex{-1, -3}, SIndex{0, -1}})
+            {
+                for (bool keepDim : {false, true})
+                {
+                    auto input = Tensor(1, {2, 3, 2}, options);
+                    auto result = input.sum(axes, keepDim);
+                    std::vector<float> weights(result.value().size());
+                    std::iota(weights.begin(), weights.end(), 1.0f);
+                    auto seed = Tensor(weights.data(), weights.size(), DataType::kFloat32, result.shape(),
+                                       {.m_dtype=dtype, .m_device=device.get()});
+                    result.backward(seed);
+                    result.backward(seed);
+                    device->synchronize();
+                    auto actual = input.grad().to(&defaultDevice).to(DataType::kFloat32);
+                    CHECK(actual.shape() == input.shape());
+                    CHECK(input.grad().dataType() == dtype);
+                    CHECK(input.grad().device() == device.get());
+                    for (size_t i = 0; i < actual.size(); ++i)
+                    {
+                        const size_t output = axes.empty() || axes.size() == 3 ? 0 :
+                                              axes.size() == 2 ? (i / 2) % 3 : (i / 6) * 2 + i % 2;
+                        CHECK(actual.data<float>()[i] == 2 * weights[output]);
+                    }
+                }
+            }
+
+            auto scalar = Tensor(3, {}, options);
+            scalar.sum({}).backward();
+            scalar.sum(0).backward();
+            scalar.sum({-1}).backward();
+            auto singleton = Tensor(2, {2, 1, 3}, options);
+            singleton.sum({1}).sum().backward();
+            auto empty = Tensor(Shape{2, 0, 3}, options);
+            empty.sum({1}).sum().backward();
+            auto emptyResult = empty.sum({0});
+            emptyResult.retainGrad();
+            emptyResult.sum().backward();
+            device->synchronize();
+            CHECK(scalar.grad().to(&defaultDevice).to(DataType::kFloat32).item<float>() == 3);
+            CheckVectorApproxValues(singleton.grad().to(&defaultDevice).to(DataType::kFloat32),
+                                    TensorValue(1, {2, 1, 3}, &defaultDevice));
+            CHECK(empty.grad().shape() == Shape{2, 0, 3});
+            CHECK(empty.grad().size() == 0);
+            CHECK(emptyResult.grad().shape() == Shape{0, 3});
+            CHECK(emptyResult.grad().size() == 0);
+            empty.zeroGrad();
+            emptyResult.zeroGrad();
+
+            auto input = Tensor(1, {2, 3, 2}, options);
+            auto stridedSeed = tensor({99.0f, 1.0f, 99.0f, 2.0f, 99.0f, 3.0f}, {6},
+                                       {.m_dtype=dtype, .m_device=device.get()}).slice(0, 1, 6, 2);
+            input.sum({2, 0}).backward(stridedSeed);
+            device->synchronize();
+            CheckVectorApproxValues(input.grad().to(&defaultDevice).to(DataType::kFloat32),
+                                    TensorValue({1, 1, 2, 2, 3, 3, 1, 1, 2, 2, 3, 3}, {2, 3, 2}, &defaultDevice));
+        }
+    }
+}
 
 TEST_CASE("Auto Grad - transpose matmul backward parity")
 {
@@ -1187,6 +1312,41 @@ TEST_CASE("Auto Grad - self sub backward")
         {
             CHECK(grad[i] == Approx(0.0f));
         }
+    }
+}
+
+
+TEST_CASE("Auto Grad - reduction integration nonuniform seeds and mean composition")
+{
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+        TensorOptions options{.m_requireGrad=true, .m_device=device.get()};
+        for (bool keepDim : {false, true})
+        {
+            auto input = tensor({1.0f, 5.0f, 5.0f, 4.0f, 4.0f, 3.0f}, {2, 3}, options);
+            auto sum = input.sum(-1, keepDim);
+            auto seed = tensor({2.0f, 7.0f}, sum.shape(), {.m_device=device.get()});
+            sum.backward(seed);
+            CheckVectorApproxValues(input.grad(), tensor({2.0f, 2.0f, 2.0f, 7.0f, 7.0f, 7.0f}, {2, 3}).value());
+        }
+        auto input = tensor({1.0f, 5.0f, 5.0f, 4.0f, 4.0f, 3.0f}, {2, 3}, options);
+        auto max = input.max(-1, true);
+        max.backward(tensor({2.0f, 7.0f}, {2, 1}, {.m_device=device.get()}));
+        CheckVectorApproxValues(input.grad(), tensor({0.0f, 2.0f, 0.0f, 7.0f, 0.0f, 0.0f}, {2, 3}).value());
+
+        auto globalInput = tensor({1.0f, 5.0f, 5.0f, 4.0f, 4.0f, 3.0f}, {2, 3}, options);
+        auto globalMax = globalInput.max();
+        globalMax.backward(Tensor(3.0f, {}, {.m_device=device.get()}));
+        CheckVectorApproxValues(globalInput.grad(), tensor({0.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f}, {2, 3}).value());
+
+        auto meanInput = tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, options);
+        auto mean = meanInput.mean(-1, true);
+        CheckVectorApproxValues(mean, tensor({2.0f, 5.0f}, {2, 1}));
+        mean.backward(tensor({3.0f, 6.0f}, {2, 1}, {.m_device=device.get()}));
+        CheckVectorApproxValues(meanInput.grad(), tensor({1.0f, 1.0f, 1.0f, 2.0f, 2.0f, 2.0f}, {2, 3}).value());
     }
 }
 

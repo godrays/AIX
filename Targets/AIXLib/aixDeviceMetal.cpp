@@ -84,7 +84,7 @@ DeviceMetal::DeviceMetal(size_t deviceIndex)
         m_compFuncPSOMax[i]         = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "max_" + dtypeStr);
         m_compFuncPSOArgmaxInit[i]   = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxInit_" + dtypeStr);
         m_compFuncPSOArgmaxReduce[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxReduce_" + dtypeStr);
-        m_compFuncPSOArgmaxTo[i]     = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxTo_" + dtypeStr);
+        m_compFuncPSOArgmaxToLogical[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "argmaxToLogical_" + dtypeStr);
         m_compFuncPSOMatMulStrided[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulStrided_" + dtypeStr);
         m_compFuncPSOMatMulStridedM1[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName: "matrixMulStridedM1_" + dtypeStr);
         m_compFuncPSOMatMulStridedTiled1616[i] = createComputeFuncPSO(defaultLibrary, isNull ? nullKernelName : "matrixMulStridedTiled_16_16_" + dtypeStr);
@@ -198,7 +198,7 @@ DeviceMetal::~DeviceMetal()
         m_compFuncPSOMax[i]->release();
         m_compFuncPSOArgmaxInit[i]->release();
         m_compFuncPSOArgmaxReduce[i]->release();
-        m_compFuncPSOArgmaxTo[i]->release();
+        m_compFuncPSOArgmaxToLogical[i]->release();
         m_compFuncPSOMatMulStrided[i]->release();
         m_compFuncPSOMatMulStridedM1[i]->release();
         m_compFuncPSOMatMulStridedTiled1616[i]->release();
@@ -305,23 +305,24 @@ void DeviceMetal::fillMin(const DeviceTensorParams& result)
     m_fuseEngine->recordFillMin(result);
 }
 
-void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& result)
+void DeviceMetal::executeGlobalReduction(const DeviceTensorParams& a, const DeviceTensorParams& result, ReduceOp op)
 {
     recordExternalRead(a);
     flushPendingFusedWork();
     assert(result.isContiguous == true);
     auto iDType = static_cast<size_t>(result.dtype);
-    auto compFuncPSO = m_compFuncPSOSum[iDType];
+    const bool isSum = op == ReduceOp::kSum;
+    auto compFuncPSO = isSum ? m_compFuncPSOSum[iDType] : m_compFuncPSOMax[iDType];
 
     // Result buffer has to be allocated in advance and has to be a GPU memory.
     if (!isDeviceBuffer(result.data))
-        throw std::invalid_argument("DeviceMetal::sum() result must have GPU memory.");
+        throw std::invalid_argument("DeviceMetal global reduction result must have GPU memory.");
 
     size_t maxThreadsPerTG = std::min<size_t>(m_maxThreadsPerThreadgroup, compFuncPSO->maxTotalThreadsPerThreadgroup());
 
     auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
     auto bufResult = m_allocMap[result.data];
-    MTL::Buffer* bufTemp = nullptr;
+    MTL::Buffer* bufTemp = isSum ? nullptr : m_allocMap[allocate(a.size, a.dtype)];
     auto boundLayout = bindTensorLayout(a, {.bufferIndex=4});
 
     auto encodeReduction = [&](const MTL::Buffer* srcBuffer, MTL::Buffer* dstBuffer, size_t elementCount, size_t useLayout)
@@ -340,25 +341,39 @@ void DeviceMetal::sum(const DeviceTensorParams& a, const DeviceTensorParams& res
 
     size_t elementCount = a.size;
     size_t useLayout = (a.isContiguous && a.offset == 0) ? 0 : 1;
-    const MTL::Buffer* reductionSrc = bufSrc;
-    while (true)
+    if (isSum)
     {
-        size_t reducedCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
-        if (reducedCount == 1)
+        const MTL::Buffer* reductionSrc = bufSrc;
+        while (true)
         {
-            encodeReduction(reductionSrc, bufResult, elementCount, useLayout);
-            break;
-        }
+            size_t reducedCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+            if (reducedCount == 1)
+            {
+                encodeReduction(reductionSrc, bufResult, elementCount, useLayout);
+                break;
+            }
 
-        if (!bufTemp)
+            if (!bufTemp)
+            {
+                bufTemp = m_allocMap[allocate(a.size, a.dtype)];
+            }
+
+            encodeReduction(reductionSrc, bufTemp, elementCount, useLayout);
+            reductionSrc = bufTemp;
+            elementCount = reducedCount;
+            useLayout = 0;
+        }
+    }
+    else
+    {
+        encodeReduction(bufSrc, bufTemp, elementCount, useLayout);
+        while (elementCount > 1)
         {
-            bufTemp = m_allocMap[allocate(a.size, a.dtype)];
+            elementCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+            if (elementCount == 1) break;
+            encodeReduction(bufTemp, bufTemp, elementCount, 0);
         }
-
-        encodeReduction(reductionSrc, bufTemp, elementCount, useLayout);
-        reductionSrc = bufTemp;
-        elementCount = reducedCount;
-        useLayout = 0;
+        copy(bufTemp->contents(), a.dtype, result.data, result.dtype, 1);
     }
 
     // Free operation is delayed until the commit is done.
@@ -405,72 +420,14 @@ void DeviceMetal::pow(const DeviceTensorParams& a, const DeviceTensorParams& exp
     m_fuseEngine->record(aix::fuse::OpType::Pow, a, exp, result);
 }
 
-void DeviceMetal::max(const DeviceTensorParams& a, const DeviceTensorParams& result)
-{
-    recordExternalRead(a);
-    flushPendingFusedWork();
-    assert(result.isContiguous == true);
-    auto iDType = static_cast<size_t>(result.dtype);
-    auto compFuncPSO = m_compFuncPSOMax[iDType];
-
-    // Result buffer has to be allocated in advance and has to be a GPU memory.
-    if (!isDeviceBuffer(result.data))
-        throw std::invalid_argument("DeviceMetal::max() result must have GPU memory.");
-
-    size_t maxThreadsPerTG = std::min<size_t>(m_maxThreadsPerThreadgroup, compFuncPSO->maxTotalThreadsPerThreadgroup());
-
-    auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
-    auto bufTemp = m_allocMap[allocate(a.size, a.dtype)];
-    auto boundLayout = bindTensorLayout(a, {.bufferIndex=4});
-
-    auto encodeReduction = [&](const MTL::Buffer* srcBuffer, MTL::Buffer* dstBuffer, size_t elementCount, size_t useLayout)
-    {
-        m_compEncoder->setComputePipelineState(compFuncPSO);
-        m_compEncoder->setBuffer(srcBuffer, 0, 0);
-        m_compEncoder->setBuffer(dstBuffer, 0, 1);
-        m_compEncoder->setBytes(&elementCount, sizeof(elementCount), 2);
-        m_compEncoder->setBytes(&useLayout, sizeof(useLayout), 3);
-        m_compEncoder->setBytes(boundLayout.data.data(), boundLayout.data.size() * sizeof(size_t), 4);
-
-        NS::UInteger w = std::min(elementCount, maxThreadsPerTG);
-        m_compEncoder->dispatchThreads({elementCount, 1, 1}, {w, 1, 1});
-        commitBatchQueue();
-    };
-
-    size_t elementCount = a.size;
-    size_t useLayout = (a.isContiguous && a.offset == 0) ? 0 : 1;
-    encodeReduction(bufSrc, bufTemp, elementCount, useLayout);
-    while (elementCount > 1)
-    {
-        elementCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
-        if (elementCount == 1) break;
-        encodeReduction(bufTemp, bufTemp, elementCount, 0);
-    }
-
-    // Copy result from temp buf to result buffer.
-    copy(bufTemp->contents(), a.dtype, result.data, result.dtype, 1);
-
-    // Free operation is delayed until the commit is done.
-    freeTemporaryBuffer(bufSrc);
-    releaseTensorLayout(boundLayout);
-    deallocate(bufTemp->contents());
-}
-
-void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& result)
+void DeviceMetal::executeGlobalArgmax(const DeviceTensorParams& a, const DeviceTensorParams& result)
 {
     recordExternalRead(a);
     flushPendingFusedWork();
     assert(result.isContiguous == true);
     if (result.dtype != DataType::kInt32)
     {
-        throw std::invalid_argument("DeviceMetal::argmax supports only int32 data type for its result.");
-    }
-
-    if (a.dtype == DataType::kFloat64 || !isDeviceBuffer(result.data))
-    {
-        synchronize();
-        defaultDevice.argmax(a, result);
-        return;
+        throw std::invalid_argument("DeviceMetal global argmax requires an int32 result.");
     }
 
     assert(a.size > 0);
@@ -527,55 +484,6 @@ void DeviceMetal::argmax(const DeviceTensorParams& a, const DeviceTensorParams& 
     releaseTensorLayout(boundLayout);
     deallocate(bufTempValues->contents());
     deallocate(bufTempIndices->contents());
-}
-
-void DeviceMetal::argmaxIndices(const DeviceTensorParams& a, const DeviceTensorParams& result)
-{
-    recordExternalRead(a);
-    flushPendingFusedWork();
-    assert(result.isContiguous == true);
-    if (result.dtype != DataType::kInt32)
-    {
-        throw std::invalid_argument("DeviceMetal::argmaxIndices supports only int32 data type for its result.");
-    }
-
-    if (a.dtype == DataType::kFloat64 || !isDeviceBuffer(result.data))
-    {
-        synchronize();
-        defaultDevice.argmaxIndices(a, result);
-        return;
-    }
-
-    auto winningIndex = DeviceTensorParams
-    {
-        .data=allocate(1, DataType::kInt32),
-        .dtype=DataType::kInt32,
-        .isContiguous=true,
-        .offset=0,
-        .shape={},
-        .size=1,
-        .strides={}
-    };
-
-    argmax(a, winningIndex);
-
-    int32_t zero = 0;
-    fill(&zero, DataType::kInt32, result);
-    recordExternalRead(winningIndex);
-    recordExternalRead(result);
-    flushPendingFusedWork();
-
-    auto bufWinningIndex = m_allocMap[winningIndex.data];
-    auto bufResult = m_allocMap[result.data];
-
-    m_compEncoder->setComputePipelineState(m_compFuncPSOArgmaxIndicesSet);
-    m_compEncoder->setBuffer(bufWinningIndex, 0, 0);
-    m_compEncoder->setBuffer(bufResult, 0, 1);
-    m_compEncoder->setBytes(&result.size, sizeof(result.size), 2);
-    m_compEncoder->dispatchThreads({1, 1, 1}, {1, 1, 1});
-    commitBatchQueue();
-
-    deallocate(winningIndex.data);
 }
 
 void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result)
@@ -839,241 +747,305 @@ void DeviceMetal::contiguous(const DeviceTensorParams& src, const DeviceTensorPa
     commitBatchQueue();
 }
 
-void DeviceMetal::reduceTo(const DeviceTensorParams& src, const DeviceTensorParams& dst)
+void DeviceMetal::reduce(const DeviceTensorParams& src, const DeviceTensorParams& dst, ReduceOp op,
+                         std::span<const size_t> axes, bool accumulate)
 {
+    assert(src.size > 0 && dst.size > 0);
+    assert(src.shape.size() == src.strides.size() && dst.shape.size() == src.shape.size());
+    assert(dst.isContiguous && dst.offset == 0);
+    if (static_cast<size_t>(src.dtype) >= DataTypeCount)
+    {
+        throw std::invalid_argument("Unsupported reduction dtype or mode.");
+    }
+    switch (op)
+    {
+        case ReduceOp::kSum:
+        case ReduceOp::kMax:
+            if (src.dtype != dst.dtype) throw std::invalid_argument("Sum/max reduction dtypes must match.");
+            break;
+        default:
+            throw std::invalid_argument("Unsupported reduction operation.");
+    }
+    const bool globalOverwrite = axes.empty() && !accumulate;
+    if (src.dtype == DataType::kFloat64 || !isDeviceBuffer(dst.data) ||
+        (src.shape.size() > 16 && !globalOverwrite))
+    {
+        recordExternalRead(src);
+        if (accumulate) recordExternalRead(dst);
+        synchronize();
+        defaultDevice.reduce(src, dst, op, axes, accumulate);
+        return;
+    }
+
+    // Preserve the specialized global schedules.
+    if (globalOverwrite)
+    {
+        executeGlobalReduction(src, dst, op);
+        return;
+    }
+    auto route = buildReductionRoute(src, dst, axes);
+    if (!accumulate)
+    {
+        if (op == ReduceOp::kSum)
+        {
+            const int32_t zero = 0;
+            fill(&zero, DataType::kInt32, dst);
+        }
+        else if (dst.dtype == DataType::kFloat32 || dst.dtype == DataType::kFloat16 || dst.dtype == DataType::kBFloat16)
+        {
+            const float identity = -std::numeric_limits<float>::infinity();
+            fill(&identity, DataType::kFloat32, dst);
+        }
+        else fillMin(dst);
+    }
     recordExternalRead(src);
+    // Overwrite is initially a fill followed by the same destination-reading kernels.
     recordExternalRead(dst);
     flushPendingFusedWork();
-    assert(dst.isContiguous == true);
-    if (src.dtype == DataType::kFloat64 || dst.dtype == DataType::kFloat64)
-    {
-        synchronize();
-        defaultDevice.reduceTo(src, dst);
-        return;
-    }
-
-    validateDataType(src.dtype);
-    if (src.dtype != dst.dtype)
-    {
-        throw std::invalid_argument("DeviceMetal::reduceTo() source and result data types must match.");
-    }
-
-    // Result buffer has to be allocated in advance and has to be a GPU memory.
-    if (!isDeviceBuffer(dst.data))
-        throw std::invalid_argument("DeviceMetal::reduceTo() result must have GPU memory.");
-
-    auto route = buildReductionRoute(src, dst);
-    if (!route.valid)
-    {
-        synchronize();
-        defaultDevice.reduceTo(src, dst);
-        return;
-    }
-
-    auto iDType = static_cast<size_t>(src.dtype);
-    auto bufSrc = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
-    auto bufDst = m_allocMap[dst.data];
-
-    if (route.useInnerVectorized)
-    {
-        auto pso = m_compFuncPSOReduceToContiguousInnerVec[iDType];
-        size_t vecCountPerOutput = route.reduceExtent / VECTOR_TYPE_COMPONENT_COUNT;
-        size_t srcVecOffset = src.offset / VECTOR_TYPE_COMPONENT_COUNT;
-        auto threads = selectReductionThreads(pso, vecCountPerOutput);
-
-        m_compEncoder->setComputePipelineState(pso);
-        m_compEncoder->setBuffer(bufSrc, 0, 0);
-        m_compEncoder->setBuffer(bufDst, 0, 1);
-        m_compEncoder->setBytes(&vecCountPerOutput, sizeof(vecCountPerOutput), 2);
-        m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
-        m_compEncoder->setBytes(&srcVecOffset, sizeof(srcVecOffset), 4);
-        m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
-
-        freeTemporaryBuffer(bufSrc);
-        commitBatchQueue();
-        return;
-    }
-
-    if (route.useInnerContiguous)
-    {
-        auto pso = m_compFuncPSOReduceToContiguousInner[iDType];
-        auto threads = selectReductionThreads(pso, route.reduceExtent);
-
-        m_compEncoder->setComputePipelineState(pso);
-        m_compEncoder->setBuffer(bufSrc, 0, 0);
-        m_compEncoder->setBuffer(bufDst, 0, 1);
-        m_compEncoder->setBytes(&route.reduceExtent, sizeof(route.reduceExtent), 2);
-        m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
-        m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
-        m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
-
-        freeTemporaryBuffer(bufSrc);
-        commitBatchQueue();
-        return;
-    }
-
-    if (route.useOuterContiguous)
-    {
-        auto pso = m_compFuncPSOReduceToContiguousOuter[iDType];
-        auto innerExtent = dst.size;
-
-        m_compEncoder->setComputePipelineState(pso);
-        m_compEncoder->setBuffer(bufSrc, 0, 0);
-        m_compEncoder->setBuffer(bufDst, 0, 1);
-        m_compEncoder->setBytes(&route.outerExtent, sizeof(route.outerExtent), 2);
-        m_compEncoder->setBytes(&innerExtent, sizeof(innerExtent), 3);
-        m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
-
-        NS::UInteger w = std::min(innerExtent, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
-        m_compEncoder->dispatchThreads({innerExtent, 1, 1}, {w, 1, 1});
-
-        freeTemporaryBuffer(bufSrc);
-        commitBatchQueue();
-        return;
-    }
-
-    auto pso = m_compFuncPSOReduceTo[iDType];
-    m_compEncoder->setComputePipelineState(pso);
-    m_compEncoder->setBuffer(bufSrc, 0, 0);
-    m_compEncoder->setBuffer(bufDst, 0, 1);
-    m_compEncoder->setBytes(route.plan.data(), route.plan.size() * sizeof(size_t), 2);
-
-    NS::UInteger w = std::min(dst.size, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
-    m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});
-
-    freeTemporaryBuffer(bufSrc);
-    commitBatchQueue();
+    executeShapeReduction(src, dst, route, op);
 }
 
-void DeviceMetal::maxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst)
+void DeviceMetal::argmax(const DeviceTensorParams& src, const DeviceTensorParams& dst, std::span<const size_t> axes)
 {
-    recordExternalRead(src);
-    recordExternalRead(dst);
-    flushPendingFusedWork();
-    assert(dst.isContiguous == true);
-    if (src.dtype == DataType::kFloat64 || dst.dtype == DataType::kFloat64)
+    assert(src.size > 0 && dst.size > 0);
+    assert(src.shape.size() == src.strides.size() && dst.shape.size() == src.shape.size());
+    assert(dst.isContiguous && dst.offset == 0);
+    if (static_cast<size_t>(src.dtype) >= DataTypeCount || dst.dtype != DataType::kInt32 || axes.size() > 1 ||
+        (!axes.empty() && axes[0] >= src.shape.size()))
     {
-        synchronize();
-        defaultDevice.maxTo(src, dst);
-        return;
+        throw std::invalid_argument("Argmax requires Int32 output with all axes or one normalized axis.");
     }
-
-    validateDataType(src.dtype);
-    if (src.dtype != dst.dtype)
+    if ((axes.empty() ? src.size : src.shape[axes[0]]) - 1 >
+        static_cast<size_t>(std::numeric_limits<int32_t>::max()))
     {
-        throw std::invalid_argument("DeviceMetal::maxTo() source and result data types must match.");
+        throw std::invalid_argument("Argmax indices must be representable in Int32.");
     }
-
-    // Result buffer has to be allocated in advance and has to be a GPU memory.
-    if (!isDeviceBuffer(dst.data))
-        throw std::invalid_argument("DeviceMetal::maxTo() result must have GPU memory.");
-
-    auto route = buildReductionRoute(src, dst);
-    if (!route.valid)
-    {
-        synchronize();
-        defaultDevice.maxTo(src, dst);
-        return;
-    }
-
-    auto iDType = static_cast<size_t>(src.dtype);
-    auto bufSrc = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
-    auto bufDst = m_allocMap[dst.data];
-
-    if (route.useInnerVectorized)
-    {
-        auto pso = m_compFuncPSOMaxToContiguousInnerVec[iDType];
-        size_t vecCountPerOutput = route.reduceExtent / VECTOR_TYPE_COMPONENT_COUNT;
-        size_t srcVecOffset = src.offset / VECTOR_TYPE_COMPONENT_COUNT;
-        auto threads = selectReductionThreads(pso, vecCountPerOutput);
-
-        m_compEncoder->setComputePipelineState(pso);
-        m_compEncoder->setBuffer(bufSrc, 0, 0);
-        m_compEncoder->setBuffer(bufDst, 0, 1);
-        m_compEncoder->setBytes(&vecCountPerOutput, sizeof(vecCountPerOutput), 2);
-        m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
-        m_compEncoder->setBytes(&srcVecOffset, sizeof(srcVecOffset), 4);
-        m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
-
-        freeTemporaryBuffer(bufSrc);
-        commitBatchQueue();
-        return;
-    }
-
-    if (route.useInnerContiguous)
-    {
-        auto pso = m_compFuncPSOMaxToContiguousInner[iDType];
-        auto threads = selectReductionThreads(pso, route.reduceExtent);
-
-        m_compEncoder->setComputePipelineState(pso);
-        m_compEncoder->setBuffer(bufSrc, 0, 0);
-        m_compEncoder->setBuffer(bufDst, 0, 1);
-        m_compEncoder->setBytes(&route.reduceExtent, sizeof(route.reduceExtent), 2);
-        m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
-        m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
-        m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
-
-        freeTemporaryBuffer(bufSrc);
-        commitBatchQueue();
-        return;
-    }
-
-    if (route.useOuterContiguous)
-    {
-        auto pso = m_compFuncPSOMaxToContiguousOuter[iDType];
-        auto innerExtent = dst.size;
-
-        m_compEncoder->setComputePipelineState(pso);
-        m_compEncoder->setBuffer(bufSrc, 0, 0);
-        m_compEncoder->setBuffer(bufDst, 0, 1);
-        m_compEncoder->setBytes(&route.outerExtent, sizeof(route.outerExtent), 2);
-        m_compEncoder->setBytes(&innerExtent, sizeof(innerExtent), 3);
-        m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
-
-        NS::UInteger w = std::min(innerExtent, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
-        m_compEncoder->dispatchThreads({innerExtent, 1, 1}, {w, 1, 1});
-
-        freeTemporaryBuffer(bufSrc);
-        commitBatchQueue();
-        return;
-    }
-
-    auto pso = m_compFuncPSOMaxTo[iDType];
-    m_compEncoder->setComputePipelineState(pso);
-    m_compEncoder->setBuffer(bufSrc, 0, 0);
-    m_compEncoder->setBuffer(bufDst, 0, 1);
-    m_compEncoder->setBytes(route.plan.data(), route.plan.size() * sizeof(size_t), 2);
-
-    NS::UInteger w = std::min(dst.size, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
-    m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});
-
-    freeTemporaryBuffer(bufSrc);
-    commitBatchQueue();
-}
-
-void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
-{
-    recordExternalRead(src);
-    flushPendingFusedWork();
-    assert(dst.isContiguous == true);
-    if (dst.dtype != DataType::kInt32)
-    {
-        throw std::invalid_argument("DeviceMetal::argmaxTo supports only int32 data type for its result.");
-    }
-
     if (src.dtype == DataType::kFloat64 || !isDeviceBuffer(dst.data))
     {
+        recordExternalRead(src);
         synchronize();
-        defaultDevice.argmaxTo(src, dst, dim);
+        defaultDevice.argmax(src, dst, axes);
+        return;
+    }
+    if (axes.empty()) executeGlobalArgmax(src, dst);
+    else
+    {
+        recordExternalRead(src);
+        flushPendingFusedWork();
+        encodeArgmaxTo(src, dst, axes[0], m_compFuncPSOArgmaxToLogical[static_cast<size_t>(src.dtype)]);
+    }
+}
+
+void DeviceMetal::argmaxMask(const DeviceTensorParams& a, const DeviceTensorParams& result, std::span<const size_t> axes)
+{
+    if (axes.size() > 1 || (!axes.empty() && axes[0] >= a.shape.size()))
+        throw std::invalid_argument("Argmax mask requires all axes or one normalized axis.");
+    if (!axes.empty())
+    {
+        const size_t dim = axes[0];
+        recordExternalRead(a);
+        flushPendingFusedWork();
+        assert(result.isContiguous == true);
+        if (result.dtype != DataType::kInt32)
+        {
+            throw std::invalid_argument("DeviceMetal::argmaxMask supports only int32 data type for its result.");
+        }
+
+        if (a.dtype == DataType::kFloat64 || !isDeviceBuffer(result.data))
+        {
+            synchronize();
+            defaultDevice.argmaxMask(a, result, axes);
+            return;
+        }
+
+        assert(dim < a.shape.size());
+        assert(a.shape.size() == a.strides.size());
+        assert(a.shape.size() == result.strides.size());
+        assert(result.size > 0);
+
+        auto reducedShape = a.shape;
+        reducedShape[dim] = 1;
+
+        Stride reducedStrides(reducedShape.size());
+        size_t reducedSize = 1;
+        for (int64_t i = static_cast<int64_t>(reducedShape.size()) - 1; i >= 0; --i)
+        {
+            reducedStrides[i] = reducedSize;
+            reducedSize *= reducedShape[i];
+        }
+
+        auto winningCoords = DeviceTensorParams
+        {
+            .data=allocate(reducedSize, DataType::kInt32),
+            .dtype=DataType::kInt32,
+            .isContiguous=true,
+            .offset=0,
+            .shape=reducedShape,
+            .size=reducedSize,
+            .strides=reducedStrides
+        };
+
+        argmax(a, winningCoords, axes);
+
+        int32_t zero = 0;
+        fill(&zero, DataType::kInt32, result);
+        recordExternalRead(winningCoords);
+        recordExternalRead(result);
+        flushPendingFusedWork();
+
+        auto shapeSize = a.shape.size();
+        auto bufWinningCoords = m_allocMap[winningCoords.data];
+        auto bufDst = m_allocMap[result.data];
+        auto bufShape = getReadOnlyMTLBuffer(a.shape.data(), shapeSize, sizeof(size_t));
+        auto bufStrides = getReadOnlyMTLBuffer(result.strides.data(), shapeSize, sizeof(size_t));
+
+        m_compEncoder->setComputePipelineState(m_compFuncPSOArgmaxIndicesToSet);
+        m_compEncoder->setBuffer(bufWinningCoords, 0, 0);
+        m_compEncoder->setBuffer(bufDst, 0, 1);
+        m_compEncoder->setBuffer(bufShape, 0, 2);
+        m_compEncoder->setBuffer(bufStrides, 0, 3);
+        m_compEncoder->setBytes(&shapeSize, sizeof(shapeSize), 4);
+        m_compEncoder->setBytes(&dim, sizeof(dim), 5);
+
+        NS::UInteger w = std::min(reducedSize,
+                                  static_cast<size_t>(m_compFuncPSOArgmaxIndicesToSet->maxTotalThreadsPerThreadgroup()));
+        m_compEncoder->dispatchThreads({reducedSize, 1, 1}, {w, 1, 1});
+
+        freeTemporaryBuffer(bufShape);
+        freeTemporaryBuffer(bufStrides);
+        commitBatchQueue();
+        deallocate(winningCoords.data);
+        return;
+    }
+    recordExternalRead(a);
+    flushPendingFusedWork();
+    assert(result.isContiguous == true);
+    if (result.dtype != DataType::kInt32)
+    {
+        throw std::invalid_argument("DeviceMetal::argmaxMask supports only int32 data type for its result.");
+    }
+
+    if (a.dtype == DataType::kFloat64 || !isDeviceBuffer(result.data))
+    {
+        synchronize();
+        defaultDevice.argmaxMask(a, result);
         return;
     }
 
-    assert(dim < src.shape.size());
-    assert(src.shape.size() == src.strides.size());
-    assert(dst.size > 0);
+    auto winningIndex = DeviceTensorParams
+    {
+        .data=allocate(1, DataType::kInt32),
+        .dtype=DataType::kInt32,
+        .isContiguous=true,
+        .offset=0,
+        .shape=Shape(a.shape.size(), 1),
+        .size=1,
+        .strides=Stride(a.shape.size(), 1)
+    };
 
+    argmax(a, winningIndex);
+
+    int32_t zero = 0;
+    fill(&zero, DataType::kInt32, result);
+    recordExternalRead(winningIndex);
+    recordExternalRead(result);
+    flushPendingFusedWork();
+
+    auto bufWinningIndex = m_allocMap[winningIndex.data];
+    auto bufResult = m_allocMap[result.data];
+
+    m_compEncoder->setComputePipelineState(m_compFuncPSOArgmaxIndicesSet);
+    m_compEncoder->setBuffer(bufWinningIndex, 0, 0);
+    m_compEncoder->setBuffer(bufResult, 0, 1);
+    m_compEncoder->setBytes(&result.size, sizeof(result.size), 2);
+    m_compEncoder->dispatchThreads({1, 1, 1}, {1, 1, 1});
+    commitBatchQueue();
+
+    deallocate(winningIndex.data);
+}
+
+void DeviceMetal::executeShapeReduction(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                                        const ReductionRoute& route, ReduceOp op)
+{
+    const bool isSum = op == ReduceOp::kSum;
     auto iDType = static_cast<size_t>(src.dtype);
-    auto compFuncPSO = m_compFuncPSOArgmaxTo[iDType];
+    auto bufSrc = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
+    auto bufDst = m_allocMap[dst.data];
+
+    if (route.useInnerVectorized)
+    {
+        auto pso = isSum ? m_compFuncPSOReduceToContiguousInnerVec[iDType] : m_compFuncPSOMaxToContiguousInnerVec[iDType];
+        size_t vecCountPerOutput = route.reduceExtent / VECTOR_TYPE_COMPONENT_COUNT;
+        size_t srcVecOffset = src.offset / VECTOR_TYPE_COMPONENT_COUNT;
+        auto threads = selectReductionThreads(pso, vecCountPerOutput);
+
+        m_compEncoder->setComputePipelineState(pso);
+        m_compEncoder->setBuffer(bufSrc, 0, 0);
+        m_compEncoder->setBuffer(bufDst, 0, 1);
+        m_compEncoder->setBytes(&vecCountPerOutput, sizeof(vecCountPerOutput), 2);
+        m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
+        m_compEncoder->setBytes(&srcVecOffset, sizeof(srcVecOffset), 4);
+        m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
+
+        freeTemporaryBuffer(bufSrc);
+        commitBatchQueue();
+        return;
+    }
+
+    if (route.useInnerContiguous)
+    {
+        auto pso = isSum ? m_compFuncPSOReduceToContiguousInner[iDType] : m_compFuncPSOMaxToContiguousInner[iDType];
+        auto threads = selectReductionThreads(pso, route.reduceExtent);
+
+        m_compEncoder->setComputePipelineState(pso);
+        m_compEncoder->setBuffer(bufSrc, 0, 0);
+        m_compEncoder->setBuffer(bufDst, 0, 1);
+        m_compEncoder->setBytes(&route.reduceExtent, sizeof(route.reduceExtent), 2);
+        m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
+        m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
+        m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
+
+        freeTemporaryBuffer(bufSrc);
+        commitBatchQueue();
+        return;
+    }
+
+    if (route.useOuterContiguous)
+    {
+        auto pso = isSum ? m_compFuncPSOReduceToContiguousOuter[iDType] : m_compFuncPSOMaxToContiguousOuter[iDType];
+        auto innerExtent = dst.size;
+
+        m_compEncoder->setComputePipelineState(pso);
+        m_compEncoder->setBuffer(bufSrc, 0, 0);
+        m_compEncoder->setBuffer(bufDst, 0, 1);
+        m_compEncoder->setBytes(&route.outerExtent, sizeof(route.outerExtent), 2);
+        m_compEncoder->setBytes(&innerExtent, sizeof(innerExtent), 3);
+        m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
+
+        NS::UInteger w = std::min(innerExtent, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
+        m_compEncoder->dispatchThreads({innerExtent, 1, 1}, {w, 1, 1});
+
+        freeTemporaryBuffer(bufSrc);
+        commitBatchQueue();
+        return;
+    }
+
+    auto pso = isSum ? m_compFuncPSOReduceTo[iDType] : m_compFuncPSOMaxTo[iDType];
+    m_compEncoder->setComputePipelineState(pso);
+    m_compEncoder->setBuffer(bufSrc, 0, 0);
+    m_compEncoder->setBuffer(bufDst, 0, 1);
+    m_compEncoder->setBytes(route.plan.data(), route.plan.size() * sizeof(size_t), 2);
+
+    NS::UInteger w = std::min(dst.size, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
+    m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});
+
+    freeTemporaryBuffer(bufSrc);
+    commitBatchQueue();
+}
+
+void DeviceMetal::encodeArgmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim,
+                                const MTL::ComputePipelineState* compFuncPSO)
+{
     auto bufSrc = getReadOnlyMTLBuffer(src.data, src.size, dataTypeSize(src.dtype));
     auto bufDst = m_allocMap[dst.data];
 
@@ -1089,82 +1061,6 @@ void DeviceMetal::argmaxTo(const DeviceTensorParams& src, const DeviceTensorPara
     freeTemporaryBuffer(bufSrc);
     releaseTensorLayout(boundLayout);
     commitBatchQueue();
-}
-
-void DeviceMetal::argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim)
-{
-    recordExternalRead(src);
-    flushPendingFusedWork();
-    assert(dst.isContiguous == true);
-    if (dst.dtype != DataType::kInt32)
-    {
-        throw std::invalid_argument("DeviceMetal::argmaxIndicesTo supports only int32 data type for its result.");
-    }
-
-    if (src.dtype == DataType::kFloat64 || !isDeviceBuffer(dst.data))
-    {
-        synchronize();
-        defaultDevice.argmaxIndicesTo(src, dst, dim);
-        return;
-    }
-
-    assert(dim < src.shape.size());
-    assert(src.shape.size() == src.strides.size());
-    assert(src.shape.size() == dst.strides.size());
-    assert(dst.size > 0);
-
-    auto reducedShape = src.shape;
-    reducedShape[dim] = 1;
-
-    Stride reducedStrides(reducedShape.size());
-    size_t reducedSize = 1;
-    for (int64_t i = static_cast<int64_t>(reducedShape.size()) - 1; i >= 0; --i)
-    {
-        reducedStrides[i] = reducedSize;
-        reducedSize *= reducedShape[i];
-    }
-
-    auto winningCoords = DeviceTensorParams
-    {
-        .data=allocate(reducedSize, DataType::kInt32),
-        .dtype=DataType::kInt32,
-        .isContiguous=true,
-        .offset=0,
-        .shape=reducedShape,
-        .size=reducedSize,
-        .strides=reducedStrides
-    };
-
-    argmaxTo(src, winningCoords, dim);
-
-    int32_t zero = 0;
-    fill(&zero, DataType::kInt32, dst);
-    recordExternalRead(winningCoords);
-    recordExternalRead(dst);
-    flushPendingFusedWork();
-
-    auto shapeSize = src.shape.size();
-    auto bufWinningCoords = m_allocMap[winningCoords.data];
-    auto bufDst = m_allocMap[dst.data];
-    auto bufShape = getReadOnlyMTLBuffer(src.shape.data(), shapeSize, sizeof(size_t));
-    auto bufStrides = getReadOnlyMTLBuffer(dst.strides.data(), shapeSize, sizeof(size_t));
-
-    m_compEncoder->setComputePipelineState(m_compFuncPSOArgmaxIndicesToSet);
-    m_compEncoder->setBuffer(bufWinningCoords, 0, 0);
-    m_compEncoder->setBuffer(bufDst, 0, 1);
-    m_compEncoder->setBuffer(bufShape, 0, 2);
-    m_compEncoder->setBuffer(bufStrides, 0, 3);
-    m_compEncoder->setBytes(&shapeSize, sizeof(shapeSize), 4);
-    m_compEncoder->setBytes(&dim, sizeof(dim), 5);
-
-    NS::UInteger w = std::min(reducedSize,
-                              static_cast<size_t>(m_compFuncPSOArgmaxIndicesToSet->maxTotalThreadsPerThreadgroup()));
-    m_compEncoder->dispatchThreads({reducedSize, 1, 1}, {w, 1, 1});
-
-    freeTemporaryBuffer(bufShape);
-    freeTemporaryBuffer(bufStrides);
-    commitBatchQueue();
-    deallocate(winningCoords.data);
 }
 
 void DeviceMetal::sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,
@@ -2141,130 +2037,48 @@ std::pair<size_t, size_t> DeviceMetal::fuseKernelCacheStats() const
 }
 
 DeviceMetal::ReductionRoute DeviceMetal::buildReductionRoute(const DeviceTensorParams& src,
-                                                             const DeviceTensorParams& dst) const
+                                                             const DeviceTensorParams& dst,
+                                                             std::span<const size_t> reductionAxes) const
 {
     ReductionRoute route;
-    constexpr size_t kMaxDims = 16;
-    const size_t srcRank = src.shape.size();
-    const size_t dstRank = dst.shape.size();
-
-    if (srcRank > kMaxDims || dstRank > kMaxDims)
+    route.reduceExtent = src.size / dst.size;
+    const size_t rank = src.shape.size();
+    Index axes;
+    for (size_t axis = 0; axis < rank; ++axis)
     {
+        if (reductionAxes.empty() ||
+            std::find(reductionAxes.begin(), reductionAxes.end(), axis) != reductionAxes.end()) axes.push_back(axis);
+    }
+    bool innerContiguous = src.isContiguous;
+    bool outerContiguous = src.isContiguous;
+    for (size_t i = 0; i < axes.size(); ++i)
+    {
+        innerContiguous &= axes[i] == rank - axes.size() + i;
+        outerContiguous &= axes[i] == i;
+    }
+    if (innerContiguous)
+    {
+        route.useInnerContiguous = true;
+        route.useInnerVectorized = src.offset % VECTOR_TYPE_COMPONENT_COUNT == 0 &&
+                                  route.reduceExtent % VECTOR_TYPE_COMPONENT_COUNT == 0;
+        return route;
+    }
+    if (outerContiguous)
+    {
+        route.useOuterContiguous = true;
+        route.outerExtent = route.reduceExtent;
         return route;
     }
 
-    std::vector<int64_t> dstToSrc(dstRank, -1);
-    std::vector<bool> srcReduced(srcRank, false);
-
-    int64_t j = static_cast<int64_t>(dstRank) - 1;
-    for (int64_t i = static_cast<int64_t>(srcRank) - 1; i >= 0; --i)
+    route.plan.reserve(4 + 2 * rank + 2 * axes.size());
+    route.plan = {rank, axes.size(), route.reduceExtent, src.offset};
+    route.plan.insert(route.plan.end(), dst.shape.begin(), dst.shape.end());
+    for (size_t axis = 0; axis < rank; ++axis)
     {
-        if (j >= 0 && src.shape[static_cast<size_t>(i)] == dst.shape[static_cast<size_t>(j)])
-        {
-            dstToSrc[static_cast<size_t>(j)] = i;
-            --j;
-            continue;
-        }
-
-        if (j >= 0 && dst.shape[static_cast<size_t>(j)] == 1)
-        {
-            srcReduced[static_cast<size_t>(i)] = true;
-            --j;
-            continue;
-        }
-
-        if (j >= 0)
-        {
-            return route;
-        }
-
-        srcReduced[static_cast<size_t>(i)] = true;
+        route.plan.push_back(std::find(axes.begin(), axes.end(), axis) != axes.end() ? 0 : src.strides[axis]);
     }
-
-    while (j >= 0)
-    {
-        if (dst.shape[static_cast<size_t>(j)] != 1)
-        {
-            return route;
-        }
-        --j;
-    }
-
-    route.valid = true;
-
-    bool innerContiguous = true;
-    bool outerContiguous = true;
-    bool seenReduced = false;
-    bool seenKept = false;
-    size_t reducedRank = 0;
-
-    for (size_t i = 0; i < srcRank; ++i)
-    {
-        if (srcReduced[i])
-        {
-            route.reduceExtent *= src.shape[i];
-            ++reducedRank;
-            seenReduced = true;
-            if (seenKept) outerContiguous = false;
-        }
-        else
-        {
-            seenKept = true;
-            if (seenReduced) innerContiguous = false;
-        }
-    }
-
-    if (src.isContiguous && dst.isContiguous)
-    {
-        if (innerContiguous)
-        {
-            route.useInnerContiguous = true;
-            route.useInnerVectorized = (src.offset % VECTOR_TYPE_COMPONENT_COUNT == 0) &&
-                                       (route.reduceExtent % VECTOR_TYPE_COMPONENT_COUNT == 0);
-            return route;
-        }
-
-        if (outerContiguous)
-        {
-            route.useOuterContiguous = true;
-            route.outerExtent = route.reduceExtent;
-            return route;
-        }
-    }
-
-    route.plan.reserve(4 + dstRank + dstRank + reducedRank + reducedRank);
-    route.plan.push_back(dstRank);
-    route.plan.push_back(reducedRank);
-    route.plan.push_back(route.reduceExtent);
-    route.plan.push_back(src.offset);
-
-    for (size_t i = 0; i < dstRank; ++i)
-    {
-        route.plan.push_back(dst.shape[i]);
-    }
-
-    for (size_t i = 0; i < dstRank; ++i)
-    {
-        auto srcDim = dstToSrc[i];
-        route.plan.push_back(srcDim >= 0 ? src.strides[static_cast<size_t>(srcDim)] : 0);
-    }
-
-    for (size_t i = 0; i < srcRank; ++i)
-    {
-        if (srcReduced[i])
-        {
-            route.plan.push_back(src.shape[i]);
-        }
-    }
-
-    for (size_t i = 0; i < srcRank; ++i)
-    {
-        if (srcReduced[i])
-        {
-            route.plan.push_back(src.strides[i]);
-        }
-    }
-
+    for (auto axis : axes) route.plan.push_back(src.shape[axis]);
+    for (auto axis : axes) route.plan.push_back(src.strides[axis]);
     return route;
 }
 

@@ -14,6 +14,7 @@
 // External includes
 // System includes
 #include <cstddef>
+#include <span>
 #include <string>
 
 #if defined(_MSC_VER)
@@ -26,6 +27,11 @@ namespace aix
 
 enum class DataType : size_t;
 struct DeviceTensorParams;
+
+enum class ReduceOp
+{
+    kSum, kMax
+};
 
 class Device
 {
@@ -49,7 +55,6 @@ public:
 
     virtual void fill(const void* scalar, DataType scalarDType, const DeviceTensorParams& result) = 0;
     virtual void fillMin(const DeviceTensorParams& result) = 0;
-    virtual void sum(const DeviceTensorParams& a, const DeviceTensorParams& result) = 0;
     virtual void sqrt(const DeviceTensorParams& a, const DeviceTensorParams& result) = 0;
     virtual void sin(const DeviceTensorParams& a, const DeviceTensorParams& result) = 0;
     virtual void cos(const DeviceTensorParams& a, const DeviceTensorParams& result) = 0;
@@ -57,19 +62,17 @@ public:
     virtual void log(const DeviceTensorParams& a, const DeviceTensorParams& result) = 0;
     virtual void exp(const DeviceTensorParams& a, const DeviceTensorParams& result) = 0;
     virtual void pow(const DeviceTensorParams& a, const DeviceTensorParams& exp, const DeviceTensorParams& result) = 0;
-    virtual void max(const DeviceTensorParams& a, const DeviceTensorParams& result) = 0;
-    virtual void argmax(const DeviceTensorParams& a, const DeviceTensorParams& result) = 0;
-    virtual void argmaxIndices(const DeviceTensorParams& a, const DeviceTensorParams& result) = 0;
     virtual void matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result) = 0;
     virtual void transpose(const DeviceTensorParams& a, const DeviceTensorParams& result, size_t dim0, size_t dim1) = 0;
-
     virtual void copy(const void* src, DataType srcDType, void* dst, DataType dstDType, size_t size) = 0;
     virtual void copyImmediate(const void* src, DataType srcDType, void* dst, DataType dstDType, size_t size) = 0;
     virtual void contiguous(const DeviceTensorParams& src, const DeviceTensorParams& dst) = 0;
-    virtual void reduceTo(const DeviceTensorParams& src, const DeviceTensorParams& dst) = 0;
-    virtual void maxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst) = 0;
-    virtual void argmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim) = 0;
-    virtual void argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim) = 0;
+    virtual void reduce(const DeviceTensorParams& src, const DeviceTensorParams& dst, ReduceOp op,
+                        std::span<const size_t> axes = {}, bool accumulate = false) = 0;
+    virtual void argmax(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                        std::span<const size_t> axes = {}) = 0;
+    virtual void argmaxMask(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                            std::span<const size_t> axes = {}) = 0;
     virtual void sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,
                           size_t dim, size_t start, size_t end, size_t step) = 0;
     virtual void tril(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal) = 0;

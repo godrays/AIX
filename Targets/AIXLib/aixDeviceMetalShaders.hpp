@@ -143,90 +143,6 @@ struct PowOp
     T operator()(T a, T b) const { return static_cast<T>(metal::pow(static_cast<float>(a), static_cast<float>(b))); }
 };
 
-METAL_FUNC size_t translateLogicalIndex(size_t index,
-                                        const device size_t* shape,
-                                        const device size_t* newShape,
-                                        size_t shapeSize,
-                                        size_t newShapeSize)
-{
-    size_t originalIndex = 0;
-    size_t targetStride = 1;
-    size_t originalStride = 1;
-
-    for (int64_t i = static_cast<int64_t>(newShapeSize) - 1, j = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
-    {
-        size_t dimIndex = (index / targetStride) % newShape[i];
-        if (j >= 0 && shape[j] == newShape[i])
-        {
-            originalIndex += dimIndex * originalStride;
-            originalStride *= shape[--j + 1];
-        }
-        else if (j >= 0 && shape[j] == 1)
-        {
-            originalStride *= shape[--j + 1];
-        }
-        targetStride *= newShape[i];
-    }
-
-    return originalIndex;
-}
-
-METAL_FUNC size_t translateLogicalIndex(size_t index,
-                                        const device size_t* shape,
-                                        const constant size_t* newShape,
-                                        size_t shapeSize,
-                                        size_t newShapeSize)
-{
-    size_t originalIndex = 0;
-    size_t targetStride = 1;
-    size_t originalStride = 1;
-
-    for (int64_t i = static_cast<int64_t>(newShapeSize) - 1, j = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
-    {
-        size_t dimIndex = (index / targetStride) % newShape[i];
-        if (j >= 0 && shape[j] == newShape[i])
-        {
-            originalIndex += dimIndex * originalStride;
-            originalStride *= shape[--j + 1];
-        }
-        else if (j >= 0 && shape[j] == 1)
-        {
-            originalStride *= shape[--j + 1];
-        }
-        targetStride *= newShape[i];
-    }
-
-    return originalIndex;
-}
-
-METAL_FUNC size_t translateLogicalIndex(size_t index,
-                                        const constant size_t* shape,
-                                        const device size_t* newShape,
-                                        size_t shapeSize,
-                                        size_t newShapeSize)
-{
-    size_t originalIndex = 0;
-    size_t targetStride = 1;
-    size_t originalStride = 1;
-
-    for (int64_t i = static_cast<int64_t>(newShapeSize) - 1, j = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
-    {
-        size_t dimIndex = (index / targetStride) % newShape[i];
-        if (j >= 0 && shape[j] == newShape[i])
-        {
-            originalIndex += dimIndex * originalStride;
-            originalStride *= shape[--j + 1];
-        }
-        else if (j >= 0 && shape[j] == 1)
-        {
-            originalStride *= shape[--j + 1];
-        }
-        targetStride *= newShape[i];
-    }
-
-    return originalIndex;
-}
-
 METAL_FUNC size_t reducedSourceBaseOffset(size_t reducedIndex,
                                           const device size_t* shape,
                                           const device size_t* strides,
@@ -267,37 +183,6 @@ METAL_FUNC size_t reducedSourceBaseOffset(size_t reducedIndex,
     return srcBaseOffset;
 }
 
-METAL_FUNC size_t reducedLogicalBaseIndex(size_t reducedIndex,
-                                          const constant size_t* shape,
-                                          size_t shapeSize,
-                                          size_t dim)
-{
-    size_t logicalIndex = 0;
-    size_t logicalStride = 1;
-    size_t index = reducedIndex;
-
-    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i >= 0; --i)
-    {
-        size_t dimSize = static_cast<size_t>(i) == dim ? 1 : shape[i];
-        size_t coord = index % dimSize;
-        index /= dimSize;
-        logicalIndex += coord * logicalStride;
-        logicalStride *= shape[i];
-    }
-
-    return logicalIndex;
-}
-
-METAL_FUNC size_t logicalStrideForDimension(const constant size_t* shape, size_t shapeSize, size_t dim)
-{
-    size_t logicalStride = 1;
-    for (int64_t i = static_cast<int64_t>(shapeSize) - 1; i > static_cast<int64_t>(dim); --i)
-    {
-        logicalStride *= shape[i];
-    }
-    return logicalStride;
-}
-
 #define AIX_METAL_MAX_TENSOR_DIMS 16
 
 template <typename T>
@@ -336,10 +221,11 @@ struct SumAccumType<uchar>
     using type = int;
 };
 
-template <typename AccumT>
-METAL_FUNC void threadgroupReduceSum(threadgroup AccumT* sharedData,
-                                     uint li,
-                                     uint threadsPerThreadgroup)
+template <typename AccumT, typename ReduceOp>
+METAL_FUNC void threadgroupReduce(threadgroup AccumT* sharedData,
+                                  uint li,
+                                  uint threadsPerThreadgroup,
+                                  ReduceOp reduceOp)
 {
     size_t size = static_cast<size_t>(threadsPerThreadgroup);
     while (size > 1)
@@ -347,7 +233,7 @@ METAL_FUNC void threadgroupReduceSum(threadgroup AccumT* sharedData,
         const uint stride = static_cast<uint>(size / 2);
         if ((size & 1) != 0 && li == 0)
         {
-            sharedData[0] += sharedData[size - 1];
+            sharedData[0] = reduceOp(sharedData[0], sharedData[size - 1]);
         }
         size >>= 1;
 
@@ -355,7 +241,7 @@ METAL_FUNC void threadgroupReduceSum(threadgroup AccumT* sharedData,
 
         if (li < stride)
         {
-            sharedData[li] += sharedData[li + stride];
+            sharedData[li] = reduceOp(sharedData[li], sharedData[li + stride]);
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1685,7 +1571,12 @@ struct ReductionSumIdentity
 template<typename T>
 struct ReductionMaxIdentity
 {
-    T operator()() const { return numeric_limits<T>::lowest(); }
+    T operator()() const
+    {
+        if constexpr (is_same<T, float>::value || is_same<T, half>::value || is_same<T, bfloat>::value)
+            return static_cast<T>(-INFINITY);
+        else return numeric_limits<T>::lowest();
+    }
 };
 
 
@@ -1745,36 +1636,17 @@ struct ReductionSumOp
 template<typename T>
 struct ReductionMaxOp
 {
-    T operator()(T a, T b) const { return a > b ? a : b; }
-};
-
-
-template <typename T>
-METAL_FUNC void threadgroupReduceMax(threadgroup T* sharedData,
-                                     uint li,
-                                     uint threadsPerThreadgroup)
-{
-    ReductionMaxOp<T> reduceOp;
-    size_t size = static_cast<size_t>(threadsPerThreadgroup);
-    while (size > 1)
+    T operator()(T a, T b) const
     {
-        const uint stride = static_cast<uint>(size / 2);
-        if ((size & 1) != 0 && li == 0)
+        if constexpr (is_same<T, float>::value || is_same<T, half>::value || is_same<T, bfloat>::value)
         {
-            sharedData[0] = reduceOp(sharedData[0], sharedData[size - 1]);
+            if (a != a) return a;
+            if (b != b) return b;
+            if (a == b && a == T(0)) return signbit(static_cast<float>(a)) ? b : a;
         }
-        size >>= 1;
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        if (li < stride)
-        {
-            sharedData[li] = reduceOp(sharedData[li], sharedData[li + stride]);
-        }
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        return a > b ? a : b;
     }
-}
+};
 
 
 // Sum - Naive Implementation
@@ -1889,33 +1761,40 @@ template<typename T>
 
 
 template<typename T>
-[[kernel]] void argmaxTo(const device T* src            [[buffer(0)]],
-                         device int* dst                [[buffer(1)]],
-                         const constant size_t* layout  [[buffer(2)]],
-                         constant size_t& dim           [[buffer(3)]],
-                         uint dstIndex [[thread_position_in_grid]])
+METAL_FUNC void axisArgmax(const device T* src,
+                           device int* dst,
+                           const constant size_t* layout,
+                           constant size_t& dim,
+                           uint dstIndex)
 {
     const constant size_t* shape = layoutShape(layout);
     const constant size_t* strides = layoutStrides(layout);
     size_t shapeSize = layoutRank(layout);
     size_t srcBaseOffset = layoutOffset(layout) + reducedSourceBaseOffset(dstIndex, shape, strides, shapeSize, dim);
-    size_t baseLogicalIndex = reducedLogicalBaseIndex(dstIndex, shape, shapeSize, dim);
-    size_t logicalStride = logicalStrideForDimension(shape, shapeSize, dim);
 
     T bestValue = src[srcBaseOffset];
-    int bestIndex = static_cast<int>((baseLogicalIndex / strides[dim]) % shape[dim]);
+    int bestIndex = 0;
     for (size_t i = 1; i < shape[dim]; ++i)
     {
         T candidateValue = src[srcBaseOffset + i * strides[dim]];
         if (argmaxIsBetter(candidateValue, static_cast<int>(i), bestValue, bestIndex))
         {
             bestValue = candidateValue;
-            size_t candidateLogicalIndex = baseLogicalIndex + i * logicalStride;
-            bestIndex = static_cast<int>((candidateLogicalIndex / strides[dim]) % shape[dim]);
+            bestIndex = static_cast<int>(i);
         }
     }
 
     dst[dstIndex] = bestIndex;
+}
+
+template<typename T>
+[[kernel]] void argmaxToLogical(const device T* src            [[buffer(0)]],
+                                device int* dst                [[buffer(1)]],
+                                const constant size_t* layout  [[buffer(2)]],
+                                constant size_t& dim           [[buffer(3)]],
+                                uint dstIndex [[thread_position_in_grid]])
+{
+    axisArgmax<T>(src, dst, layout, dim, dstIndex);
 }
 
 
@@ -1953,15 +1832,6 @@ template<typename T>
 }
 
 
-// TranslationIndex - Naive Implementation
-// -----------------------------------------------------------------
-size_t translationIndex(size_t index, device const size_t* shape, device const size_t* newShape,
-                        size_t shapeSize, size_t newShapeSize)
-{
-    return translateLogicalIndex(index, shape, newShape, shapeSize, newShapeSize);
-}
-
-
 // Contiguous - Naive Implementation
 // -----------------------------------------------------------------
 template<typename T, typename T2>
@@ -1977,107 +1847,146 @@ template<typename T, typename T2>
 // ReduceTo - Gather Implementation
 // -----------------------------------------------------------------
 template<typename T>
-[[kernel]] void reduceToContiguousInner(const device T* src      [[buffer(0)]],
-                                        device       T* dst      [[buffer(1)]],
-                                        constant size_t& reduceExtent [[buffer(2)]],
-                                        constant size_t& dstSize      [[buffer(3)]],
-                                        constant size_t& srcOffset    [[buffer(4)]],
-                                        uint li  [[thread_position_in_threadgroup]],
-                                        uint tgi [[threadgroup_position_in_grid]],
-                                        uint threadsPerThreadgroup [[threads_per_threadgroup]])
+struct ShapeSumPolicy
+{
+    using AccumT = typename SumAccumType<T>::type;
+    using ReduceOp = ReductionSumOp<AccumT>;
+
+    static AccumT identity() { return ReductionSumIdentity<AccumT>{}(); }
+
+    template<typename TVec>
+    static AccumT consumeVector(AccumT local, TVec v)
+    {
+        // Keep the four-component contribution grouped before adding it to local.
+        local += static_cast<AccumT>(v[0]) + static_cast<AccumT>(v[1])
+              +  static_cast<AccumT>(v[2]) + static_cast<AccumT>(v[3]);
+        return local;
+    }
+};
+
+template<typename T>
+struct ShapeMaxPolicy
+{
+    using AccumT = T;
+    using ReduceOp = ReductionMaxOp<T>;
+
+    static AccumT identity() { return ReductionMaxIdentity<T>{}(); }
+
+    template<typename TVec>
+    static AccumT consumeVector(AccumT local, TVec v)
+    {
+        ReduceOp reduceOp;
+        local = reduceOp(local, v[0]);
+        local = reduceOp(local, v[1]);
+        local = reduceOp(local, v[2]);
+        local = reduceOp(local, v[3]);
+        return local;
+    }
+};
+
+template<typename T, typename Policy>
+METAL_FUNC void shapeReduceInner(const device T* src,
+                                 device T* dst,
+                                 threadgroup typename Policy::AccumT* sharedData,
+                                 constant size_t& reduceExtent,
+                                 constant size_t& dstSize,
+                                 constant size_t& srcOffset,
+                                 uint li,
+                                 uint tgi,
+                                 uint threadsPerThreadgroup)
 {
     if (tgi >= dstSize)
     {
         return;
     }
 
-    using AccumT = typename SumAccumType<T>::type;
-    const size_t MAX_THREADS = 1024;
-    threadgroup AccumT sharedData[MAX_THREADS];
+    using AccumT = typename Policy::AccumT;
+    typename Policy::ReduceOp reduceOp;
     const size_t baseOffset = srcOffset + static_cast<size_t>(tgi) * reduceExtent;
 
-    AccumT local = static_cast<AccumT>(0);
+    AccumT local = Policy::identity();
     for (size_t i = static_cast<size_t>(li); i < reduceExtent; i += static_cast<size_t>(threadsPerThreadgroup))
     {
-        local += static_cast<AccumT>(src[baseOffset + i]);
+        local = reduceOp(local, static_cast<AccumT>(src[baseOffset + i]));
     }
 
     sharedData[li] = local;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    threadgroupReduceSum(sharedData, li, threadsPerThreadgroup);
+    threadgroupReduce(sharedData, li, threadsPerThreadgroup, reduceOp);
 
     if (li == 0)
     {
-        dst[tgi] = static_cast<T>(static_cast<AccumT>(dst[tgi]) + sharedData[0]);
+        dst[tgi] = static_cast<T>(reduceOp(static_cast<AccumT>(dst[tgi]), sharedData[0]));
     }
 }
 
-template<typename T, typename TVec>
-[[kernel]] void reduceToContiguousInnerVec(const device TVec* src [[buffer(0)]],
-                                           device       T* dst    [[buffer(1)]],
-                                           constant size_t& vecCountPerOutput [[buffer(2)]],
-                                           constant size_t& dstSize           [[buffer(3)]],
-                                           constant size_t& srcVecOffset      [[buffer(4)]],
-                                           uint li  [[thread_position_in_threadgroup]],
-                                           uint tgi [[threadgroup_position_in_grid]],
-                                           uint threadsPerThreadgroup [[threads_per_threadgroup]])
+template<typename T, typename TVec, typename Policy>
+METAL_FUNC void shapeReduceInnerVec(const device TVec* src,
+                                    device T* dst,
+                                    threadgroup typename Policy::AccumT* sharedData,
+                                    constant size_t& vecCountPerOutput,
+                                    constant size_t& dstSize,
+                                    constant size_t& srcVecOffset,
+                                    uint li,
+                                    uint tgi,
+                                    uint threadsPerThreadgroup)
 {
     if (tgi >= dstSize)
     {
         return;
     }
 
-    using AccumT = typename SumAccumType<T>::type;
-    const size_t MAX_THREADS = 1024;
-    threadgroup AccumT sharedData[MAX_THREADS];
+    using AccumT = typename Policy::AccumT;
+    typename Policy::ReduceOp reduceOp;
     const size_t baseOffset = srcVecOffset + static_cast<size_t>(tgi) * vecCountPerOutput;
 
-    AccumT local = static_cast<AccumT>(0);
+    AccumT local = Policy::identity();
     for (size_t i = static_cast<size_t>(li); i < vecCountPerOutput; i += static_cast<size_t>(threadsPerThreadgroup))
     {
         TVec v = src[baseOffset + i];
-        local += static_cast<AccumT>(v[0]) + static_cast<AccumT>(v[1])
-              +  static_cast<AccumT>(v[2]) + static_cast<AccumT>(v[3]);
+        local = Policy::consumeVector(local, v);
     }
 
     sharedData[li] = local;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    threadgroupReduceSum(sharedData, li, threadsPerThreadgroup);
+    threadgroupReduce(sharedData, li, threadsPerThreadgroup, reduceOp);
 
     if (li == 0)
     {
-        dst[tgi] = static_cast<T>(static_cast<AccumT>(dst[tgi]) + sharedData[0]);
+        dst[tgi] = static_cast<T>(reduceOp(static_cast<AccumT>(dst[tgi]), sharedData[0]));
     }
 }
 
-template<typename T>
-[[kernel]] void reduceToContiguousOuter(const device T* src      [[buffer(0)]],
-                                        device       T* dst      [[buffer(1)]],
-                                        constant size_t& outerExtent [[buffer(2)]],
-                                        constant size_t& innerExtent [[buffer(3)]],
-                                        constant size_t& srcOffset   [[buffer(4)]],
-                                        uint dstIndex [[thread_position_in_grid]])
+template<typename T, typename Policy>
+METAL_FUNC void shapeReduceOuter(const device T* src,
+                                 device T* dst,
+                                 constant size_t& outerExtent,
+                                 constant size_t& innerExtent,
+                                 constant size_t& srcOffset,
+                                 uint dstIndex)
 {
-    using AccumT = typename SumAccumType<T>::type;
+    using AccumT = typename Policy::AccumT;
+    typename Policy::ReduceOp reduceOp;
 
     AccumT acc = static_cast<AccumT>(dst[dstIndex]);
     size_t srcIndex = srcOffset + static_cast<size_t>(dstIndex);
     for (size_t outer = 0; outer < outerExtent; ++outer)
     {
-        acc += static_cast<AccumT>(src[srcIndex]);
+        acc = reduceOp(acc, static_cast<AccumT>(src[srcIndex]));
         srcIndex += innerExtent;
     }
 
     dst[dstIndex] = static_cast<T>(acc);
 }
 
-template<typename T>
-[[kernel]] void reduceTo(const device T* src      [[buffer(0)]],
-                         device       T* dst      [[buffer(1)]],
-                         const constant size_t* plan [[buffer(2)]],
-                         uint dstIndex [[thread_position_in_grid]])
+template<typename T, typename Policy>
+METAL_FUNC void shapeReduceStrided(const device T* src,
+                                   device T* dst,
+                                   const constant size_t* plan,
+                                   uint dstIndex)
 {
-    using AccumT = typename SumAccumType<T>::type;
+    using AccumT = typename Policy::AccumT;
+    typename Policy::ReduceOp reduceOp;
 
     const size_t dstRank = plan[0];
     const size_t reducedRank = plan[1];
@@ -2105,7 +2014,7 @@ template<typename T>
 
     if (reducedRank == 0)
     {
-        dst[dstIndex] = static_cast<T>(acc + static_cast<AccumT>(src[baseOffset]));
+        dst[dstIndex] = static_cast<T>(reduceOp(acc, static_cast<AccumT>(src[baseOffset])));
         return;
     }
 
@@ -2118,7 +2027,7 @@ template<typename T>
     size_t srcIndex = baseOffset;
     for (size_t r = 0; r < reduceElementCount; ++r)
     {
-        acc += static_cast<AccumT>(src[srcIndex]);
+        acc = reduceOp(acc, static_cast<AccumT>(src[srcIndex]));
         if (r + 1 == reduceElementCount)
         {
             break;
@@ -2142,6 +2051,61 @@ template<typename T>
 }
 
 
+template<typename T>
+[[kernel]] void reduceToContiguousInner(const device T* src      [[buffer(0)]],
+                                        device       T* dst      [[buffer(1)]],
+                                        constant size_t& reduceExtent [[buffer(2)]],
+                                        constant size_t& dstSize      [[buffer(3)]],
+                                        constant size_t& srcOffset    [[buffer(4)]],
+                                        uint li  [[thread_position_in_threadgroup]],
+                                        uint tgi [[threadgroup_position_in_grid]],
+                                        uint threadsPerThreadgroup [[threads_per_threadgroup]])
+{
+    using AccumT = typename SumAccumType<T>::type;
+    const size_t MAX_THREADS = 1024;
+    threadgroup AccumT sharedData[MAX_THREADS];
+    shapeReduceInner<T, ShapeSumPolicy<T>>(src, dst, sharedData, reduceExtent, dstSize, srcOffset,
+                                          li, tgi, threadsPerThreadgroup);
+}
+
+template<typename T, typename TVec>
+[[kernel]] void reduceToContiguousInnerVec(const device TVec* src [[buffer(0)]],
+                                           device       T* dst    [[buffer(1)]],
+                                           constant size_t& vecCountPerOutput [[buffer(2)]],
+                                           constant size_t& dstSize           [[buffer(3)]],
+                                           constant size_t& srcVecOffset      [[buffer(4)]],
+                                           uint li  [[thread_position_in_threadgroup]],
+                                           uint tgi [[threadgroup_position_in_grid]],
+                                           uint threadsPerThreadgroup [[threads_per_threadgroup]])
+{
+    using AccumT = typename SumAccumType<T>::type;
+    const size_t MAX_THREADS = 1024;
+    threadgroup AccumT sharedData[MAX_THREADS];
+    shapeReduceInnerVec<T, TVec, ShapeSumPolicy<T>>(src, dst, sharedData, vecCountPerOutput, dstSize, srcVecOffset,
+                                                  li, tgi, threadsPerThreadgroup);
+}
+
+template<typename T>
+[[kernel]] void reduceToContiguousOuter(const device T* src      [[buffer(0)]],
+                                        device       T* dst      [[buffer(1)]],
+                                        constant size_t& outerExtent [[buffer(2)]],
+                                        constant size_t& innerExtent [[buffer(3)]],
+                                        constant size_t& srcOffset   [[buffer(4)]],
+                                        uint dstIndex [[thread_position_in_grid]])
+{
+    shapeReduceOuter<T, ShapeSumPolicy<T>>(src, dst, outerExtent, innerExtent, srcOffset, dstIndex);
+}
+
+template<typename T>
+[[kernel]] void reduceTo(const device T* src      [[buffer(0)]],
+                         device       T* dst      [[buffer(1)]],
+                         const constant size_t* plan [[buffer(2)]],
+                         uint dstIndex [[thread_position_in_grid]])
+{
+    shapeReduceStrided<T, ShapeSumPolicy<T>>(src, dst, plan, dstIndex);
+}
+
+
 // MaxTo - Gather Implementation
 // -----------------------------------------------------------------
 template<typename T>
@@ -2154,30 +2118,10 @@ template<typename T>
                                      uint tgi [[threadgroup_position_in_grid]],
                                      uint threadsPerThreadgroup [[threads_per_threadgroup]])
 {
-    if (tgi >= dstSize)
-    {
-        return;
-    }
-
     const size_t MAX_THREADS = 1024;
     threadgroup T sharedData[MAX_THREADS];
-    ReductionMaxOp<T> reduceOp;
-    const size_t baseOffset = srcOffset + static_cast<size_t>(tgi) * reduceExtent;
-
-    T local = ReductionMaxIdentity<T>{}();
-    for (size_t i = static_cast<size_t>(li); i < reduceExtent; i += static_cast<size_t>(threadsPerThreadgroup))
-    {
-        local = reduceOp(local, src[baseOffset + i]);
-    }
-
-    sharedData[li] = local;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    threadgroupReduceMax(sharedData, li, threadsPerThreadgroup);
-
-    if (li == 0)
-    {
-        dst[tgi] = reduceOp(dst[tgi], sharedData[0]);
-    }
+    shapeReduceInner<T, ShapeMaxPolicy<T>>(src, dst, sharedData, reduceExtent, dstSize, srcOffset,
+                                          li, tgi, threadsPerThreadgroup);
 }
 
 template<typename T, typename TVec>
@@ -2190,34 +2134,10 @@ template<typename T, typename TVec>
                                         uint tgi [[threadgroup_position_in_grid]],
                                         uint threadsPerThreadgroup [[threads_per_threadgroup]])
 {
-    if (tgi >= dstSize)
-    {
-        return;
-    }
-
     const size_t MAX_THREADS = 1024;
     threadgroup T sharedData[MAX_THREADS];
-    ReductionMaxOp<T> reduceOp;
-    const size_t baseOffset = srcVecOffset + static_cast<size_t>(tgi) * vecCountPerOutput;
-
-    T local = ReductionMaxIdentity<T>{}();
-    for (size_t i = static_cast<size_t>(li); i < vecCountPerOutput; i += static_cast<size_t>(threadsPerThreadgroup))
-    {
-        TVec v = src[baseOffset + i];
-        local = reduceOp(local, v[0]);
-        local = reduceOp(local, v[1]);
-        local = reduceOp(local, v[2]);
-        local = reduceOp(local, v[3]);
-    }
-
-    sharedData[li] = local;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    threadgroupReduceMax(sharedData, li, threadsPerThreadgroup);
-
-    if (li == 0)
-    {
-        dst[tgi] = reduceOp(dst[tgi], sharedData[0]);
-    }
+    shapeReduceInnerVec<T, TVec, ShapeMaxPolicy<T>>(src, dst, sharedData, vecCountPerOutput, dstSize, srcVecOffset,
+                                                  li, tgi, threadsPerThreadgroup);
 }
 
 template<typename T>
@@ -2228,17 +2148,7 @@ template<typename T>
                                      constant size_t& srcOffset   [[buffer(4)]],
                                      uint dstIndex [[thread_position_in_grid]])
 {
-    ReductionMaxOp<T> reduceOp;
-
-    T acc = dst[dstIndex];
-    size_t srcIndex = srcOffset + static_cast<size_t>(dstIndex);
-    for (size_t outer = 0; outer < outerExtent; ++outer)
-    {
-        acc = reduceOp(acc, src[srcIndex]);
-        srcIndex += innerExtent;
-    }
-
-    dst[dstIndex] = acc;
+    shapeReduceOuter<T, ShapeMaxPolicy<T>>(src, dst, outerExtent, innerExtent, srcOffset, dstIndex);
 }
 
 template<typename T>
@@ -2247,68 +2157,7 @@ template<typename T>
                       const constant size_t* plan [[buffer(2)]],
                       uint dstIndex [[thread_position_in_grid]])
 {
-    ReductionMaxOp<T> reduceOp;
-
-    const size_t dstRank = plan[0];
-    const size_t reducedRank = plan[1];
-    const size_t reduceElementCount = plan[2];
-    size_t baseOffset = plan[3];
-    const constant size_t* dstShape = plan + 4;
-    const constant size_t* keptStrides = dstShape + dstRank;
-    const constant size_t* reducedShapes = keptStrides + dstRank;
-    const constant size_t* reducedStrides = reducedShapes + reducedRank;
-
-    size_t logicalIndex = static_cast<size_t>(dstIndex);
-    for (int64_t i = static_cast<int64_t>(dstRank) - 1; i >= 0; --i)
-    {
-        size_t coord = logicalIndex % dstShape[static_cast<size_t>(i)];
-        logicalIndex /= dstShape[static_cast<size_t>(i)];
-        baseOffset += coord * keptStrides[static_cast<size_t>(i)];
-    }
-
-    T acc = dst[dstIndex];
-    if (reduceElementCount == 0)
-    {
-        dst[dstIndex] = acc;
-        return;
-    }
-
-    if (reducedRank == 0)
-    {
-        dst[dstIndex] = reduceOp(acc, src[baseOffset]);
-        return;
-    }
-
-    thread size_t reducedCoords[AIX_METAL_MAX_TENSOR_DIMS];
-    for (size_t i = 0; i < reducedRank; ++i)
-    {
-        reducedCoords[i] = 0;
-    }
-
-    size_t srcIndex = baseOffset;
-    for (size_t r = 0; r < reduceElementCount; ++r)
-    {
-        acc = reduceOp(acc, src[srcIndex]);
-        if (r + 1 == reduceElementCount)
-        {
-            break;
-        }
-
-        for (int64_t k = static_cast<int64_t>(reducedRank) - 1; k >= 0; --k)
-        {
-            const size_t kk = static_cast<size_t>(k);
-            srcIndex += reducedStrides[kk];
-            if (++reducedCoords[kk] < reducedShapes[kk])
-            {
-                break;
-            }
-
-            srcIndex -= reducedShapes[kk] * reducedStrides[kk];
-            reducedCoords[kk] = 0;
-        }
-    }
-
-    dst[dstIndex] = acc;
+    shapeReduceStrided<T, ShapeMaxPolicy<T>>(src, dst, plan, dstIndex);
 }
 
 
@@ -2923,13 +2772,13 @@ SpecializeMax("ui8",  uchar);
                                  uint tgi [[threadgroup_position_in_grid]],   \
                                  uint threadsPerThreadgroup [[threads_per_threadgroup]])
 
-#define SpecializeArgmaxTo(tname, type)  \
-    template [[ host_name("argmaxTo_" tname) ]]  \
-    [[kernel]] void argmaxTo(const device type* src           [[buffer(0)]], \
-                             device int* dst                  [[buffer(1)]], \
-                             const constant size_t* layout    [[buffer(2)]], \
-                             constant size_t& dim             [[buffer(3)]], \
-                             uint dstIndex [[thread_position_in_grid]])
+#define SpecializeArgmaxToLogical(tname, type)  \
+    template [[ host_name("argmaxToLogical_" tname) ]]  \
+    [[kernel]] void argmaxToLogical(const device type* src           [[buffer(0)]], \
+                                    device int* dst                  [[buffer(1)]], \
+                                    const constant size_t* layout    [[buffer(2)]], \
+                                    constant size_t& dim             [[buffer(3)]], \
+                                    uint dstIndex [[thread_position_in_grid]])
 
 SpecializeArgmaxInit("f32",  float);
 SpecializeArgmaxInit("f16",  half);
@@ -2949,14 +2798,14 @@ SpecializeArgmaxReduce("i16",  short);
 SpecializeArgmaxReduce("i8",   char);
 SpecializeArgmaxReduce("ui8",  uchar);
 
-SpecializeArgmaxTo("f32",  float);
-SpecializeArgmaxTo("f16",  half);
-SpecializeArgmaxTo("bf16", bfloat);
-SpecializeArgmaxTo("i64",  long);
-SpecializeArgmaxTo("i32",  int);
-SpecializeArgmaxTo("i16",  short);
-SpecializeArgmaxTo("i8",   char);
-SpecializeArgmaxTo("ui8",  uchar);
+SpecializeArgmaxToLogical("f32",  float);
+SpecializeArgmaxToLogical("f16",  half);
+SpecializeArgmaxToLogical("bf16", bfloat);
+SpecializeArgmaxToLogical("i64",  long);
+SpecializeArgmaxToLogical("i32",  int);
+SpecializeArgmaxToLogical("i16",  short);
+SpecializeArgmaxToLogical("i8",   char);
+SpecializeArgmaxToLogical("ui8",  uchar);
 
 
 // Matrix_Mul

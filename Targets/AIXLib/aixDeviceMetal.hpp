@@ -92,8 +92,6 @@ public:
 
     void fillMin(const DeviceTensorParams& result) override;
 
-    void sum(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
-
     void sqrt(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
 
     void sin(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
@@ -108,11 +106,6 @@ public:
 
     void pow(const DeviceTensorParams& a, const DeviceTensorParams& exp, const DeviceTensorParams& result) override;
 
-    void max(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
-
-    void argmax(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
-
-    void argmaxIndices(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
 
     void matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result) override;
 
@@ -124,13 +117,12 @@ public:
 
     void contiguous(const DeviceTensorParams& src, const DeviceTensorParams& dst) override;
 
-    void reduceTo(const DeviceTensorParams& src, const DeviceTensorParams& dst) override;
-
-    void maxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst) override;
-
-    void argmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim) override;
-
-    void argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim) override;
+    void reduce(const DeviceTensorParams& src, const DeviceTensorParams& dst, ReduceOp op,
+                std::span<const size_t> axes = {}, bool accumulate = false) override;
+    void argmax(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                std::span<const size_t> axes = {}) override;
+    void argmaxMask(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                    std::span<const size_t> axes = {}) override;
 
     void sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,
                   size_t dim, size_t start, size_t end, size_t step) override;
@@ -273,7 +265,7 @@ protected:
     MTL::ComputePipelineState*   m_compFuncPSOMax[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxInit[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxReduce[aix::DataTypeCount]{nullptr};
-    MTL::ComputePipelineState*   m_compFuncPSOArgmaxTo[aix::DataTypeCount]{nullptr};
+    MTL::ComputePipelineState*   m_compFuncPSOArgmaxToLogical[aix::DataTypeCount]{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxIndicesSet{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOArgmaxIndicesToSet{nullptr};
     MTL::ComputePipelineState*   m_compFuncPSOMatMulStrided[aix::DataTypeCount]{nullptr};
@@ -321,9 +313,10 @@ protected:
     MTL::Fence*  m_fence{nullptr};
 
 private:
+    void executeGlobalArgmax(const DeviceTensorParams& src, const DeviceTensorParams& dst);
+
     struct ReductionRoute
     {
-        bool valid{false};
         bool useInnerContiguous{false};
         bool useInnerVectorized{false};
         bool useOuterContiguous{false};
@@ -332,7 +325,16 @@ private:
         std::vector<size_t> plan{};
     };
 
-    ReductionRoute buildReductionRoute(const DeviceTensorParams& src, const DeviceTensorParams& dst) const;
+    ReductionRoute buildReductionRoute(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                                       std::span<const size_t> axes) const;
+
+    void executeGlobalReduction(const DeviceTensorParams& src, const DeviceTensorParams& dst, ReduceOp op);
+
+    void executeShapeReduction(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                                const ReductionRoute& route, ReduceOp op);
+
+    void encodeArgmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim,
+                        const MTL::ComputePipelineState* pso);
 
     size_t selectReductionThreads(const MTL::ComputePipelineState* pso, size_t reductionExtent) const;
 };

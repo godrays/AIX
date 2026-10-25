@@ -38,7 +38,6 @@ public:
 
     void fill(const void* scalar, DataType scalarDType, const DeviceTensorParams& result) override;
     void fillMin(const DeviceTensorParams& result) override;
-    void sum(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
     void sqrt(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
     void sin(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
     void cos(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
@@ -46,19 +45,21 @@ public:
     void log(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
     void exp(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
     void pow(const DeviceTensorParams& a, const DeviceTensorParams& exp, const DeviceTensorParams& result) override;
-    void max(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
-    void argmax(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
-    void argmaxIndices(const DeviceTensorParams& a, const DeviceTensorParams& result) override;
+
     void matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result) override;
     void transpose(const DeviceTensorParams& a, const DeviceTensorParams& result, size_t dim0, size_t dim1) override;
 
     void copy(const void* src, DataType srcDType, void* dst, DataType dstDType, size_t size) override;
     void copyImmediate(const void* src, DataType srcDType, void* dst, DataType dstDType, size_t size) override;
     void contiguous(const DeviceTensorParams& src, const DeviceTensorParams& dst) override;
-    void reduceTo(const DeviceTensorParams& src, const DeviceTensorParams& dst) override;
-    void maxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst) override;
-    void argmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim) override;
-    void argmaxIndicesTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim) override;
+
+    void reduce(const DeviceTensorParams& src, const DeviceTensorParams& dst, ReduceOp op,
+                std::span<const size_t> axes = {}, bool accumulate = false) override;
+    void argmax(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                std::span<const size_t> axes = {}) override;
+    void argmaxMask(const DeviceTensorParams& src, const DeviceTensorParams& dst,
+                    std::span<const size_t> axes = {}) override;
+
     void sliceSet(const DeviceTensorParams& src, const DeviceTensorParams& dst,
                   size_t dim, size_t start, size_t end, size_t step) override;
     void tril(const DeviceTensorParams& src, const DeviceTensorParams& dst, ssize_t diagonal) override;

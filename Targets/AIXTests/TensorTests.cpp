@@ -582,6 +582,117 @@ TEST_CASE("Tensor - Tensor OP Scalar Tensor")
 }
 
 
+TEST_CASE("Tensor - multi-axis sum API")
+{
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        for (auto dtype : {DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16, DataType::kInt32})
+        {
+            const TensorOptions options{.m_dtype=dtype, .m_device=device.get()};
+            auto input = tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f}, {2, 3, 2}, options);
+            auto result = input.sum({2, 0});
+            CHECK(result.shape() == Shape{3});
+            CHECK(result.dataType() == (dtype > DataType::kInt64 ? DataType::kInt64 : dtype));
+            CHECK(result.device() == device.get());
+            CHECK_FALSE(result.isRequireGrad());
+            device->synchronize();
+            CheckVectorApproxValues(result.value().to(&defaultDevice).to(DataType::kFloat32),
+                                    TensorValue({18, 26, 34}, {3}, &defaultDevice));
+            CHECK(aix::sum(input, SIndex{-1, -3}, true).shape() == Shape{1, 3, 1});
+            CheckVectorApproxValues(input.sum({0, -1}), result);
+            auto all = aix::sum(input, {0, 1, 2});
+            device->synchronize();
+            CheckVectorApproxValues(all.value().to(&defaultDevice).to(DataType::kFloat32),
+                                    TensorValue(78, {}, &defaultDevice));
+            auto implicitAll = aix::sum(input, {});
+            CHECK(implicitAll.shape() == Shape{});
+            CHECK(implicitAll.value().storage() != input.value().storage());
+            CheckVectorApproxValues(implicitAll, all);
+            CHECK(input.sum({}, true).shape() == Shape{1, 1, 1});
+            CHECK(input.sum({1}).shape() == input.sum(1).shape());
+            CHECK_THROWS_AS(input.sum({0, 0}), std::invalid_argument);
+            CHECK_THROWS_AS(input.sum({3}), std::invalid_argument);
+            CHECK_THROWS_AS(input.sum({-4}), std::invalid_argument);
+            CHECK_THROWS_AS(input.sum({2, -1}), std::invalid_argument);
+
+            auto trainable = tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3},
+                                    {.m_requireGrad=true, .m_dtype=dtype, .m_device=device.get()});
+            {
+                NoGradGuard guard;
+                auto detached = trainable.sum({1, 0});
+                CHECK_FALSE(detached.isRequireGrad());
+            }
+            device->synchronize();
+        }
+    }
+}
+
+TEST_CASE("Tensor - integer sum promotion member and free APIs")
+{
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        for (auto dtype : {DataType::kUInt8, DataType::kInt8, DataType::kInt16, DataType::kInt32, DataType::kInt64})
+        {
+            auto input = tensor({100.0f, 100.0f, 100.0f, 100.0f}, {2, 2}, {.m_dtype=dtype, .m_device=device.get()});
+            auto global = aix::sum(input);
+            auto axis = aix::sum(input, -1, true);
+            auto all = aix::sum(input, SIndex{-1, -2});
+            auto implicitAll = input.sum({});
+            device->synchronize();
+            CHECK(global.dataType() == DataType::kInt64);
+            CHECK(axis.dataType() == DataType::kInt64);
+            CHECK(all.dataType() == DataType::kInt64);
+            CHECK(implicitAll.dataType() == DataType::kInt64);
+            CHECK(global.value().item<int64_t>() == 400);
+            CHECK(all.value().item<int64_t>() == 400);
+            CHECK(implicitAll.value().item<int64_t>() == 400);
+            CHECK(axis.shape() == Shape{2, 1});
+            CHECK(axis.value().data<int64_t>()[0] == 200);
+            CHECK(axis.value().data<int64_t>()[1] == 200);
+            CHECK_FALSE(global.isRequireGrad());
+            CHECK(input.dataType() == dtype);
+        }
+    }
+}
+
+TEST_CASE("Tensor - max rejects only zero-length reduced axes")
+{
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        for (const auto& shape : {Shape{0}, Shape{2, 0}, Shape{0, 3}, Shape{0, 0}, Shape{2, 0, 3}})
+        {
+            auto input = Tensor(shape, {.m_device=device.get()});
+            CHECK_THROWS_AS(input.max(), std::invalid_argument);
+            for (size_t axis = 0; axis < shape.size(); ++axis)
+            {
+                for (bool keepDim : {false, true})
+                {
+                    if (shape[axis] == 0)
+                    {
+                        CHECK_THROWS_AS(input.max(axis, keepDim), std::invalid_argument);
+                    }
+                    else
+                    {
+                        auto expectedShape = shape;
+                        if (keepDim) expectedShape[axis] = 1;
+                        else expectedShape.erase(expectedShape.begin() + axis);
+                        auto result = input.max(axis, keepDim);
+                        CHECK(result.shape() == expectedShape);
+                        CHECK(result.value().size() == 0);
+                    }
+                }
+            }
+        }
+        device->synchronize();
+    }
+}
+
 TEST_CASE("Tensor - Reshape")
 {
     SUBCASE("scalar -> 1 dimension")
@@ -1786,6 +1897,39 @@ TEST_CASE("Tensor - Variance")
         CheckVectorApproxValues(var, aix::Tensor(0.25, {3,4,1}));
     }
 
+}
+
+
+TEST_CASE("Tensor - reduction integration public shapes and logical argmax")
+{
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(deviceType);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(deviceType));
+        auto input = tensor({1.0f, 8.0f, 3.0f, 4.0f, 5.0f, 6.0f}, {2, 3}, {.m_requireGrad=true, .m_device=device.get()});
+        auto sum = input.sum();
+        auto max = input.max();
+        auto index = input.argmax();
+        auto mean = input.mean();
+        device->synchronize();
+        CHECK(sum.shape() == Shape{});
+        CHECK(max.shape() == Shape{});
+        CHECK(index.shape() == Shape{});
+        CHECK(sum.value().item<float>() == 27.0f);
+        CHECK(max.value().item<float>() == 8.0f);
+        CHECK(index.value().item<int32_t>() == 1);
+        CHECK(mean.value().item<float>() == 4.5f);
+        CHECK_FALSE(index.isRequireGrad());
+        auto transposed = input.transpose(0, 1);
+        auto transposedIndex = transposed.argmax(-1, true);
+        CHECK(transposedIndex.shape() == Shape{3, 1});
+        CHECK_FALSE(transposedIndex.isRequireGrad());
+        device->synchronize();
+        CHECK(transposedIndex.value().data<int32_t>()[0] == 1);
+        CHECK(transposedIndex.value().data<int32_t>()[1] == 0);
+        CHECK(transposedIndex.value().data<int32_t>()[2] == 1);
+    }
 }
 
 

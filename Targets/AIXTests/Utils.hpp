@@ -15,6 +15,54 @@
 #include <doctest/doctest.h>
 // System includes
 
+inline void reduceAll(aix::Device& device, const aix::DeviceTensorParams& src, aix::DeviceTensorParams dst, aix::ReduceOp op)
+{
+    dst.shape = aix::Shape(src.shape.size(), 1);
+    dst.strides = aix::Stride(src.shape.size(), 1);
+    dst.size = 1;
+    device.reduce(src, dst, op);
+}
+
+inline void argmaxAll(aix::Device& device, const aix::DeviceTensorParams& src, aix::DeviceTensorParams dst)
+{
+    dst.shape = aix::Shape(src.shape.size(), 1);
+    dst.strides = aix::Stride(src.shape.size(), 1);
+    dst.size = 1;
+    device.argmax(src, dst);
+}
+
+inline void argmaxAxis(aix::Device& device, const aix::DeviceTensorParams& src, aix::DeviceTensorParams dst, size_t axis)
+{
+    dst.shape = src.shape;
+    dst.shape[axis] = 1;
+    dst.strides = aix::Stride(dst.shape.size(), 1);
+    for (size_t i = dst.shape.size(); i-- > 1;) dst.strides[i - 1] = dst.strides[i] * dst.shape[i];
+    const size_t axes[] = {axis};
+    device.argmax(src, dst, axes);
+}
+
+inline void reduceAxes(aix::Device& device, const aix::DeviceTensorParams& src, aix::DeviceTensorParams dst,
+                       const aix::Index& axes, aix::ReduceOp op,
+                       bool accumulate = true)
+{
+    dst.shape = src.shape;
+    for (auto axis : axes) dst.shape[axis] = 1;
+    dst.strides.resize(dst.shape.size());
+    size_t stride = 1;
+    for (size_t i = dst.shape.size(); i-- > 0;)
+    {
+        dst.strides[i] = stride;
+        stride *= dst.shape[i];
+    }
+    device.reduce(src, dst, op, axes, accumulate);
+}
+
+inline void reduceAxis(aix::Device& device, const aix::DeviceTensorParams& src, aix::DeviceTensorParams dst, size_t axis,
+                       aix::ReduceOp op)
+{
+    reduceAxes(device, src, dst, {axis}, op, false);
+}
+
 inline auto Approx(auto value, double epsilon = 1e-4)
 {
     return doctest::Approx(value).epsilon(epsilon);
