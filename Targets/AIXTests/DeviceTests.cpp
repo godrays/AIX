@@ -1252,6 +1252,66 @@ bool testDiv(Device* testDevice, size_t n)
 }
 
 
+static double matmulFloat32ErrorBound(size_t count, double sumAbs)
+{
+    // gamma_K * sum(abs(a_k * b_k)) bounds full-precision Float32 dot products,
+    // including separately rounded products/additions or fused multiply-adds.
+    // Products of Float32 inputs are exact in FP64; account for reference summation too.
+    const double nu32 = count * (std::numeric_limits<float>::epsilon() / 2.0);
+    const double nu64 = count * (std::numeric_limits<double>::epsilon() / 2.0);
+    const double gamma32 = nu32 / (1.0 - nu32);
+    const double gamma64 = nu64 / (1.0 - nu64);
+    return (gamma32 + gamma64) * sumAbs / (1.0 - gamma64);
+}
+
+
+static bool matmulFloat32WithinBound(float actual, double expected, double bound)
+{
+    return std::isfinite(actual) && std::isfinite(expected) && std::isfinite(bound) &&
+           bound >= 0 && std::abs(static_cast<double>(actual) - expected) <= bound;
+}
+
+
+static bool verifyMatMulFloat32(const TensorValue& a, const TensorValue& b,
+                               const TensorValue& cpuResult, const TensorValue& deviceResult)
+{
+    // These test inputs/results are dense CPU tensors. Use the actual quantized inputs,
+    // not CPU Float32 output, as the independent reference for both implementations.
+    const size_t rows = a.shape()[0];
+    const size_t inner = a.shape()[1];
+    const size_t columns = b.shape()[1];
+    for (size_t row = 0; row < rows; ++row)
+    {
+        for (size_t column = 0; column < columns; ++column)
+        {
+            double expected = 0;
+            double sumAbs = 0;
+            for (size_t k = 0; k < inner; ++k)
+            {
+                const double product = static_cast<double>(a.data<float>()[row * inner + k]) *
+                                       static_cast<double>(b.data<float>()[k * columns + column]);
+                expected += product;
+                sumAbs += std::abs(product);
+            }
+            const double bound = matmulFloat32ErrorBound(inner, sumAbs);
+            const size_t index = row * columns + column;
+            const float cpuValue = cpuResult.data<float>()[index];
+            const float deviceValue = deviceResult.data<float>()[index];
+            if (!matmulFloat32WithinBound(cpuValue, expected, bound) ||
+                !matmulFloat32WithinBound(deviceValue, expected, bound))
+            {
+                MESSAGE("MatMul Float32 error: row=" << row << ", column=" << column
+                        << ", FP64=" << expected << ", CPU=" << cpuValue << ", target=" << deviceValue
+                        << ", CPU error=" << std::abs(cpuValue - expected)
+                        << ", target error=" << std::abs(deviceValue - expected) << ", bound=" << bound);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+
 bool testMatMul(Device* testDevice, size_t n, size_t inner, size_t m)
 {
     for (size_t i=0; i<aix::DataTypeCount; ++i)
@@ -1267,19 +1327,18 @@ bool testMatMul(Device* testDevice, size_t n, size_t inner, size_t m)
         auto matB = (11 + 10 * aix::randn({inner, m})).to(dtype).value();
         auto cpuResult    = aix::TensorValue({n, m}, &refDevice).to(dtype);
         auto deviceResult = aix::TensorValue({n, m}, testDevice).to(dtype);
+        auto deviceA = matA.to(testDevice);
+        auto deviceB = matB.to(testDevice);
 
         refDevice.matmul(matA.deviceParams(), matB.deviceParams(), cpuResult.deviceParams());
-        testDevice->matmul(matA.deviceParams(), matB.deviceParams(), deviceResult.deviceParams());
+        testDevice->matmul(deviceA.deviceParams(), deviceB.deviceParams(), deviceResult.deviceParams());
         testDevice->synchronize();
+        auto hostResult = deviceResult.to(&refDevice);
 
-        auto epsilon = EPSILON;
-        if (testDevice->type() == DeviceType::kGPU_METAL && dtype == DataType::kFloat32)
-        {
-            epsilon = EPSILON_MATMUL_F32_METAL;
-        }
-
-        // Compare true/cpu result with gpu result
-        if (!verifyResults(cpuResult, deviceResult, epsilon))
+        const bool matches = dtype == DataType::kFloat32
+                             ? verifyMatMulFloat32(matA, matB, cpuResult, hostResult)
+                             : verifyResults(cpuResult, hostResult);
+        if (!matches)
         {
             MESSAGE("MatMul mismatch: M=" << n << ", K=" << inner << ", N=" << m
                     << ", data type=" << static_cast<size_t>(dtype));
@@ -1780,6 +1839,63 @@ bool testMaxTo(Device* testDevice)
     }
 
     return true;
+}
+
+
+TEST_CASE("Device matmul Float32 accepts valid rounding without accepting corrupt results")
+{
+    // Captured with manualSeed(0), trial 152, column 1 of a 1x7 * 7x7 product.
+    const std::array<float, 7> a = {
+        0x1.1e42d6p+4f, 0x1.1cf31ap+4f, 0x1.416becp+3f, 0x1.13d56cp+4f,
+        0x1.cad76cp+3f, 0x1.ca9fd8p+3f, 0x1.128ab8p+4f
+    };
+    const std::array<float, 7> column = {
+        0x1.ef62e8p+3f, 0x1.412d24p+4f, 0x1.470804p+4f, 0x1.4b0ee2p+4f,
+        0x1.826088p+3f, 0x1.c55d7cp+2f, 0x1.f13798p+2f
+    };
+    double expected = 0;
+    double sumAbs = 0;
+    for (size_t k = 0; k < a.size(); ++k)
+    {
+        const double product = static_cast<double>(a[k]) * static_cast<double>(column[k]);
+        expected += product;
+        sumAbs += std::abs(product);
+    }
+    const double bound = matmulFloat32ErrorBound(a.size(), sumAbs);
+    const float fused = 1604.44189453125f;
+    const float separate = 1604.442138671875f;
+    CHECK(std::abs(fused - separate) > EPSILON_MATMUL_F32_METAL);
+    CHECK(matmulFloat32WithinBound(fused, expected, bound));
+    CHECK(matmulFloat32WithinBound(separate, expected, bound));
+    CHECK_FALSE(matmulFloat32WithinBound(static_cast<float>(expected + 0.01), expected, bound));
+    CHECK_FALSE(matmulFloat32WithinBound(static_cast<float>(expected - a[0] * column[0]), expected, bound));
+    CHECK_FALSE(matmulFloat32WithinBound(std::numeric_limits<float>::quiet_NaN(), expected, bound));
+    CHECK_FALSE(matmulFloat32WithinBound(std::numeric_limits<float>::infinity(), expected, bound));
+    CHECK(matmulFloat32WithinBound(0, 0, matmulFloat32ErrorBound(7, 8)));
+    CHECK_FALSE(matmulFloat32WithinBound(1, 0, matmulFloat32ErrorBound(7, 8)));
+
+    aix::DeviceCPU refDevice;
+    const std::array<float, 7> scales = {1, -1, 2, -2, 0.5f, -0.5f, 0};
+    std::array<float, 49> b;
+    for (size_t k = 0; k < a.size(); ++k)
+    {
+        for (size_t j = 0; j < scales.size(); ++j) b[k * scales.size() + j] = column[k] * scales[j];
+    }
+    TensorValue cpuA(a.data(), a.size(), DataType::kFloat32, {1, 7}, &refDevice);
+    TensorValue cpuB(b.data(), b.size(), DataType::kFloat32, {7, 7}, &refDevice);
+    auto cpuResult = cpuA.matmul(cpuB);
+    CHECK(verifyMatMulFloat32(cpuA, cpuB, cpuResult, cpuResult));
+    for (auto deviceType : testDeviceTypes)
+    {
+        auto device = aix::createDevice(deviceType);
+        if (!device) continue;
+        auto deviceA = cpuA.to(device.get());
+        auto deviceB = cpuB.to(device.get());
+        auto actual = deviceA.matmul(deviceB);
+        device->synchronize();
+        auto hostResult = actual.to(&refDevice);
+        CHECK(verifyMatMulFloat32(cpuA, cpuB, cpuResult, hostResult));
+    }
 }
 
 
