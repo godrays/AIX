@@ -334,7 +334,7 @@ bool testSub(Device* testDevice, size_t n)
 }
 
 
-bool testUnary(Device* testDevice, size_t n)
+bool testNeg(Device* testDevice, size_t n)
 {
     for (size_t i=0; i<aix::DataTypeCount; ++i)
     {
@@ -348,8 +348,8 @@ bool testUnary(Device* testDevice, size_t n)
         auto cpuResult    = aix::TensorValue({1, n}, &refDevice).to(dtype);
         auto deviceResult = aix::TensorValue({1, n}, testDevice).to(dtype);
 
-        refDevice.unary(array1.deviceParams(), cpuResult.deviceParams());
-        testDevice->unary(array1.deviceParams(), deviceResult.deviceParams());
+        refDevice.neg(array1.deviceParams(), cpuResult.deviceParams());
+        testDevice->neg(array1.deviceParams(), deviceResult.deviceParams());
         testDevice->synchronize();
 
         // Compare results with the true/reference results
@@ -3209,9 +3209,9 @@ TEST_CASE("DeviceCPU Tests - Sub")
 }
 
 
-TEST_CASE("DeviceCPU Tests - Unary")
+TEST_CASE("DeviceCPU Tests - Neg")
 {
-    // For each available devices, tests add operation.
+    // For each available device, test negation.
     for (auto deviceType : testDeviceTypes)
     {
         // Check if the devices is available.
@@ -3222,7 +3222,7 @@ TEST_CASE("DeviceCPU Tests - Unary")
         for (auto size: testSizes)
         {
             auto device2 = aix::createDevice(deviceType);
-            CHECK(testUnary(&*device2, size));
+            CHECK(testNeg(&*device2, size));
         }
     }
 }

@@ -789,7 +789,7 @@ void DeviceCPU::div(const DeviceTensorParams& a1, const DeviceTensorParams& a2, 
     funcTable[static_cast<size_t>(result.dtype)](a1, a2, result);
 }
 
-void DeviceCPU::unary(const DeviceTensorParams& a1, const DeviceTensorParams& result)
+void DeviceCPU::neg(const DeviceTensorParams& a1, const DeviceTensorParams& result)
 {
     static const auto funcTable = std::array
     {

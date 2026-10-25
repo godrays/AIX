@@ -191,6 +191,27 @@ TEST_CASE("Auto Grad with broadcasting")
 }
 
 
+TEST_CASE("Auto Grad - neg propagates nonuniform seeds")
+{
+    for (auto deviceType : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(deviceType);
+        if (!device) continue;
+
+        auto x = tensor({1.0f, -2.0f, 0.0f, 4.0f}, {2, 2},
+                        { .m_requireGrad=true, .m_device=device.get() });
+        auto y = -x;
+        auto seed = tensor({0.5f, -3.0f, 2.0f, 0.0f}, {2, 2}, { .m_device=device.get() });
+        y.backward(seed);
+
+        CHECK(y.shape() == x.shape());
+        CHECK(x.grad().shape() == x.shape());
+        CheckVectorApproxValues(y, tensor({-1.0f, 2.0f, 0.0f, -4.0f}, {2, 2}));
+        CheckVectorApproxValues(x.grad(), tensor({-0.5f, 3.0f, -2.0f, 0.0f}, {2, 2}).value());
+    }
+}
+
+
 TEST_CASE("Auto Grad - log Test - 2x2")
 {
     aix::Shape shape{2,2};

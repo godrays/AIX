@@ -51,7 +51,7 @@ public:
     virtual void sub(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result) = 0;
     virtual void mul(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result) = 0;
     virtual void div(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result) = 0;
-    virtual void unary(const DeviceTensorParams& a1, const DeviceTensorParams& result) = 0;
+    virtual void neg(const DeviceTensorParams& a1, const DeviceTensorParams& result) = 0;
 
     virtual void fill(const void* scalar, DataType scalarDType, const DeviceTensorParams& result) = 0;
     virtual void fillMin(const DeviceTensorParams& result) = 0;

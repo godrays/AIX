@@ -699,7 +699,7 @@ public:
     {
         // Create a new TensorValue to store the result. Perform element-wise.
         TensorValue result(m_shape, m_device, m_dType);
-        m_device->unary(deviceParams(), result.deviceParams());
+        m_device->neg(deviceParams(), result.deviceParams());
         return result;
     }
 
@@ -2186,7 +2186,7 @@ public:
             node->m_inputs[1]->backward(-node->m_inputs[0]->m_value * seed / (node->m_inputs[1]->m_value * node->m_inputs[1]->m_value));  // ∂f/∂b = -a / b^2
     }
 
-    static void unaryBackwardFunc(TensorNode * node, const TensorValue & seed)
+    static void negBackwardFunc(TensorNode * node, const TensorValue & seed)
     {
         if (node->m_inputs.empty()) return;
         // Calculate gradients.
@@ -2462,7 +2462,7 @@ public:
     Tensor operator-() const
     {
         auto result = makeResult(-m_data->m_value, isRequireGrad());
-        result.m_data->setBackward({ m_data }, unaryBackwardFunc);
+        result.m_data->setBackward({ m_data }, negBackwardFunc);
         return result;
     }
 

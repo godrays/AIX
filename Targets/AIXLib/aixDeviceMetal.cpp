@@ -290,7 +290,7 @@ void DeviceMetal::div(const DeviceTensorParams& a1, const DeviceTensorParams& a2
     m_fuseEngine->record(aix::fuse::OpType::Div, a1, a2, result);
 }
 
-void DeviceMetal::unary(const DeviceTensorParams& a1, const DeviceTensorParams& result)
+void DeviceMetal::neg(const DeviceTensorParams& a1, const DeviceTensorParams& result)
 {
     m_fuseEngine->record(aix::fuse::OpType::Negate, a1, result);
 }

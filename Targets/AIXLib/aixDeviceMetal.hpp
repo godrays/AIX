@@ -86,7 +86,7 @@ public:
 
     void div(const DeviceTensorParams& a1, const DeviceTensorParams& a2, const DeviceTensorParams& result) override;
 
-    void unary(const DeviceTensorParams& a1, const DeviceTensorParams& result) override;
+    void neg(const DeviceTensorParams& a1, const DeviceTensorParams& result) override;
 
     void fill(const void* scalar, DataType scalarDType, const DeviceTensorParams& result) override;
 

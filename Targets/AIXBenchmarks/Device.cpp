@@ -188,7 +188,7 @@ public:
 
     void run(const AIXBenchmarkConfigs&) final
     {
-        m_device->unary(m_t.value().deviceParams(), m_result.value().deviceParams());
+        m_device->neg(m_t.value().deviceParams(), m_result.value().deviceParams());
         m_device->synchronize();
     }
 
