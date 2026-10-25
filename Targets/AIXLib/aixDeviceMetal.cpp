@@ -20,6 +20,7 @@
 #include <Metal/Metal.hpp>
 // System includes
 #include <functional>
+#include <utility>
 
 
 namespace aix::metal
@@ -322,11 +323,14 @@ void DeviceMetal::executeGlobalReduction(const DeviceTensorParams& a, const Devi
 
     auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
     auto bufResult = m_allocMap[result.data];
-    MTL::Buffer* bufTemp = isSum ? nullptr : m_allocMap[allocate(a.size, a.dtype)];
+    MTL::Buffer* bufTemp = nullptr;
+    MTL::Buffer* bufAlternate = nullptr;
     auto boundLayout = bindTensorLayout(a, {.bufferIndex=4});
 
     auto encodeReduction = [&](const MTL::Buffer* srcBuffer, MTL::Buffer* dstBuffer, size_t elementCount, size_t useLayout)
     {
+        // Threadgroup barriers cannot protect input reads in other threadgroups.
+        assert(srcBuffer != dstBuffer && "Global reduction stages require separate input and output buffers.");
         m_compEncoder->setComputePipelineState(compFuncPSO);
         m_compEncoder->setBuffer(srcBuffer, 0, 0);
         m_compEncoder->setBuffer(dstBuffer, 0, 1);
@@ -355,23 +359,32 @@ void DeviceMetal::executeGlobalReduction(const DeviceTensorParams& a, const Devi
 
             if (!bufTemp)
             {
-                bufTemp = m_allocMap[allocate(a.size, a.dtype)];
+                bufTemp = m_allocMap[allocate(reducedCount, a.dtype)];
             }
 
             encodeReduction(reductionSrc, bufTemp, elementCount, useLayout);
             reductionSrc = bufTemp;
+            std::swap(bufTemp, bufAlternate);
             elementCount = reducedCount;
             useLayout = 0;
         }
     }
     else
     {
+        size_t reducedCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+        bufTemp = m_allocMap[allocate(reducedCount, a.dtype)];
         encodeReduction(bufSrc, bufTemp, elementCount, useLayout);
         while (elementCount > 1)
         {
             elementCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
             if (elementCount == 1) break;
-            encodeReduction(bufTemp, bufTemp, elementCount, 0);
+            if (!bufAlternate)
+            {
+                reducedCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+                bufAlternate = m_allocMap[allocate(reducedCount, a.dtype)];
+            }
+            encodeReduction(bufTemp, bufAlternate, elementCount, 0);
+            std::swap(bufTemp, bufAlternate);
         }
         copy(bufTemp->contents(), a.dtype, result.data, result.dtype, 1);
     }
@@ -382,6 +395,10 @@ void DeviceMetal::executeGlobalReduction(const DeviceTensorParams& a, const Devi
     if (bufTemp)
     {
         deallocate(bufTemp->contents());
+    }
+    if (bufAlternate)
+    {
+        deallocate(bufAlternate->contents());
     }
 }
 
@@ -439,6 +456,8 @@ void DeviceMetal::executeGlobalArgmax(const DeviceTensorParams& a, const DeviceT
     auto bufSrc = getReadOnlyMTLBuffer(a.data, a.size, dataTypeSize(a.dtype));
     auto bufTempValues = m_allocMap[allocate(a.size, a.dtype)];
     auto bufTempIndices = m_allocMap[allocate(a.size, DataType::kInt32)];
+    MTL::Buffer* bufAlternateValues = nullptr;
+    MTL::Buffer* bufAlternateIndices = nullptr;
     auto boundLayout = bindTensorLayout(a, {.bufferIndex=4});
 
     auto encodeArgmaxInit = [&]()
@@ -456,13 +475,17 @@ void DeviceMetal::executeGlobalArgmax(const DeviceTensorParams& a, const DeviceT
         commitBatchQueue();
     };
 
-    auto encodeArgmaxReduce = [&](size_t elementCount)
+    auto encodeArgmaxReduce = [&](const MTL::Buffer* inValues, const MTL::Buffer* inIndices,
+                                  MTL::Buffer* outValues, MTL::Buffer* outIndices, size_t elementCount)
     {
+        // Threadgroup barriers cannot protect input reads in other threadgroups.
+        assert(inValues != outValues && inIndices != outIndices &&
+               "Global argmax stages require separate input and output buffers.");
         m_compEncoder->setComputePipelineState(argmaxReducePSO);
-        m_compEncoder->setBuffer(bufTempValues,  0, 0);
-        m_compEncoder->setBuffer(bufTempIndices, 0, 1);
-        m_compEncoder->setBuffer(bufTempValues,  0, 2);
-        m_compEncoder->setBuffer(bufTempIndices, 0, 3);
+        m_compEncoder->setBuffer(inValues,   0, 0);
+        m_compEncoder->setBuffer(inIndices,  0, 1);
+        m_compEncoder->setBuffer(outValues,  0, 2);
+        m_compEncoder->setBuffer(outIndices, 0, 3);
 
         NS::UInteger w = std::min(elementCount, maxThreadsPerTG);
         m_compEncoder->dispatchThreads({elementCount, 1, 1}, {w, 1, 1});
@@ -474,8 +497,16 @@ void DeviceMetal::executeGlobalArgmax(const DeviceTensorParams& a, const DeviceT
     size_t elementCount = a.size;
     while (elementCount > 1)
     {
-        encodeArgmaxReduce(elementCount);
-        elementCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+        size_t reducedCount = (elementCount + maxThreadsPerTG - 1) / maxThreadsPerTG;
+        if (!bufAlternateValues)
+        {
+            bufAlternateValues = m_allocMap[allocate(reducedCount, a.dtype)];
+            bufAlternateIndices = m_allocMap[allocate(reducedCount, DataType::kInt32)];
+        }
+        encodeArgmaxReduce(bufTempValues, bufTempIndices, bufAlternateValues, bufAlternateIndices, elementCount);
+        std::swap(bufTempValues, bufAlternateValues);
+        std::swap(bufTempIndices, bufAlternateIndices);
+        elementCount = reducedCount;
     }
 
     copy(bufTempIndices->contents(), DataType::kInt32, result.data, result.dtype, 1);
@@ -484,6 +515,11 @@ void DeviceMetal::executeGlobalArgmax(const DeviceTensorParams& a, const DeviceT
     releaseTensorLayout(boundLayout);
     deallocate(bufTempValues->contents());
     deallocate(bufTempIndices->contents());
+    if (bufAlternateValues)
+    {
+        deallocate(bufAlternateValues->contents());
+        deallocate(bufAlternateIndices->contents());
+    }
 }
 
 void DeviceMetal::matmul(const DeviceTensorParams& a, const DeviceTensorParams& b, const DeviceTensorParams& result)

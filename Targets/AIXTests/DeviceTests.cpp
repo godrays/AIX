@@ -4070,6 +4070,106 @@ TEST_CASE("DeviceMetal native reduction global noaxis singleton and layout route
     }
 }
 
+TEST_CASE("DeviceMetal native reduction global stages use separate input and output buffers")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+
+    // More than 1024 squared elements forces a multi-threadgroup intermediate sum/max stage.
+    // Debug builds reject overlapping stage bindings even when GPU scheduling hides corruption.
+    std::vector<int32_t> values(2 * 1024 * 1024, 0);
+    values[1] = 7;
+    auto src = TensorValue(values.data(), values.size(), DataType::kInt32,
+                           {values.size()}, device.get(), DataType::kInt32);
+    auto dst = TensorValue(99, {1}, device.get(), DataType::kInt32);
+
+    SUBCASE("sum")
+    {
+        device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kSum);
+        device->synchronize();
+        CHECK(dst.data<int32_t>()[0] == 7);
+    }
+    SUBCASE("max")
+    {
+        device->reduce(src.deviceParams(), dst.deviceParams(), ReduceOp::kMax);
+        device->synchronize();
+        CHECK(dst.data<int32_t>()[0] == 7);
+    }
+    SUBCASE("argmax")
+    {
+        device->argmax(src.deviceParams(), dst.deviceParams());
+        device->synchronize();
+        CHECK(dst.data<int32_t>()[0] == 1);
+    }
+}
+
+TEST_CASE("DeviceMetal native reduction global stage buffers preserve singleton and staged results across dtypes")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    DeviceCPU reference;
+    for (size_t dtypeIndex = 1; dtypeIndex < DataTypeCount; ++dtypeIndex)
+    {
+        const auto dtype = static_cast<DataType>(dtypeIndex);
+        for (size_t count : {size_t{1}, size_t{1024}, size_t{2048}})
+        {
+            CAPTURE(dtypeIndex);
+            CAPTURE(count);
+            std::vector<float> values(count, 0.0f);
+            values[count / 2] = 7.0f;
+            auto src = TensorValue(values.data(), values.size(), DataType::kFloat32, {count}, device.get(), dtype);
+            auto sum = TensorValue(99.0f, {1}, device.get(), dtype);
+            auto max = TensorValue(99.0f, {1}, device.get(), dtype);
+            auto index = TensorValue(99, {1}, device.get(), DataType::kInt32);
+            device->reduce(src.deviceParams(), sum.deviceParams(), ReduceOp::kSum);
+            device->reduce(src.deviceParams(), max.deviceParams(), ReduceOp::kMax);
+            device->argmax(src.deviceParams(), index.deviceParams());
+            device->synchronize();
+            CHECK(sum.to(&reference).to(DataType::kFloat32).data<float>()[0] == 7.0f);
+            CHECK(max.to(&reference).to(DataType::kFloat32).data<float>()[0] == 7.0f);
+            CHECK(index.data<int32_t>()[0] == static_cast<int32_t>(count / 2));
+        }
+    }
+}
+
+TEST_CASE("DeviceMetal native reduction global stage buffers survive queued consumers and temporary retirement")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    constexpr size_t count = 2048;
+    std::vector<float> values(count, 0.0f);
+    values[17] = 3.0f;
+    values.back() = 2.0f;
+    auto left = TensorValue(values.data(), values.size(), DataType::kFloat32, {count}, device.get());
+    values[17] = 2.0f;
+    values.back() = 3.0f;
+    auto right = TensorValue(values.data(), values.size(), DataType::kFloat32, {count}, device.get());
+    auto sum = TensorValue(99.0f, {1}, device.get());
+    auto max = TensorValue(99.0f, {1}, device.get());
+    auto index = TensorValue(99, {1}, device.get(), DataType::kInt32);
+    std::vector<TensorValue> sums;
+    std::vector<TensorValue> maxima;
+    std::vector<TensorValue> indices;
+    for (size_t i = 0; i < 96; ++i)
+    {
+        auto produced = (i % 2 == 0 ? left : right) + TensorValue(static_cast<float>(i), {}, device.get());
+        device->reduce(produced.deviceParams(), sum.deviceParams(), ReduceOp::kSum);
+        sums.push_back(sum + sum);
+        device->reduce(produced.deviceParams(), max.deviceParams(), ReduceOp::kMax);
+        maxima.push_back(max + max);
+        device->argmax(produced.deviceParams(), index.deviceParams());
+        indices.push_back(index + index);
+    }
+    device->synchronize();
+    for (size_t i = 0; i < sums.size(); ++i)
+    {
+        CAPTURE(i);
+        CHECK(sums[i].data<float>()[0] == 2 * (5 + count * i));
+        CHECK(maxima[i].data<float>()[0] == 2 * (3 + i));
+        CHECK(indices[i].data<int32_t>()[0] == 2 * (i % 2 == 0 ? 17 : count - 1));
+    }
+}
+
 TEST_CASE("DeviceMetal native reduction logical argmax coordinates")
 {
     auto device = createDevice(DeviceType::kGPU_METAL);
