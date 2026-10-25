@@ -2399,6 +2399,172 @@ TEST_CASE("DeviceMetal fused kernels reuse runtime scalar bindings")
 #endif
 
 
+TEST_CASE("Device fusion preserves pending producer view indexing")
+{
+    DeviceCPU reference;
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(type));
+        for (auto dtype : {DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16})
+        {
+            CAPTURE(static_cast<size_t>(dtype));
+            for (bool transpose : {false, true})
+            {
+                CAPTURE(transpose);
+                for (bool synchronizeProducer : {false, true})
+                {
+                    CAPTURE(synchronizeProducer);
+                    for (bool viewFirst : {false, true})
+                    {
+                        CAPTURE(viewFirst);
+                        auto input = TensorValue({0.0f, 2.0f, 7.0f, 0.0f, 0.0f, 11.0f}, {3, 2}, device.get(), dtype);
+                        auto pending = input * TensorValue(1.0f, {}, device.get(), dtype);
+                        if (synchronizeProducer) device->synchronize();
+                        auto view = transpose ? pending.transpose(0, 1) : pending.reshape({2, 3});
+                        CHECK(view.shape() == Shape{2, 3});
+                        CHECK(view.strides() == (transpose ? Stride{1, 2} : Stride{3, 1}));
+                        CHECK(view.storage() == pending.storage());
+                        auto result = viewFirst ? view + TensorValue(0.0f, {2, 3}, device.get(), dtype) :
+                                                  TensorValue(0.0f, {2, 3}, device.get(), dtype) + view;
+                        // Do not observe or materialize the pending producer before recording its consumer.
+                        device->synchronize();
+                        CHECK(result.shape() == Shape{2, 3});
+                        CHECK(result.dataType() == dtype);
+                        auto expected = transpose ?
+                            TensorValue({0.0f, 7.0f, 0.0f, 2.0f, 0.0f, 11.0f}, {2, 3}, &reference, dtype) :
+                            TensorValue({0.0f, 2.0f, 7.0f, 0.0f, 0.0f, 11.0f}, {2, 3}, &reference, dtype);
+                        CheckVectorApproxValues(result, expected);
+                        CheckVectorApproxValues(pending, input);
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Device fusion orders reindexed temporary chains")
+{
+    DeviceCPU reference;
+    for (auto type : {DeviceType::kCPU, DeviceType::kGPU_METAL})
+    {
+        auto device = createDevice(type);
+        if (!device) continue;
+        CAPTURE(static_cast<size_t>(type));
+        for (auto dtype : {DataType::kFloat32, DataType::kFloat16, DataType::kBFloat16})
+        {
+            CAPTURE(static_cast<size_t>(dtype));
+            for (bool square : {false, true})
+            {
+                CAPTURE(square);
+                auto input = square ? TensorValue({0.0f, 2.0f, 7.0f, 11.0f}, {2, 2}, device.get(), dtype) :
+                                     TensorValue({0.0f, 2.0f, 7.0f, 0.0f, 0.0f, 11.0f}, {3, 2}, device.get(), dtype);
+                // Both the producer and the reindexed result are temporary: neither is retained for observation.
+                auto result = -(TensorValue(0.0f, square ? Shape{2, 2} : Shape{2, 3}, device.get(), dtype) +
+                                (input * TensorValue(1.0f, {}, device.get(), dtype)).transpose(0, 1));
+                device->synchronize();
+                auto expected = square ? TensorValue({0.0f, -7.0f, -2.0f, -11.0f}, {2, 2}, &reference, dtype) :
+                                         TensorValue({0.0f, -7.0f, 0.0f, -2.0f, 0.0f, -11.0f}, {2, 3}, &reference, dtype);
+                CheckVectorApproxValues(result, expected);
+            }
+        }
+    }
+}
+
+TEST_CASE("FuseEngine materializes changed mappings and preserves same-lane fusion")
+{
+    for (bool multiOutput : {false, true})
+    {
+        CAPTURE(multiOutput);
+        for (bool viewFirst : {false, true})
+        {
+            CAPTURE(viewFirst);
+            for (size_t layout = 0; layout < 4; ++layout)
+            {
+                CAPTURE(layout);
+                std::vector<aix::fuse::FusedSubgraphDescriptor> fused;
+                std::vector<aix::fuse::OpType> singles;
+                std::vector<std::string> emitted;
+                aix::fuse::FuseCallbacks callbacks;
+                callbacks.emitFused = [&](const aix::fuse::FusedSubgraphDescriptor& desc)
+                {
+                    fused.push_back(desc);
+                    emitted.push_back("fused");
+                };
+                callbacks.emitSingle = [&](const aix::fuse::OpRecord& op)
+                {
+                    singles.push_back(op.type);
+                    emitted.push_back("single");
+                };
+                callbacks.finishFlush = [] {};
+                aix::fuse::FuseConfig config;
+                config.maxBufferSlots = 31;
+                config.multiOutputKernels = multiOutput;
+                aix::fuse::FuseEngine engine(config, callbacks);
+
+                DeviceCPU device;
+                auto input = TensorValue({1.0f, 2.0f, 3.0f, 4.0f}, {2, 2}, &device);
+                auto stage = TensorValue(Shape{2, 2}, &device);
+                auto pending = TensorValue(Shape{2, 2}, &device);
+                auto other = TensorValue(Shape{2, 2}, &device);
+                auto consumed = TensorValue(Shape{2, 2}, &device);
+                auto output = TensorValue(Shape{2, 2}, &device);
+                auto producer = pending.deviceParams();
+                auto view = producer;
+                if (layout == 0)
+                {
+                    // A contiguous reshape changes rank/shape but not the lane mapping.
+                    view.shape = {4};
+                    view.strides = {1};
+                }
+                else if (layout == 1)
+                {
+                    // A square transpose changes only strides, not shape or element count.
+                    view.strides = {1, 2};
+                    view.isContiguous = false;
+                }
+                else if (layout == 2)
+                {
+                    // Strided producer/consumer mappings that agree remain fusible.
+                    producer.strides = view.strides = {1, 2};
+                    producer.isContiguous = view.isContiguous = false;
+                }
+                else
+                {
+                    view.strides = {0, 1};
+                    view.isContiguous = false;
+                }
+                engine.record(aix::fuse::OpType::Negate, input.deviceParams(), stage.deviceParams());
+                engine.record(aix::fuse::OpType::Negate, stage.deviceParams(), producer);
+                engine.record(aix::fuse::OpType::Add, viewFirst ? view : other.deviceParams(),
+                              viewFirst ? other.deviceParams() : view, consumed.deviceParams());
+                engine.record(aix::fuse::OpType::Negate, consumed.deviceParams(), output.deviceParams());
+                engine.flush();
+
+                REQUIRE(fused.size() == 1);
+                const bool reindexed = layout == 1 || layout == 3;
+                CHECK(fused[0].ops.size() == (reindexed ? 2 : 4));
+                if (reindexed)
+                {
+                    CHECK(singles == std::vector<aix::fuse::OpType>{aix::fuse::OpType::Add, aix::fuse::OpType::Negate});
+                    CHECK(emitted == std::vector<std::string>{"fused", "single", "single"});
+                    // The producer escapes to fallback even when no live-buffer retention requests a store.
+                    REQUIRE(fused[0].outputBuffers.size() == 1);
+                    CHECK(fused[0].outputBuffers[0].data == producer.data);
+                    CHECK(fused[0].outputBuffers[0].strides == producer.strides);
+                }
+                else
+                {
+                    CHECK(singles.empty());
+                    CHECK(emitted == std::vector<std::string>{"fused"});
+                    CHECK(fused[0].allContiguous == (layout == 0));
+                }
+            }
+        }
+    }
+}
+
 TEST_CASE("FuseEngine does not fuse ops that depend on rejected fallback producers")
 {
     std::vector<std::string> emitted;

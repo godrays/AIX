@@ -72,6 +72,18 @@ BufferBindingKey makeBufferBindingKey(const DeviceTensorParams& params)
     };
 }
 
+bool canFuseInput(const OpRecord& producer, const DeviceTensorParams& input)
+{
+    // Uniform fills are independent of the consumer's indexing, including broadcasts.
+    if (producer.type == OpType::Fill || producer.type == OpType::FillMin) return true;
+
+    const auto& output = producer.output;
+    // Registers carry the producer's value at the same logical lane, not an arbitrary view of it.
+    return output.size == input.size && output.offset == input.offset &&
+           ((output.isContiguous && input.isContiguous) ||
+            (output.shape == input.shape && output.strides == input.strides));
+}
+
 struct DagNode
 {
     size_t              opIndex{0};
@@ -370,6 +382,16 @@ FusionResult analyzeFusion(const std::vector<OpRecord>& ops,
             if (visited[opIdx]) continue;
 
             const auto& op = ops[opIdx];
+
+            const auto& node = dag.nodes[opIdx];
+            if ((node.input0Producer != SIZE_MAX && !canFuseInput(ops[node.input0Producer], op.input0)) ||
+                (node.input1Producer != SIZE_MAX && !canFuseInput(ops[node.input1Producer], op.input1)))
+            {
+                // Keep the storage dependency, but materialize the producer before a reindexed consumer.
+                // Leave a rejected consumer unvisited so it and its dependents use ordered fallback.
+                if (opIdx == i) { valid = false; break; }
+                continue;
+            }
 
             if (!isElementwiseOp(op.type)) { valid = false; break; }
             if (op.output.size != elementCount && op.type != OpType::Fill && op.type != OpType::FillMin)
