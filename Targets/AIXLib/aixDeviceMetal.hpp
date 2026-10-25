@@ -331,7 +331,7 @@ private:
     void executeGlobalReduction(const DeviceTensorParams& src, const DeviceTensorParams& dst, ReduceOp op);
 
     void executeShapeReduction(const DeviceTensorParams& src, const DeviceTensorParams& dst,
-                                const ReductionRoute& route, ReduceOp op);
+                                const ReductionRoute& route, ReduceOp op, bool accumulate);
 
     void encodeArgmaxTo(const DeviceTensorParams& src, const DeviceTensorParams& dst, size_t dim,
                         const MTL::ComputePipelineState* pso);

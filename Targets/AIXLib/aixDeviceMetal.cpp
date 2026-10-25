@@ -784,25 +784,10 @@ void DeviceMetal::reduce(const DeviceTensorParams& src, const DeviceTensorParams
         return;
     }
     auto route = buildReductionRoute(src, dst, axes);
-    if (!accumulate)
-    {
-        if (op == ReduceOp::kSum)
-        {
-            const int32_t zero = 0;
-            fill(&zero, DataType::kInt32, dst);
-        }
-        else if (dst.dtype == DataType::kFloat32 || dst.dtype == DataType::kFloat16 || dst.dtype == DataType::kBFloat16)
-        {
-            const float identity = -std::numeric_limits<float>::infinity();
-            fill(&identity, DataType::kFloat32, dst);
-        }
-        else fillMin(dst);
-    }
     recordExternalRead(src);
-    // Overwrite is initially a fill followed by the same destination-reading kernels.
-    recordExternalRead(dst);
+    if (accumulate) recordExternalRead(dst);
     flushPendingFusedWork();
-    executeShapeReduction(src, dst, route, op);
+    executeShapeReduction(src, dst, route, op, accumulate);
 }
 
 void DeviceMetal::argmax(const DeviceTensorParams& src, const DeviceTensorParams& dst, std::span<const size_t> axes)
@@ -965,7 +950,7 @@ void DeviceMetal::argmaxMask(const DeviceTensorParams& a, const DeviceTensorPara
 }
 
 void DeviceMetal::executeShapeReduction(const DeviceTensorParams& src, const DeviceTensorParams& dst,
-                                        const ReductionRoute& route, ReduceOp op)
+                                        const ReductionRoute& route, ReduceOp op, bool accumulate)
 {
     const bool isSum = op == ReduceOp::kSum;
     auto iDType = static_cast<size_t>(src.dtype);
@@ -985,6 +970,7 @@ void DeviceMetal::executeShapeReduction(const DeviceTensorParams& src, const Dev
         m_compEncoder->setBytes(&vecCountPerOutput, sizeof(vecCountPerOutput), 2);
         m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
         m_compEncoder->setBytes(&srcVecOffset, sizeof(srcVecOffset), 4);
+        m_compEncoder->setBytes(&accumulate, sizeof(accumulate), 5);
         m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
 
         freeTemporaryBuffer(bufSrc);
@@ -1003,6 +989,7 @@ void DeviceMetal::executeShapeReduction(const DeviceTensorParams& src, const Dev
         m_compEncoder->setBytes(&route.reduceExtent, sizeof(route.reduceExtent), 2);
         m_compEncoder->setBytes(&dst.size, sizeof(dst.size), 3);
         m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
+        m_compEncoder->setBytes(&accumulate, sizeof(accumulate), 5);
         m_compEncoder->dispatchThreadgroups({dst.size, 1, 1}, {threads, 1, 1});
 
         freeTemporaryBuffer(bufSrc);
@@ -1021,6 +1008,7 @@ void DeviceMetal::executeShapeReduction(const DeviceTensorParams& src, const Dev
         m_compEncoder->setBytes(&route.outerExtent, sizeof(route.outerExtent), 2);
         m_compEncoder->setBytes(&innerExtent, sizeof(innerExtent), 3);
         m_compEncoder->setBytes(&src.offset, sizeof(src.offset), 4);
+        m_compEncoder->setBytes(&accumulate, sizeof(accumulate), 5);
 
         NS::UInteger w = std::min(innerExtent, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
         m_compEncoder->dispatchThreads({innerExtent, 1, 1}, {w, 1, 1});
@@ -1035,6 +1023,7 @@ void DeviceMetal::executeShapeReduction(const DeviceTensorParams& src, const Dev
     m_compEncoder->setBuffer(bufSrc, 0, 0);
     m_compEncoder->setBuffer(bufDst, 0, 1);
     m_compEncoder->setBytes(route.plan.data(), route.plan.size() * sizeof(size_t), 2);
+    m_compEncoder->setBytes(&accumulate, sizeof(accumulate), 3);
 
     NS::UInteger w = std::min(dst.size, static_cast<size_t>(pso->maxTotalThreadsPerThreadgroup()));
     m_compEncoder->dispatchThreads({dst.size, 1, 1}, {w, 1, 1});

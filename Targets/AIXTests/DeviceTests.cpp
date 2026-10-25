@@ -3948,12 +3948,14 @@ TEST_CASE("DeviceMetal native reduction explicit route and dtype matrix")
             for (auto op : {ReduceOp::kSum, ReduceOp::kMax})
             {
                 const auto& values = op == ReduceOp::kSum ? fixture.sums : fixture.maxima;
-                auto expected = TensorValue(values.data(), values.size(), DataType::kFloat32,
-                                            fixture.output, &reference, dtype);
+                dst.fill(isIntegralDataType(dtype) ? 99.0f : std::numeric_limits<float>::quiet_NaN());
                 device->reduce(src.deviceParams(), dst.deviceParams(), op, fixture.axes);
                 device->synchronize();
-                CheckVectorApproxValues(dst, expected);
-                dst = TensorValue(3.0f, fixture.output, device.get(), dtype);
+                auto overwritten = dst.to(&reference).to(DataType::kFloat32);
+                for (size_t i = 0; i < values.size(); ++i) CHECK(overwritten.data<float>()[i] == values[i]);
+                std::vector<float> seeds(values.size());
+                for (size_t i = 0; i < seeds.size(); ++i) seeds[i] = static_cast<float>(i + 1);
+                dst = TensorValue(seeds.data(), seeds.size(), DataType::kFloat32, fixture.output, device.get(), dtype);
                 for (size_t call = 1; call <= 2; ++call)
                 {
                     device->reduce(src.deviceParams(), dst.deviceParams(), op, fixture.axes, true);
@@ -3961,10 +3963,51 @@ TEST_CASE("DeviceMetal native reduction explicit route and dtype matrix")
                     auto actual = dst.to(&reference).to(DataType::kFloat32);
                     for (size_t i = 0; i < values.size(); ++i)
                     {
-                        CHECK(actual.data<float>()[i] == (op == ReduceOp::kSum ? 3 + call * values[i] :
-                                                                                 std::max(3.0f, values[i])));
+                        CHECK(actual.data<float>()[i] == (op == ReduceOp::kSum ? seeds[i] + call * values[i] :
+                                                                                  std::max(seeds[i], values[i])));
                     }
                 }
+            }
+        }
+    }
+}
+
+TEST_CASE("DeviceMetal native reduction max preserves integer minimum identities")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    DeviceCPU reference;
+    struct LimitCase
+    {
+        DataType dtype;
+        int64_t minimum;
+    };
+    const LimitCase cases[] =
+    {
+        {DataType::kInt64, std::numeric_limits<int64_t>::lowest()},
+        {DataType::kInt32, std::numeric_limits<int32_t>::lowest()},
+        {DataType::kInt16, std::numeric_limits<int16_t>::lowest()},
+        {DataType::kInt8, std::numeric_limits<int8_t>::lowest()},
+        {DataType::kUInt8, 0}
+    };
+    for (const auto& [dtype, minimum] : cases)
+    {
+        CAPTURE(static_cast<size_t>(dtype));
+        auto broadcast = TensorValue(&minimum, 1, DataType::kInt64, {}, device.get(), dtype).broadcastTo({3, 4});
+        auto dense = broadcast.contiguous();
+        auto scalarInner = dense.reshape({4, 3});
+        for (const auto* src : {&broadcast, &dense, &scalarInner})
+        {
+            for (size_t axis : {size_t{0}, size_t{1}})
+            {
+                auto output = src->shape();
+                output[axis] = 1;
+                auto dst = TensorValue(99, output, device.get(), dtype);
+                const size_t axes[] = {axis};
+                device->reduce(src->deviceParams(), dst.deviceParams(), ReduceOp::kMax, axes);
+                device->synchronize();
+                auto actual = dst.to(&reference).to(DataType::kInt64);
+                for (size_t i = 0; i < actual.size(); ++i) CHECK(actual.data<int64_t>()[i] == minimum);
             }
         }
     }
@@ -4182,6 +4225,41 @@ TEST_CASE("DeviceMetal native reduction queued combine consumers and temporary r
         for (size_t j = 0; j < 2; ++j) CHECK(consumers[i].data<float>()[j] == 2 * (19 + 17 * i));
     }
     for (size_t i = 0; i < 2; ++i) CHECK(dst.data<float>()[i] == 1635);
+}
+
+TEST_CASE("DeviceMetal native reduction queues overwrite and accumulation with pending consumers")
+{
+    auto device = createDevice(DeviceType::kGPU_METAL);
+    if (!device) return;
+    const size_t axis[] = {1};
+    for (auto op : {ReduceOp::kSum, ReduceOp::kMax})
+    {
+        CAPTURE(static_cast<size_t>(op));
+        auto dst = TensorValue(3.0f, {2, 1}, device.get());
+        std::vector<TensorValue> before;
+        std::vector<TensorValue> after;
+        for (size_t i = 0; i < 96; ++i)
+        {
+            auto src = TensorValue(1.0f, {2, 8}, device.get());
+            auto produced = (src + src) * src;
+            before.push_back(dst + dst);
+            device->reduce(produced.deviceParams(), dst.deviceParams(), op, axis);
+            after.push_back(dst + dst);
+            device->reduce(produced.deviceParams(), dst.deviceParams(), op, axis, true);
+            dst += TensorValue(1.0f, {2, 1}, device.get());
+        }
+        device->synchronize();
+        const float finalValue = op == ReduceOp::kSum ? 33 : 3;
+        for (size_t i = 0; i < before.size(); ++i)
+        {
+            for (size_t j = 0; j < dst.size(); ++j)
+            {
+                CHECK(before[i].data<float>()[j] == (i == 0 ? 6 : 2 * finalValue));
+                CHECK(after[i].data<float>()[j] == (op == ReduceOp::kSum ? 32 : 4));
+            }
+        }
+        for (size_t i = 0; i < dst.size(); ++i) CHECK(dst.data<float>()[i] == finalValue);
+    }
 }
 
 TEST_CASE("DeviceMetal native reduction preserves accumulator and destination combination order")
