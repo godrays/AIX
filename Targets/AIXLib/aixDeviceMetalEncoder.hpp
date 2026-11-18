@@ -243,9 +243,12 @@ private:
         }
         // Reorder only within the existing command buffer, never across a commit
         // boundary. RAW/WAR/WAW edges preserve the original dispatch semantics.
-        for (size_t i = 0; i < m_nodeCount; ++i)
+        // Recent producers typically determine the level. An earlier dispatch
+        // below that level cannot raise it, regardless of its bindings.
+        for (size_t i = m_nodeCount; i > 0; --i)
         {
-            if (dependsOn(node, m_nodes[i])) node.level = std::max(node.level, m_nodes[i].level + 1);
+            const auto& prior = m_nodes[i - 1];
+            if (prior.level >= node.level && dependsOn(node, prior)) node.level = prior.level + 1;
         }
         ++m_nodeCount;
     }
