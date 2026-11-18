@@ -121,6 +121,24 @@ public:
         std::memcpy(m_bytes.data() + binding.offset, bytes, length);
     }
 
+    // A kernel with a proven contiguous access span need not conflict with
+    // disjoint slices bound to the same underlying allocation.
+    void setBufferRange(const MTL::Buffer* buffer, NS::UInteger offset, NS::UInteger length, NS::UInteger index)
+    {
+        setBuffer(buffer, offset, index);
+        auto& range = m_bindings[index].range;
+        if (range.known && offset <= buffer->length() && length <= buffer->length() - offset)
+        {
+            range.begin += offset;
+            range.end = range.begin + length;
+            if (range.heap)
+            {
+                range.heapBegin += offset;
+                range.heapEnd = range.heapBegin + length;
+            }
+        }
+    }
+
     void dispatchThreads(MTL::Size grid, MTL::Size group)
     {
         record(grid, group, false);

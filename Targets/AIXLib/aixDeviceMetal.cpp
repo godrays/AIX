@@ -1115,6 +1115,29 @@ void DeviceMetal::sliceSet(const DeviceTensorParams& src, const DeviceTensorPara
     auto bufDst     = m_allocMap[dst.data];
     auto compFuncPSO = m_compFuncPSOSliceSet[static_cast<size_t>(src.dtype)];
 
+    // A dense source and a unit-step slice with a singleton outer extent
+    // describe one contiguous interval. The packed copy must have no tail.
+    if (step == 1 && src.isContiguous && dst.isContiguous && src.dtype == dst.dtype &&
+        src.size % TOTAL_COMPONENT_COUNT == 0 &&
+        std::all_of(dst.shape.begin(), dst.shape.begin() + dim, [](size_t n) { return n == 1; }))
+    {
+        const auto dstOffset = dst.offset + start * dst.strides[dim];
+        if (src.offset % TOTAL_COMPONENT_COUNT == 0 && dstOffset % TOTAL_COMPONENT_COUNT == 0)
+        {
+            const size_t size = dataTypeSize(src.dtype);
+            auto type = static_cast<size_t>(src.dtype);
+            auto pso = m_compFuncPSOCopyAA[type][type];
+            const size_t count = src.size / TOTAL_COMPONENT_COUNT;
+            m_compEncoder->setComputePipelineState(pso);
+            m_compEncoder->setBufferRange(bufSrc, src.offset * size, src.size * size, 0);
+            m_compEncoder->setBufferRange(bufDst, dstOffset * size, src.size * size, 1);
+            m_compEncoder->dispatchThreads({count, 1, 1}, {std::min(count, pso->maxTotalThreadsPerThreadgroup()), 1, 1});
+            freeTemporaryBuffer(bufSrc);
+            commitBatchQueue();
+            return;
+        }
+    }
+
     // Serialize resources and states to be used by the GPU.
     m_compEncoder->setComputePipelineState(compFuncPSO);
     m_compEncoder->setBuffer(bufSrc,     0, 0);
