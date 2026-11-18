@@ -47,7 +47,7 @@ namespace aix::metal
 
 #define ALLOCATOR_ALIGNMENT_SIZE            256
 #define MAX_CMD_BATCH_SIZE                  4096
-#define DISPATCH_BATCH_COMMIT_THRESHOLD     50
+#define DISPATCH_BATCH_COMMIT_THRESHOLD     200
 #define ALLOCATION_BYTE_ALIGNMENT_SIZE      32      // Should be power of two and min 32 bytes.
 #define VECTOR_TYPE_COMPONENT_COUNT         4       // i.e. float4 has 4 components.
 #define BATCH_PROCESS_SIZE_PER_THREAD       1       // i.e. each GPU thread will access/process 16 of float4 per dispatch.
@@ -306,6 +306,7 @@ protected:
     std::unique_ptr<aix::fuse::FuseEngine>  m_fuseEngine;
     std::unique_ptr<aixDeviceMetalKernelGen>  m_kernelGen;
     size_t   m_currentBatchSize{0};
+    size_t   m_submitThreshold{32};
     size_t   m_maxBatchSize{0};
     size_t   m_maxThreadsPerThreadgroup{1024};
     size_t   m_maxWorkingSetSize{0};

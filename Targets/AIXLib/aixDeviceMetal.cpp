@@ -1376,6 +1376,7 @@ void DeviceMetal::commit()
     // Update batch size metrics.
     m_maxBatchSize = std::max(m_currentBatchSize, m_maxBatchSize);
     m_currentBatchSize = 0;
+    m_submitThreshold = std::min<size_t>(DISPATCH_BATCH_COMMIT_THRESHOLD, m_submitThreshold * 2);
     m_currentWorkingSetSize = 0;
 }
 
@@ -1399,12 +1400,13 @@ void DeviceMetal::synchronize()
         m_bufferCache->recycle(buffer);
     }
     m_tempBuffers.clear();
+    m_submitThreshold = 32;
 }
 
 void DeviceMetal::flushPendingFusedWork()
 {
     m_fuseEngine->flush();
-    if (m_currentBatchSize >= DISPATCH_BATCH_COMMIT_THRESHOLD)
+    if (m_currentBatchSize >= m_submitThreshold)
     {
         commit();
     }
